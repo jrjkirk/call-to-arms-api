@@ -18,6 +18,46 @@ class Player(SQLModel, table=True):
     default_faction: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     active: bool = True
-    titles: Optional[str] = Field(default=None)  # JSON list, e.g. ["Champion of the Empire 2026"]
-    admin_notes: Optional[str] = Field(default=None)  # private notes for admins
-    announced_achievements: Optional[str] = Field(default=None)  # JSON list of achievements already announced
+    titles: Optional[str] = Field(default=None)
+    admin_notes: Optional[str] = Field(default=None)
+    announced_achievements: Optional[str] = Field(default=None)
+
+
+class LeagueResult(SQLModel, table=True):
+    """Submitted Old World League game results."""
+    __tablename__ = "league_results"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    player_1_id: Optional[int] = Field(default=None, index=True)
+    player_1_name: str
+    player_2_id: Optional[int] = Field(default=None, index=True)
+    player_2_name: str
+    result: str
+    result_date: str
+
+    player_1_faction: Optional[str] = None
+    player_2_faction: Optional[str] = None
+    player_1_painting_bonus: Optional[str] = None
+    player_2_painting_bonus: Optional[str] = None
+    game_type: str = "Competitive"
+
+    player_1_rating_before: Optional[float] = None
+    player_2_rating_before: Optional[float] = None
+    player_1_rating_after: Optional[float] = None
+    player_2_rating_after: Optional[float] = None
+    k_factor_used: Optional[int] = None
+
+
+class LeagueRating(SQLModel, table=True):
+    """Current Old World League rating, separate from the shared player profile."""
+    __tablename__ = "league_ratings"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    player_id: int = Field(index=True)
+    player_name: str
+    rating: float = 1000.0
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
