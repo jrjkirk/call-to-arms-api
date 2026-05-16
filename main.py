@@ -51,7 +51,6 @@ def get_player(player_id: int, session: Session = Depends(get_session)):
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # League data
     rating_row = session.exec(
         select(LeagueRating).where(LeagueRating.player_id == player_id)
     ).first()
@@ -66,12 +65,10 @@ def get_player(player_id: int, session: Session = Depends(get_session)):
         ).all()
         rank = len(higher) + 1
 
-    # Cross-system signup data
     signups = fetch_player_signups(session, player_id)
     sign_counts = signup_counts_per_system(signups)
     fac_usage = faction_usage_per_system(signups)
 
-    # Achievements
     first_winner = first_league_winner_id(session)
     achievements = compute_achievements(
         player_id, record, results, fac_usage, elo_history, first_winner
@@ -81,7 +78,6 @@ def get_player(player_id: int, session: Session = Depends(get_session)):
         for a in achievements
     ]
 
-    # Recent league results for the profile (last 5)
     recent = results[:5]
 
     return {
@@ -164,12 +160,23 @@ def signups_stats(system: str, week: str, session: Session = Depends(get_session
     }
 
 
+def _public_vibe_display(a_vibe: str | None, b_vibe: str | None) -> str | None:
+    """Match the Streamlit app's public vibe display logic.
+
+    If both vibes are set and agree, show that vibe.
+    If only one is set, show it.
+    If they disagree or both are missing, return None — let the card show no Type at all
+    rather than the noisy "Mixed"/"Either" labels.
+    """
+    if a_vibe and b_vibe:
+        if a_vibe.strip().lower() == b_vibe.strip().lower():
+            return a_vibe
+        return None
+    return a_vibe or b_vibe or None
+
+
 @app.get("/pairings")
 def get_pairings(system: str, week: str, session: Session = Depends(get_session)):
-    """Return published pairings for a given system+week with denormalised signup data.
-
-    If the week isn't published yet, returns published=False and an empty matchups list.
-    """
     gate = session.exec(
         select(PublishState).where(
             (PublishState.week == week) & (PublishState.system == system)
@@ -196,16 +203,11 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
         a = signups_by_id.get(p.a_signup_id)
         b = signups_by_id.get(p.b_signup_id) if p.b_signup_id else None
 
-        # Game type for public display: combine vibes if both present
-        game_type = None
-        if a and a.vibe and b and b.vibe:
-            game_type = a.vibe if a.vibe == b.vibe else "Mixed"
-        elif a and a.vibe:
-            game_type = a.vibe
-        elif b and b.vibe:
-            game_type = b.vibe
+        game_type = _public_vibe_display(
+            a.vibe if a else None,
+            b.vibe if b else None,
+        )
 
-        # Points: prefer matching points, otherwise show range
         a_pts = a.points if a else None
         b_pts = b.points if b else None
         if a_pts and b_pts:
@@ -213,7 +215,6 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
         else:
             points = str(a_pts or b_pts) if (a_pts or b_pts) else None
 
-        # ETA: latest of the two
         a_eta = a.eta if a else None
         b_eta = b.eta if b else None
         if a_eta and b_eta:
