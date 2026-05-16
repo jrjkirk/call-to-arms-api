@@ -1,33 +1,46 @@
+"""Database engine + read-only safety guard.
+
+We point at the existing Supabase Postgres via the transaction pooler. To stop
+the new app accidentally corrupting production data while we're still building,
+we install a `before_flush` SQLAlchemy listener that raises on any attempted
+write to tables we haven't explicitly opted-in.
+
+WRITE_ALLOWED_TABLES is the explicit allow-list. As we build out write features
+table-by-table, we add the table name here.
+"""
 import os
-from sqlmodel import create_engine, Session
-from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
+from sqlalchemy import event
+from sqlmodel import Session, create_engine
+from sqlalchemy.pool import NullPool
 
-load_dotenv()  # In local dev, reads .env file. In production (Fly), env vars come from secrets.
+load_dotenv()
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set. Add it to .env locally or set as a Fly secret in production.")
+DATABASE_URL = os.environ["DATABASE_URL"]
 
-# NullPool: don't pool connections client-side. Supabase's transaction pooler handles pooling.
-engine = create_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+# Tables the app is allowed to write to. Anything not in this set will raise
+# on attempted flush. Add tables here as we build out their write features.
+WRITE_ALLOWED_TABLES: set[str] = {
+    "users",  # auth: created on login, updated on claim-profile
+}
 
-# Read-only guard: refuse to commit anything until we deliberately enable writes later.
-READ_ONLY = True
+engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+
+
+@event.listens_for(Session, "before_flush")
+def _block_unallowed_writes(session, flush_context, instances):
+    """Raise if any pending change touches a table not in WRITE_ALLOWED_TABLES."""
+    pending = list(session.new) + list(session.dirty) + list(session.deleted)
+    for obj in pending:
+        table_name = getattr(obj.__class__, "__tablename__", None)
+        if table_name and table_name not in WRITE_ALLOWED_TABLES:
+            raise RuntimeError(
+                f"Write to '{table_name}' is not currently permitted. "
+                f"Allowed tables: {sorted(WRITE_ALLOWED_TABLES)}"
+            )
+
 
 def get_session():
-    """FastAPI dependency: opens a session per request, closes it after.
-    
-    If READ_ONLY is True, we hook into the session to block any flushes (i.e. writes)
-    from reaching the database. This is a safety net while we're early in the migration —
-    it makes it impossible to accidentally mutate production data.
-    """
+    """FastAPI dependency: yields a database session that closes itself."""
     with Session(engine) as session:
-        if READ_ONLY:
-            @event.listens_for(session, "before_flush")
-            def _block_flush(session, flush_context, instances):
-                raise RuntimeError("Database is in READ_ONLY mode. No writes permitted.")
         yield session
-
-# Late import to keep the file readable
-from sqlalchemy import event
