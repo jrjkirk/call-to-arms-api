@@ -1,11 +1,21 @@
-from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from database import get_session
-from models import Player, LeagueResult, LeagueRating, Signup
-from services import compute_league_record, fetch_player_results
+from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState
+from services import (
+    compute_league_record,
+    fetch_player_results,
+    fetch_player_signups,
+    signup_counts_per_system,
+    faction_usage_per_system,
+    build_elo_history,
+    first_league_winner_id,
+    compute_achievements,
+    player_titles,
+    ACHIEVEMENT_DESCRIPTIONS,
+)
 
 app = FastAPI()
 
@@ -31,45 +41,67 @@ def health():
 
 @app.get("/players")
 def list_players(session: Session = Depends(get_session)):
-    """Return all active players, ordered by name."""
     statement = select(Player).where(Player.active == True).order_by(Player.name)
     return session.exec(statement).all()
 
 
 @app.get("/players/{player_id}")
 def get_player(player_id: int, session: Session = Depends(get_session)):
-    """Return one player plus their league stats and rank."""
     player = session.get(Player, player_id)
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    rating_stmt = select(LeagueRating).where(LeagueRating.player_id == player_id)
-    rating = session.exec(rating_stmt).first()
-
-    # Rank: how does this player's rating compare?
-    rank = None
-    if rating is not None:
-        higher_count_stmt = select(LeagueRating).where(LeagueRating.rating > rating.rating)
-        higher = session.exec(higher_count_stmt).all()
-        rank = len(higher) + 1
-
+    # League data
+    rating_row = session.exec(
+        select(LeagueRating).where(LeagueRating.player_id == player_id)
+    ).first()
     results = fetch_player_results(session, player_id)
     record = compute_league_record(player_id, results)
+    elo_history = build_elo_history(player_id, results)
+
+    rank = None
+    if rating_row is not None:
+        higher = session.exec(
+            select(LeagueRating).where(LeagueRating.rating > rating_row.rating)
+        ).all()
+        rank = len(higher) + 1
+
+    # Cross-system signup data
+    signups = fetch_player_signups(session, player_id)
+    sign_counts = signup_counts_per_system(signups)
+    fac_usage = faction_usage_per_system(signups)
+
+    # Achievements
+    first_winner = first_league_winner_id(session)
+    achievements = compute_achievements(
+        player_id, record, results, fac_usage, elo_history, first_winner
+    )
+    achievements_detailed = [
+        {"name": a, "description": ACHIEVEMENT_DESCRIPTIONS.get(a, "")}
+        for a in achievements
+    ]
+
+    # Recent league results for the profile (last 5)
+    recent = results[:5]
 
     return {
         "player": player,
+        "titles": player_titles(player),
+        "achievements": achievements_detailed,
+        "signup_counts": sign_counts,
+        "faction_usage": fac_usage,
         "league": {
-            "rating": rating.rating if rating else None,
+            "rating": rating_row.rating if rating_row else None,
             "rank": rank,
             **record,
-            "recent_results": results[:10],
+            "recent_results": recent,
+            "elo_history": elo_history,
         },
     }
 
 
 @app.get("/league/rankings")
 def league_rankings(session: Session = Depends(get_session)):
-    """Return league standings, ordered by rating descending."""
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
@@ -83,20 +115,19 @@ def league_rankings(session: Session = Depends(get_session)):
         results = fetch_player_results(session, player.id)
         record = compute_league_record(player.id, results)
 
-        # Figure out the player's most-played faction across league results
         faction_counts: dict[str, int] = {}
         for r in results:
-            faction = r.player_1_faction if r.player_1_id == player.id else r.player_2_faction
-            if faction:
-                faction_counts[faction] = faction_counts.get(faction, 0) + 1
-        most_played_faction = max(faction_counts, key=faction_counts.get) if faction_counts else None
+            f = r.player_1_faction if r.player_1_id == player.id else r.player_2_faction
+            if f:
+                faction_counts[f] = faction_counts.get(f, 0) + 1
+        most_played = max(faction_counts, key=faction_counts.get) if faction_counts else None
 
         rankings.append({
             "rank": rank,
             "player_id": player.id,
             "name": player.name,
             "default_faction": player.default_faction,
-            "most_played_faction": most_played_faction,
+            "most_played_faction": most_played,
             "rating": rating.rating,
             **record,
         })
@@ -106,24 +137,20 @@ def league_rankings(session: Session = Depends(get_session)):
 
 @app.get("/signups/stats")
 def signups_stats(system: str, week: str, session: Session = Depends(get_session)):
-    """Counts for the Call to Arms tab: total signed up, newcomers, veterans for the given week+system."""
-    # Latest signup per player_id wins (a player may have edited their signup multiple times).
-    rows_stmt = (
+    rows = session.exec(
         select(Signup)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .order_by(Signup.created_at.desc())
-    )
-    all_rows = session.exec(rows_stmt).all()
+    ).all()
 
-    latest_by_player: dict[int | None, Signup] = {}
-    for s in all_rows:
+    latest_by_player: dict = {}
+    for s in rows:
         key = s.player_id if s.player_id is not None else id(s)
         if key not in latest_by_player:
             latest_by_player[key] = s
 
     signups = list(latest_by_player.values())
-
     total = len(signups)
     newcomers = sum(1 for s in signups if (s.experience or "").lower().startswith("new"))
     veterans = sum(1 for s in signups if (s.experience or "").lower().startswith("vet"))
@@ -134,4 +161,87 @@ def signups_stats(system: str, week: str, session: Session = Depends(get_session
         "signed_up": total,
         "newcomers": newcomers,
         "veterans": veterans,
+    }
+
+
+@app.get("/pairings")
+def get_pairings(system: str, week: str, session: Session = Depends(get_session)):
+    """Return published pairings for a given system+week with denormalised signup data.
+
+    If the week isn't published yet, returns published=False and an empty matchups list.
+    """
+    gate = session.exec(
+        select(PublishState).where(
+            (PublishState.week == week) & (PublishState.system == system)
+        )
+    ).first()
+
+    if not gate or not gate.published:
+        return {"published": False, "system": system, "week": week, "matchups": []}
+
+    prs = session.exec(
+        select(Pairing)
+        .where((Pairing.week == week) & (Pairing.system == system))
+        .order_by(Pairing.id)
+    ).all()
+
+    signup_ids = {p.a_signup_id for p in prs} | {p.b_signup_id for p in prs if p.b_signup_id}
+    signups_by_id: dict[int, Signup] = {}
+    if signup_ids:
+        rows = session.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+        signups_by_id = {s.id: s for s in rows}
+
+    matchups = []
+    for p in prs:
+        a = signups_by_id.get(p.a_signup_id)
+        b = signups_by_id.get(p.b_signup_id) if p.b_signup_id else None
+
+        # Game type for public display: combine vibes if both present
+        game_type = None
+        if a and a.vibe and b and b.vibe:
+            game_type = a.vibe if a.vibe == b.vibe else "Mixed"
+        elif a and a.vibe:
+            game_type = a.vibe
+        elif b and b.vibe:
+            game_type = b.vibe
+
+        # Points: prefer matching points, otherwise show range
+        a_pts = a.points if a else None
+        b_pts = b.points if b else None
+        if a_pts and b_pts:
+            points = str(min(a_pts, b_pts)) if a_pts == b_pts else f"{min(a_pts, b_pts)}-{max(a_pts, b_pts)}"
+        else:
+            points = str(a_pts or b_pts) if (a_pts or b_pts) else None
+
+        # ETA: latest of the two
+        a_eta = a.eta if a else None
+        b_eta = b.eta if b else None
+        if a_eta and b_eta:
+            eta = max(a_eta, b_eta)
+        else:
+            eta = a_eta or b_eta
+
+        is_bye = b is None
+
+        matchups.append({
+            "id": p.id,
+            "player_a_name": a.player_name if a else f"A#{p.a_signup_id}",
+            "player_a_faction": p.a_faction or (a.faction if a else None),
+            "player_b_name": b.player_name if b else None,
+            "player_b_faction": p.b_faction or (b.faction if b else None) if b else None,
+            "is_bye": is_bye,
+            "game_type": game_type,
+            "eta": eta,
+            "points": points,
+            "prearranged": p.prearranged,
+        })
+
+    return {
+        "published": True,
+        "system": system,
+        "week": week,
+        "matchups": matchups,
+        "total_players": len({p.a_signup_id for p in prs} | {p.b_signup_id for p in prs if p.b_signup_id}),
+        "total_matchups": len([m for m in matchups if not m["is_bye"]]),
+        "byes": len([m for m in matchups if m["is_bye"]]),
     }

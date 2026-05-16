@@ -24,7 +24,6 @@ class Player(SQLModel, table=True):
 
 
 class Signup(SQLModel, table=True):
-    """Call to Arms responses per player/week/system."""
     __tablename__ = "signups"
     __table_args__ = {"extend_existing": True}
 
@@ -48,8 +47,56 @@ class Signup(SQLModel, table=True):
     can_demo: bool = False
 
 
+class Pairing(SQLModel, table=True):
+    __tablename__ = "pairings"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    week: str
+    system: str
+
+    a_signup_id: int
+    b_signup_id: Optional[int] = None
+
+    status: str = "pending"
+    table: Optional[str] = None
+
+    a_faction: Optional[str] = None
+    b_faction: Optional[str] = None
+
+    prearranged: bool = Field(default=False)
+
+
+class PublishState(SQLModel, table=True):
+    __tablename__ = "publish_state"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    week: str
+    system: str
+    published: bool = False
+
+
+class PairingBlock(SQLModel, table=True):
+    __tablename__ = "pairing_blocks"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    player_a_id: int
+    player_b_id: int
+    note: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AppSetting(SQLModel, table=True):
+    __tablename__ = "app_settings"
+
+    key: str = Field(primary_key=True)
+    value: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class LeagueResult(SQLModel, table=True):
-    """Submitted Old World League game results."""
     __tablename__ = "league_results"
     __table_args__ = {"extend_existing": True}
 
@@ -77,7 +124,6 @@ class LeagueResult(SQLModel, table=True):
 
 
 class LeagueRating(SQLModel, table=True):
-    """Current Old World League rating, separate from the shared player profile."""
     __tablename__ = "league_ratings"
     __table_args__ = {"extend_existing": True}
 
