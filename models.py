@@ -132,3 +132,16 @@ class LeagueRating(SQLModel, table=True):
     player_name: str
     rating: float = 1000.0
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class User(SQLModel, table=True):
+    """An authenticated user. Links a Discord identity to a player_id (after claim)."""
+    __tablename__ = "users"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    discord_id: str = Field(unique=True, index=True)
+    discord_name: str
+    avatar_url: Optional[str] = None
+    player_id: Optional[int] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login_at: datetime = Field(default_factory=datetime.utcnow)

@@ -16,6 +16,7 @@ from services import (
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
+from auth import router as auth_router
 
 app = FastAPI()
 
@@ -26,12 +27,15 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        "https://call-to-arms-web.vercel.app",
     ],
     allow_origin_regex=r"https://call-to-arms-web.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 
 @app.get("/health")
@@ -160,14 +164,7 @@ def signups_stats(system: str, week: str, session: Session = Depends(get_session
     }
 
 
-def _public_vibe_display(a_vibe: str | None, b_vibe: str | None) -> str | None:
-    """Match the Streamlit app's public vibe display logic.
-
-    If both vibes are set and agree, show that vibe.
-    If only one is set, show it.
-    If they disagree or both are missing, return None — let the card show no Type at all
-    rather than the noisy "Mixed"/"Either" labels.
-    """
+def _public_vibe_display(a_vibe, b_vibe):
     if a_vibe and b_vibe:
         if a_vibe.strip().lower() == b_vibe.strip().lower():
             return a_vibe
