@@ -1,9 +1,9 @@
-"""Database engine + read-only safety guard.
+"""Database engine + table-level write guard.
 
 We point at the existing Supabase Postgres via the transaction pooler. To stop
 the new app accidentally corrupting production data while we're still building,
-we install a `before_flush` SQLAlchemy listener that raises on any attempted
-write to tables we haven't explicitly opted-in.
+a `before_flush` listener raises on any attempted write to tables we haven't
+explicitly opted in.
 
 WRITE_ALLOWED_TABLES is the explicit allow-list. As we build out write features
 table-by-table, we add the table name here.
@@ -18,10 +18,11 @@ load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-# Tables the app is allowed to write to. Anything not in this set will raise
-# on attempted flush. Add tables here as we build out their write features.
+# Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
-    "users",  # auth: created on login, updated on claim-profile
+    "users",     # auth: created on login, updated on claim-profile
+    "signups",   # Call to Arms form: insert/update/delete own signup
+    "pairings",  # drop-out flow deletes prearranged pairings involving the dropper
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
