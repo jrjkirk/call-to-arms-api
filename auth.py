@@ -29,6 +29,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import get_session
@@ -252,6 +253,39 @@ def claim_player(
     db.commit()
     db.refresh(user)
     return {"ok": True, "player_id": player_id}
+
+
+class CreateProfileRequest(BaseModel):
+    name: str
+    default_faction: Optional[str] = None
+
+
+@router.post("/create-profile")
+def create_profile(
+    body: CreateProfileRequest,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Create a brand-new player row and link it to the current user.
+
+    Used for people who have never played before (no existing row to claim).
+    """
+    if user.player_id is not None:
+        raise HTTPException(status_code=400, detail="You already have a linked player profile")
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name cannot be blank")
+
+    player = Player(name=name, default_faction=body.default_faction or None, active=True)
+    db.add(player)
+    db.flush()  # populate player.id before linking
+
+    user.player_id = player.id
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"ok": True, "player_id": player.id}
 
 
 @router.post("/logout")

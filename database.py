@@ -23,6 +23,7 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "users",     # auth: created on login, updated on claim-profile
     "signups",   # Call to Arms form: insert/update/delete own signup
     "pairings",  # drop-out flow deletes prearranged pairings involving the dropper
+    "players",   # only write is inserting new players via create-profile
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
