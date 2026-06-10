@@ -11,7 +11,12 @@ Flow:
 
 Sessions are stateless: the cookie value is `{user_id}.{hmac-signature}`.
 We trust the cookie iff the signature verifies with our SESSION_SECRET.
-That means no session table to manage; logout is just "clear the cookie".
+
+COOKIE NOTE: cta_session is SameSite=None + Secure, NOT Lax. The frontend
+(vercel.app) and backend (fly.dev) are different sites, and browsers refuse
+to attach Lax cookies to cross-site fetch() calls — only None travels.
+The short-lived cta_oauth_state cookie stays Lax because it's only needed
+during top-level redirects, where Lax is sent and is the safer choice.
 """
 import hmac
 import hashlib
@@ -22,15 +27,13 @@ from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from sqlmodel import Session, select
 
 from database import get_session
 from models import User, Player
 
-# Read config from env. These are set as Fly secrets in production
-# and in .env locally.
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
@@ -38,7 +41,7 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 DISCORD_API = "https://discord.com/api"
-SCOPES = "identify"  # we only want their username + avatar, nothing else
+SCOPES = "identify"
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -100,8 +103,6 @@ def discord_login(request: Request):
         raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
 
     state = secrets.token_urlsafe(24)
-    # Discord requires we redirect back to a URL we pre-registered in the
-    # Developer Portal. This must match exactly.
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
     params = {
         "client_id": DISCORD_CLIENT_ID,
@@ -109,13 +110,11 @@ def discord_login(request: Request):
         "scope": SCOPES,
         "redirect_uri": redirect_uri,
         "state": state,
-        "prompt": "none",  # if they're already authorised, skip the "Allow?" screen
+        "prompt": "none",
     }
     auth_url = f"{DISCORD_API}/oauth2/authorize?{urlencode(params)}"
 
     response = RedirectResponse(auth_url)
-    # Stash the state value briefly so we can check it matches in callback.
-    # Short max_age (5 min) so stale logins don't linger.
     response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax")
     return response
 
@@ -134,7 +133,6 @@ async def discord_callback(
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # Exchange the one-time code for an access token
         token_resp = await client.post(
             f"{DISCORD_API}/oauth2/token",
             data={
@@ -152,7 +150,6 @@ async def discord_callback(
         if not access_token:
             raise HTTPException(status_code=400, detail="No access_token in Discord response")
 
-        # Now fetch the Discord user's profile
         user_resp = await client.get(
             f"{DISCORD_API}/users/@me",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -162,8 +159,6 @@ async def discord_callback(
         discord_user = user_resp.json()
 
     discord_id = discord_user["id"]
-    # Discord supports both old-style "user#1234" and new global usernames.
-    # Prefer global_name if set; fall back to username.
     discord_name = discord_user.get("global_name") or discord_user.get("username", "Unknown")
     avatar_hash = discord_user.get("avatar")
     avatar_url = (
@@ -171,7 +166,6 @@ async def discord_callback(
         if avatar_hash else None
     )
 
-    # Upsert the users row
     existing = db.exec(select(User).where(User.discord_id == discord_id)).first()
     if existing:
         existing.discord_name = discord_name
@@ -190,29 +184,27 @@ async def discord_callback(
     db.commit()
     db.refresh(user)
 
-    # Issue the session cookie and redirect back to the frontend
     cookie_value = _make_session_cookie(user.id)
     response = RedirectResponse(FRONTEND_URL)
+    # SameSite=None + Secure: the ONLY combination browsers will attach to a
+    # cross-site fetch() from the Vercel frontend. Lax silently never arrives.
+    # Chrome/Firefox treat http://localhost as trustworthy, so secure=True
+    # still works for local dev.
     response.set_cookie(
         "cta_session",
         cookie_value,
         max_age=60 * 60 * 24 * 30,  # 30 days
         httponly=True,
-        samesite="lax",
-        secure=BACKEND_URL.startswith("https://"),
+        samesite="none",
+        secure=True,
     )
-    # Clean up the short-lived OAuth state cookie
     response.delete_cookie("cta_oauth_state")
     return response
 
 
 @router.get("/me")
 def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_session)):
-    """Frontend calls this to ask "who am I logged in as?"
-
-    Returns the user row, plus the linked player (if claimed), and a list of
-    candidate players for the claim-profile screen (when user.player_id is None).
-    """
+    """Frontend calls this to ask "who am I logged in as?"."""
     if user is None:
         return {"authenticated": False}
 
@@ -222,7 +214,6 @@ def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_s
 
     candidates = []
     if user.player_id is None:
-        # Show every active player as a candidate for claim-profile
         candidates = db.exec(
             select(Player).where(Player.active == True).order_by(Player.name)
         ).all()
@@ -244,12 +235,7 @@ def claim_player(
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """User picks an existing player from the dropdown — link them.
-
-    Refuses if this user already has a linked player, or if that player is
-    already claimed by a different Discord user. Either case warrants
-    admin attention, not silent overwrite.
-    """
+    """User picks an existing player from the dropdown — link them."""
     if user.player_id is not None:
         raise HTTPException(status_code=400, detail="You already have a linked player profile")
 
@@ -269,8 +255,13 @@ def claim_player(
 
 
 @router.post("/logout")
-def logout():
-    """Clear the session cookie."""
-    response = RedirectResponse(FRONTEND_URL, status_code=303)
-    response.delete_cookie("cta_session")
-    return response
+def logout(response: Response):
+    """Clear the session cookie. Returns JSON because the frontend calls this
+    via fetch(); a redirect response would just confuse the fetch."""
+    response.delete_cookie(
+        "cta_session",
+        httponly=True,
+        samesite="none",
+        secure=True,
+    )
+    return {"ok": True}
