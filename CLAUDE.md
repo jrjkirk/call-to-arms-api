@@ -27,6 +27,8 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `signups.py` | Signup CRUD endpoints |
 | `players.py` | Player read endpoints |
 | `league.py` | Rankings, results endpoints |
+| `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |
+| `pairings_engine.py` | Pairing generation engine — faithful port of the original Streamlit matcher |
 
 ## Auth patterns
 
@@ -82,6 +84,28 @@ fly status                  # machine health
 - Use `db.flush()` before linking foreign keys in the same transaction (to populate auto-generated IDs).
 - All new write endpoints need the table in `WRITE_ALLOWED_TABLES` first.
 - Request bodies use Pydantic `BaseModel` (not SQLModel) — keep input schemas separate from table models.
+
+## Pairing engine (pairings_engine.py)
+
+`pairings_engine.py` is a **faithful port** of the original Streamlit matcher. Do not reorder,
+"optimise", or change the algorithm logic without explicit instruction.
+
+Key invariants:
+- **9-tuple `_pair_dist` order (must not change):** `(block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)`
+- Intro pre-pass applies to The Old World and The Horus Heresy only (never Kill Team)
+- T&T / 3-way grouping intentionally removed (club never uses it)
+- Odd numbers produce a single BYE via the greedy fallback — this is correct behaviour
+- Cron/scheduling is out of scope; the engine is invoked only by admin HTTP endpoints
+
+Admin pairings endpoints (all in `admin.py`, all require caller to hold the system scope):
+- `POST /admin/pairings/preview` — dry run, no DB writes
+- `POST /admin/pairings/generate` — delete pending non-prearranged, generate + persist
+- `GET /admin/pairings?system=&week=` — fetch saved rows + publish state
+- `POST /admin/pairings/publish` — upsert PublishState
+- `POST /admin/pairings/save` — grid save-back (writes faction/vibe/eta/pts to Signup rows too)
+- `DELETE /admin/pairings` — delete specific pairing IDs
+- `POST /admin/pairings/post-discord` — plain-text post to system Discord webhook
+- `GET /admin/pairings/signup-list?system=&week=` — de-duped signup list for grid dropdowns
 
 ## When things break
 
