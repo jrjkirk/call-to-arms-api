@@ -27,6 +27,7 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "league_results", # result submission + full ratings recalc
     "league_ratings", # result submission + full ratings recalc
     "admin_roles",    # admin appointment/removal
+    "pairing_blocks", # admin block add/remove
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
