@@ -20,10 +20,12 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
-    "users",     # auth: created on login, updated on claim-profile
-    "signups",   # Call to Arms form: insert/update/delete own signup
-    "pairings",  # drop-out flow deletes prearranged pairings involving the dropper
-    "players",   # only write is inserting new players via create-profile
+    "users",          # auth: created on login, updated on claim-profile
+    "signups",        # Call to Arms form: insert/update/delete own signup
+    "pairings",       # drop-out flow deletes prearranged pairings involving the dropper
+    "players",        # only write is inserting new players via create-profile
+    "league_results", # result submission + full ratings recalc
+    "league_ratings", # result submission + full ratings recalc
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
