@@ -5,8 +5,10 @@ Permission model:
   Can do everything and is the only role that can appoint/remove scope admins.
 - Scope admin: a row in admin_roles (user_id, scope). One row per scope held.
 """
-from typing import Optional
+import os
+from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -19,7 +21,12 @@ from auth import (
     require_super_admin,
     require_user,
 )
-from models import AdminRole, LeagueResult, PairingBlock, Pairing, Player, Signup, User
+from models import AdminRole, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from pairings_engine import generate
+
+DISCORD_TOW_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_TOW_PAIRINGS_WEBHOOK_URL", "")
+DISCORD_HH_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_HH_PAIRINGS_WEBHOOK_URL", "")
+DISCORD_KT_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_KT_PAIRINGS_WEBHOOK_URL", "")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -359,3 +366,466 @@ def admin_history(
             "player_b_faction": (p.b_faction or (b.faction if b else None)) if b else None,
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Pairings — admin generation, editing, publishing
+# ---------------------------------------------------------------------------
+
+def _public_vibe_display(a_vibe, b_vibe):
+    if a_vibe and b_vibe:
+        if a_vibe.strip().lower() == b_vibe.strip().lower():
+            return a_vibe
+        return None
+    return a_vibe or b_vibe or None
+
+
+def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
+    a_eta = a_su.eta if a_su else None
+    b_eta = b_su.eta if b_su else None
+    if a_eta and b_eta:
+        return max(a_eta, b_eta)
+    return a_eta or b_eta
+
+
+def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
+    a_pts = a_su.points if a_su else None
+    b_pts = b_su.points if b_su else None
+    if a_pts and b_pts:
+        return str(a_pts) if a_pts == b_pts else f"{min(a_pts, b_pts)}-{max(a_pts, b_pts)}"
+    val = a_pts or b_pts
+    return str(val) if val else None
+
+
+def _build_display_row(
+    row_id: Optional[int],
+    a_signup_id: int,
+    b_signup_id: Optional[int],
+    a_faction: Optional[str],
+    b_faction: Optional[str],
+    prearranged: bool,
+    signups_by_id: dict,
+) -> dict:
+    a_su = signups_by_id.get(a_signup_id)
+    b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
+
+    a_name = a_su.player_name if a_su else f"#{a_signup_id}"
+    a_vibe = a_su.vibe if a_su else None
+
+    b_name = (b_su.player_name if b_su else f"#{b_signup_id}") if b_signup_id else "BYE"
+    b_vibe = b_su.vibe if b_su else None
+
+    return {
+        "id": row_id,
+        "a_signup_id": a_signup_id,
+        "a_name": a_name,
+        "a_faction": a_faction if a_faction is not None else (a_su.faction if a_su else None),
+        "a_vibe": a_vibe,
+        "b_signup_id": b_signup_id,
+        "b_name": b_name,
+        "b_faction": b_faction if (b_signup_id and b_faction is not None) else (b_su.faction if b_su else None),
+        "b_vibe": b_vibe,
+        "type": _public_vibe_display(a_vibe, b_vibe),
+        "eta": _eta_show(a_su, b_su),
+        "points": _pts_show(a_su, b_su),
+        "prearranged": prearranged,
+    }
+
+
+def _collect_signups_for_rows(rows, db: Session) -> dict:
+    ids: set[int] = set()
+    for r in rows:
+        if isinstance(r, Pairing):
+            ids.add(r.a_signup_id)
+            if r.b_signup_id:
+                ids.add(r.b_signup_id)
+        else:
+            if r.get("a_signup_id"):
+                ids.add(r["a_signup_id"])
+            if r.get("b_signup_id"):
+                ids.add(r["b_signup_id"])
+    if not ids:
+        return {}
+    rows_q = db.exec(select(Signup).where(Signup.id.in_(ids))).all()
+    return {s.id: s for s in rows_q}
+
+
+def _pairing_rows_to_display(pairings: list, signups_by_id: dict) -> list:
+    result = []
+    for p in pairings:
+        a_faction = p.a_faction or (signups_by_id.get(p.a_signup_id, None) and signups_by_id[p.a_signup_id].faction)
+        b_faction = None
+        if p.b_signup_id:
+            b_faction = p.b_faction or (signups_by_id.get(p.b_signup_id, None) and signups_by_id[p.b_signup_id].faction)
+        result.append(_build_display_row(
+            p.id, p.a_signup_id, p.b_signup_id,
+            a_faction, b_faction,
+            p.prearranged, signups_by_id,
+        ))
+    return result
+
+
+def _dicts_to_display(dicts: list, signups_by_id: dict) -> list:
+    return [
+        _build_display_row(
+            None,
+            d["a_signup_id"], d.get("b_signup_id"),
+            d.get("a_faction"), d.get("b_faction"),
+            False, signups_by_id,
+        )
+        for d in dicts
+    ]
+
+
+def _pairings_webhook_url(system: str) -> str:
+    if system == "The Old World":
+        return DISCORD_TOW_PAIRINGS_WEBHOOK_URL
+    if system == "The Horus Heresy":
+        return DISCORD_HH_PAIRINGS_WEBHOOK_URL
+    if system == "Kill Team":
+        return DISCORD_KT_PAIRINGS_WEBHOOK_URL
+    return ""
+
+
+def _require_system_scope(system: str, user: User, db: Session) -> None:
+    if system not in VALID_SCOPES:
+        raise HTTPException(status_code=422, detail="Invalid scope.")
+    if system not in admin_scopes(user, db):
+        raise HTTPException(status_code=403, detail=f"Admin access for '{system}' required.")
+
+
+class PairingsWeekBody(BaseModel):
+    system: str
+    week: str
+
+
+class PublishBody(BaseModel):
+    system: str
+    week: str
+    published: bool
+
+
+class DeletePairingsBody(BaseModel):
+    system: str
+    week: str
+    ids: list[int]
+
+
+class PairingSaveRow(BaseModel):
+    id: int
+    a_signup_id: Optional[int] = None
+    b_signup_id: Optional[int] = None
+    a_faction: Optional[str] = None
+    b_faction: Optional[str] = None
+    a_type: Optional[str] = None
+    b_type: Optional[str] = None
+    type: Optional[str] = None
+    eta: Optional[str] = None
+    points: Optional[Any] = None
+
+
+class PairingSaveBody(BaseModel):
+    system: str
+    week: str
+    rows: list[PairingSaveRow]
+
+
+@router.get("/pairings/signup-list")
+def pairings_signup_list(
+    system: str,
+    week: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """De-duped signup list for a week/system — used by the admin grid dropdowns."""
+    _require_system_scope(system, user, db)
+
+    all_signups = db.exec(
+        select(Signup)
+        .where(Signup.system == system)
+        .where(Signup.week == week)
+        .order_by(Signup.created_at)
+    ).all()
+
+    seen: dict[str, Signup] = {}
+    from pairings_engine import _normalize_name
+    for su in all_signups:
+        seen[_normalize_name(su.player_name).lower()] = su
+
+    return [
+        {"id": su.id, "name": su.player_name, "faction": su.faction, "vibe": su.vibe}
+        for su in seen.values()
+    ]
+
+
+@router.post("/pairings/preview")
+def pairings_preview(
+    body: PairingsWeekBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """DRY RUN — compute proposed pairings without writing to the DB.
+
+    Returns existing prearranged rows (with real IDs) + proposed rows (id=null).
+    """
+    _require_system_scope(body.system, user, db)
+
+    prearranged = db.exec(
+        select(Pairing)
+        .where(Pairing.week == body.week)
+        .where(Pairing.system == body.system)
+        .where(Pairing.prearranged == True)
+        .order_by(Pairing.id)
+    ).all()
+
+    proposed_dicts = generate(db, body.week, body.system, persist=False)
+
+    all_rows = list(prearranged) + proposed_dicts
+    signups_by_id = _collect_signups_for_rows(all_rows, db)
+
+    display = _pairing_rows_to_display(prearranged, signups_by_id) + \
+              _dicts_to_display(proposed_dicts, signups_by_id)
+
+    return {"rows": display, "preview": True}
+
+
+@router.post("/pairings/generate")
+def pairings_generate(
+    body: PairingsWeekBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Delete existing pending (non-prearranged) pairings, then generate and persist new ones."""
+    _require_system_scope(body.system, user, db)
+
+    old = db.exec(
+        select(Pairing)
+        .where(Pairing.week == body.week)
+        .where(Pairing.system == body.system)
+        .where(Pairing.status == "pending")
+        .where(Pairing.prearranged != True)
+    ).all()
+    for p in old:
+        db.delete(p)
+    # autoflush will sync deletes before generate queries
+
+    new_pairings = generate(db, body.week, body.system, persist=True)
+
+    signups_by_id = _collect_signups_for_rows(new_pairings, db)
+    display = _pairing_rows_to_display(new_pairings, signups_by_id)
+    return {"rows": display}
+
+
+@router.get("/pairings")
+def pairings_get(
+    system: str,
+    week: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Return all saved pairings for a week/system, plus publish state."""
+    _require_system_scope(system, user, db)
+
+    rows = db.exec(
+        select(Pairing)
+        .where(Pairing.week == week)
+        .where(Pairing.system == system)
+        .order_by(Pairing.id)
+    ).all()
+
+    gate = db.exec(
+        select(PublishState)
+        .where(PublishState.week == week)
+        .where(PublishState.system == system)
+    ).first()
+    published = gate.published if gate else False
+
+    signups_by_id = _collect_signups_for_rows(rows, db)
+    display = _pairing_rows_to_display(rows, signups_by_id)
+    return {"rows": display, "published": published}
+
+
+@router.post("/pairings/publish")
+def pairings_publish(
+    body: PublishBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Upsert PublishState.published for a week/system."""
+    _require_system_scope(body.system, user, db)
+
+    gate = db.exec(
+        select(PublishState)
+        .where(PublishState.week == body.week)
+        .where(PublishState.system == body.system)
+    ).first()
+
+    if gate is None:
+        gate = PublishState(week=body.week, system=body.system, published=body.published)
+    else:
+        gate.published = body.published
+    db.add(gate)
+    db.commit()
+    return {"ok": True, "published": body.published}
+
+
+@router.post("/pairings/save")
+def pairings_save(
+    body: PairingSaveBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Write grid edits back to Pairing rows and their underlying Signup rows."""
+    _require_system_scope(body.system, user, db)
+
+    changed = 0
+    for row in body.rows:
+        p = db.get(Pairing, row.id)
+        if p is None:
+            continue
+        if p.week != body.week or p.system != body.system:
+            continue
+
+        if row.a_signup_id is not None:
+            p.a_signup_id = row.a_signup_id
+        if row.b_signup_id is not None:
+            p.b_signup_id = row.b_signup_id
+
+        a_su = db.get(Signup, p.a_signup_id) if p.a_signup_id else None
+        b_su = db.get(Signup, p.b_signup_id) if p.b_signup_id else None
+
+        # Faction — "— None —" sentinel → None
+        def _clean_faction(f: Optional[str]) -> Optional[str]:
+            if f in (None, "— None —", ""):
+                return None
+            return f
+
+        a_faction = _clean_faction(row.a_faction)
+        b_faction = _clean_faction(row.b_faction)
+
+        p.a_faction = a_faction if p.a_signup_id else None
+        p.b_faction = b_faction if p.b_signup_id else None
+
+        if a_su:
+            a_su.faction = a_faction
+            db.add(a_su)
+        if b_su:
+            b_su.faction = b_faction
+            db.add(b_su)
+
+        # Vibe — per-side type if non-empty, else shared type
+        a_type_raw = (row.a_type or "").strip()
+        b_type_raw = (row.b_type or "").strip()
+        shared_type = (row.type or "").strip()
+        a_vibe = a_type_raw if a_type_raw else (shared_type or None)
+        b_vibe = b_type_raw if b_type_raw else (shared_type or None)
+        if a_su and a_vibe:
+            a_su.vibe = a_vibe
+            db.add(a_su)
+        if b_su and b_vibe:
+            b_su.vibe = b_vibe
+            db.add(b_su)
+
+        # ETA and points — written to both present signups
+        eta_val = (row.eta or "").strip() or None
+        pts_val: Optional[int] = None
+        try:
+            if row.points is not None and str(row.points).strip():
+                pts_val = int(row.points)
+        except (ValueError, TypeError):
+            pass
+
+        for su in [a_su, b_su]:
+            if su is None:
+                continue
+            if eta_val:
+                su.eta = eta_val
+                db.add(su)
+            if pts_val is not None:
+                su.points = pts_val
+                db.add(su)
+
+        db.add(p)
+        changed += 1
+
+    db.commit()
+    return {"changed": changed}
+
+
+@router.delete("/pairings")
+def pairings_delete(
+    body: DeletePairingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Delete specific pairings by ID, scoped to this week/system."""
+    _require_system_scope(body.system, user, db)
+
+    deleted = 0
+    for pid in body.ids:
+        p = db.get(Pairing, pid)
+        if p is None:
+            continue
+        if p.week != body.week or p.system != body.system:
+            continue
+        db.delete(p)
+        deleted += 1
+
+    if deleted:
+        db.commit()
+    return {"deleted": deleted}
+
+
+@router.post("/pairings/post-discord")
+def pairings_post_discord(
+    body: PairingsWeekBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Build the public pairing list and POST it to the system Discord webhook.
+
+    Note: posts a plain-text table (the original app posts an image; text is an
+    acceptable simplification for v1).
+    Webhooks are intentionally unset so nothing posts during development.
+    """
+    _require_system_scope(body.system, user, db)
+
+    webhook_url = _pairings_webhook_url(body.system)
+    if not webhook_url:
+        return {"posted": False, "reason": "no webhook"}
+
+    rows = db.exec(
+        select(Pairing)
+        .where(Pairing.week == body.week)
+        .where(Pairing.system == body.system)
+        .order_by(Pairing.id)
+    ).all()
+
+    signup_ids = {p.a_signup_id for p in rows} | {
+        p.b_signup_id for p in rows if p.b_signup_id
+    }
+    signups_by_id: dict = {}
+    if signup_ids:
+        su_rows = db.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+        signups_by_id = {s.id: s for s in su_rows}
+
+    lines = [f"**{body.system} — {body.week}**\n"]
+    for p in rows:
+        a_su = signups_by_id.get(p.a_signup_id)
+        b_su = signups_by_id.get(p.b_signup_id) if p.b_signup_id else None
+        a_name = a_su.player_name if a_su else f"#{p.a_signup_id}"
+        a_fac = p.a_faction or (a_su.faction if a_su else None) or "—"
+        if b_su:
+            b_name = b_su.player_name
+            b_fac = p.b_faction or b_su.faction or "—"
+            lines.append(f"**{a_name}** ({a_fac}) vs **{b_name}** ({b_fac})")
+        else:
+            lines.append(f"**{a_name}** — BYE")
+
+    content = "\n".join(lines)
+    try:
+        httpx.post(webhook_url, json={"content": content}, timeout=8.0)
+    except Exception:
+        return {"posted": False, "reason": "webhook request failed"}
+
+    return {"posted": True}

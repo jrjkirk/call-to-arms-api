@@ -21,8 +21,9 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
-    "signups",        # Call to Arms form: insert/update/delete own signup
-    "pairings",       # drop-out flow deletes prearranged pairings involving the dropper
+    "signups",        # Call to Arms form: insert/update/delete own signup; also pairing grid save-back
+    "pairings",       # drop-out flow + admin pairing generation/editing/deletion
+    "publish_state",  # admin publish/unpublish pairings
     "players",        # only write is inserting new players via create-profile
     "league_results", # result submission + full ratings recalc
     "league_ratings", # result submission + full ratings recalc
