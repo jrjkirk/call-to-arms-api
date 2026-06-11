@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import get_session
-from models import User, Player
+from models import User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
@@ -299,3 +299,40 @@ def logout(response: Response):
         secure=True,
     )
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Admin permission helpers
+# ---------------------------------------------------------------------------
+
+VALID_SCOPES: frozenset[str] = frozenset({"The Old World", "The Horus Heresy", "Kill Team", "League"})
+
+
+def admin_scopes(user: Optional[User], db: Session) -> set[str]:
+    """Return the set of scopes the user can administer.
+
+    Super-admins get all four. Regular users get whatever admin_roles rows
+    they hold. Unauthenticated callers get the empty set.
+    """
+    if user is None:
+        return set()
+    if user.is_super_admin:
+        return set(VALID_SCOPES)
+    rows = db.exec(select(AdminRole).where(AdminRole.user_id == user.id)).all()
+    return {r.scope for r in rows}
+
+
+def require_super_admin(user: User = Depends(require_user)) -> User:
+    """Dependency: raises 403 unless the caller is a super-admin."""
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Super-admin access required.")
+    return user
+
+
+def require_scope(scope: str):
+    """Factory: returns a dependency that 403s unless the caller holds that scope."""
+    def _dep(user: User = Depends(require_user), db: Session = Depends(get_session)) -> User:
+        if scope not in admin_scopes(user, db):
+            raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
+        return user
+    return _dep

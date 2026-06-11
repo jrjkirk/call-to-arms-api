@@ -26,6 +26,7 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "players",        # only write is inserting new players via create-profile
     "league_results", # result submission + full ratings recalc
     "league_ratings", # result submission + full ratings recalc
+    "admin_roles",    # admin appointment/removal
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)

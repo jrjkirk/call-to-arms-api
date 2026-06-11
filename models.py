@@ -143,5 +143,17 @@ class User(SQLModel, table=True):
     discord_name: str
     avatar_url: Optional[str] = None
     player_id: Optional[int] = Field(default=None, index=True)
+    is_super_admin: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AdminRole(SQLModel, table=True):
+    """Grants a user admin access for a specific scope (system or League)."""
+    __tablename__ = "admin_roles"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    scope: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
