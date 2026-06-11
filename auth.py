@@ -111,7 +111,6 @@ def discord_login(request: Request):
         "scope": SCOPES,
         "redirect_uri": redirect_uri,
         "state": state,
-        "prompt": "none",
     }
     auth_url = f"{DISCORD_API}/oauth2/authorize?{urlencode(params)}"
 
