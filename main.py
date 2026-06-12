@@ -1,9 +1,10 @@
+from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 
 from database import get_session
-from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState
+from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -73,6 +74,13 @@ def list_players(session: Session = Depends(get_session)):
     return result
 
 
+def _parse_week(week: str) -> datetime:
+    try:
+        return datetime.strptime(week, "%d/%m/%Y")
+    except ValueError:
+        return datetime.min
+
+
 @app.get("/players/{player_id}")
 def get_player(player_id: int, session: Session = Depends(get_session)):
     player = session.get(Player, player_id)
@@ -108,12 +116,122 @@ def get_player(player_id: int, session: Session = Depends(get_session)):
 
     recent = results[:5]
 
+    # Discord identity
+    user = session.exec(select(User).where(User.player_id == player_id)).first()
+    discord_info = (
+        {"discord_name": user.discord_name, "avatar_url": user.avatar_url}
+        if user else None
+    )
+
+    # Build lookup for TOW league results: (frozenset{p1_id, p2_id}, date) -> LeagueResult
+    tow_lookup: dict[tuple, LeagueResult] = {}
+    for r in results:
+        if r.result_date and r.player_1_id and r.player_2_id:
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    parsed_date = datetime.strptime(r.result_date, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_date:
+                tow_lookup[(frozenset({r.player_1_id, r.player_2_id}), parsed_date)] = r
+
+    # Index this player's signups by system and by id for quick lookup
+    signup_ids_by_system: dict[str, set[int]] = {}
+    signup_by_id: dict[int, Signup] = {}
+    for s in signups:
+        if s.id is not None:
+            signup_ids_by_system.setdefault(s.system, set()).add(s.id)
+            signup_by_id[s.id] = s
+
+    SYSTEMS = ["The Old World", "The Horus Heresy", "Kill Team"]
+    recent_games_by_system: dict[str, list] = {}
+
+    for system in SYSTEMS:
+        sys_signup_ids = signup_ids_by_system.get(system, set())
+        if not sys_signup_ids:
+            recent_games_by_system[system] = []
+            continue
+
+        pairings = session.exec(
+            select(Pairing)
+            .where(Pairing.system == system)
+            .where(
+                or_(
+                    Pairing.a_signup_id.in_(sys_signup_ids),
+                    Pairing.b_signup_id.in_(sys_signup_ids),
+                )
+            )
+        ).all()
+
+        if not pairings:
+            recent_games_by_system[system] = []
+            continue
+
+        sorted_pairings = sorted(pairings, key=lambda p: _parse_week(p.week), reverse=True)[:5]
+
+        # Fetch opponent signup rows not already cached
+        needed = (
+            {p.a_signup_id for p in sorted_pairings}
+            | {p.b_signup_id for p in sorted_pairings if p.b_signup_id}
+        )
+        missing = needed - set(signup_by_id.keys())
+        if missing:
+            for s in session.exec(select(Signup).where(Signup.id.in_(missing))).all():
+                signup_by_id[s.id] = s
+
+        games = []
+        for p in sorted_pairings:
+            a_signup = signup_by_id.get(p.a_signup_id)
+            b_signup = signup_by_id.get(p.b_signup_id) if p.b_signup_id else None
+            is_bye = p.b_signup_id is None
+            a_is_me = p.a_signup_id in sys_signup_ids
+
+            if a_is_me:
+                my_faction = p.a_faction or (a_signup.faction if a_signup else None)
+                opp_signup = b_signup
+                opp_faction = None if is_bye else (p.b_faction or (b_signup.faction if b_signup else None))
+            else:
+                my_faction = p.b_faction or (b_signup.faction if b_signup else None)
+                opp_signup = a_signup
+                opp_faction = p.a_faction or (a_signup.faction if a_signup else None)
+
+            opp_name = None if is_bye else (opp_signup.player_name if opp_signup else None)
+            opp_player_id = opp_signup.player_id if opp_signup else None
+
+            result_str = None
+            if system == "The Old World" and opp_player_id is not None:
+                week_date = _parse_week(p.week)
+                if week_date is not datetime.min:
+                    lr = tow_lookup.get((frozenset({player_id, opp_player_id}), week_date.date()))
+                    if lr:
+                        is_p1 = lr.player_1_id == player_id
+                        if lr.result == "Draw":
+                            result_str = "Draw"
+                        elif lr.result == "Player 1 Victory":
+                            result_str = "Win" if is_p1 else "Loss"
+                        elif lr.result == "Player 2 Victory":
+                            result_str = "Win" if not is_p1 else "Loss"
+
+            games.append({
+                "week": p.week,
+                "your_faction": my_faction,
+                "opponent_name": opp_name,
+                "opponent_faction": opp_faction,
+                "result": result_str,
+            })
+
+        recent_games_by_system[system] = games
+
     return {
         "player": player,
+        "discord": discord_info,
         "titles": player_titles(player),
         "achievements": achievements_detailed,
         "signup_counts": sign_counts,
         "faction_usage": fac_usage,
+        "recent_games_by_system": recent_games_by_system,
         "league": {
             "rating": rating_row.rating if rating_row else None,
             "rank": rank,
