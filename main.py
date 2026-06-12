@@ -51,8 +51,26 @@ def health():
 
 @app.get("/players")
 def list_players(session: Session = Depends(get_session)):
-    statement = select(Player).where(Player.active == True).order_by(Player.name)
-    return session.exec(statement).all()
+    players = session.exec(
+        select(Player).where(Player.active == True).order_by(Player.name)
+    ).all()
+
+    signup_rows = session.exec(
+        select(Signup.player_id, Signup.system)
+        .where(Signup.player_id.isnot(None))
+        .distinct()
+    ).all()
+
+    systems_by_player: dict[int, set] = {}
+    for player_id, system in signup_rows:
+        systems_by_player.setdefault(player_id, set()).add(system)
+
+    result = []
+    for player in players:
+        player_dict = player.model_dump()
+        player_dict["systems_played"] = sorted(systems_by_player.get(player.id, set()))
+        result.append(player_dict)
+    return result
 
 
 @app.get("/players/{player_id}")
