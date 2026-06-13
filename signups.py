@@ -50,6 +50,19 @@ class SignupIn(SQLModel):
     can_demo: bool = False
 
 
+class PrearrangedGameIn(SQLModel):
+    """Request body for POST /signups/prearranged."""
+    system: str
+    week: str
+    player_a_id: int
+    player_b_id: int
+    faction_a: Optional[str] = None
+    faction_b: Optional[str] = None
+    eta: Optional[str] = None
+    vibe: str = "Casual"
+    points: Optional[int] = None
+
+
 def _require_linked_player(user: User, db: Session) -> Player:
     if user.player_id is None:
         raise HTTPException(status_code=400, detail="No linked player profile — claim your profile first.")
@@ -298,3 +311,118 @@ def drop_signup(
     _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week)
 
     return {"ok": True, "dropped": True}
+
+
+@router.post("/prearranged")
+def submit_prearranged(
+    body: PrearrangedGameIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    # 1. System and week
+    if body.system not in SYSTEMS:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    week = _validate_week(body.week)
+
+    # 2. Players must differ
+    if body.player_a_id == body.player_b_id:
+        raise HTTPException(status_code=422, detail="Player A and Player B must be different.")
+
+    # 3. Both players must exist and be active
+    pa = db.get(Player, body.player_a_id)
+    if pa is None or not pa.active:
+        raise HTTPException(status_code=404, detail="Player A not found.")
+    pb = db.get(Player, body.player_b_id)
+    if pb is None or not pb.active:
+        raise HTTPException(status_code=404, detail="Player B not found.")
+
+    # 4. Both factions must be set
+    faction_a = body.faction_a if body.faction_a not in (None, "", "— None —") else None
+    faction_b = body.faction_b if body.faction_b not in (None, "", "— None —") else None
+    if faction_a is None or faction_b is None:
+        raise HTTPException(status_code=422, detail="Please pick a faction for both players.")
+
+    # 5. Conflict check: neither player may already be signed up this week/system
+    conflicts = db.exec(
+        select(Signup)
+        .where(Signup.week == week)
+        .where(Signup.system == body.system)
+        .where(Signup.player_id.in_([body.player_a_id, body.player_b_id]))
+    ).all()
+    if conflicts:
+        names = sorted({s.player_name for s in conflicts})
+        raise HTTPException(
+            status_code=409,
+            detail=f"Already signed up: {', '.join(names)}. They must drop first before being part of a pre-arranged game.",
+        )
+
+    # Normalise per system
+    is_kt = body.system == "Kill Team"
+    is_hh = body.system == "The Horus Heresy"
+
+    if is_kt:
+        vibe = "Standard"
+        points = None
+    elif is_hh:
+        vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
+        points = max(0, min(int(body.points or 3000), 10000))
+    else:
+        vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
+        points = max(0, min(int(body.points or 2000), 10000))
+
+    eta = (body.eta or "").strip() or None
+
+    # Create both signups and pairing in one transaction
+    su_a = Signup(
+        week=week, system=body.system,
+        player_id=pa.id, player_name=pa.name,
+        faction=faction_a, points=points, eta=eta,
+        experience="New", vibe=vibe,
+        standby_ok=False, tnt_ok=False,
+        scenario=None, can_demo=False,
+    )
+    su_b = Signup(
+        week=week, system=body.system,
+        player_id=pb.id, player_name=pb.name,
+        faction=faction_b, points=points, eta=eta,
+        experience="New", vibe=vibe,
+        standby_ok=False, tnt_ok=False,
+        scenario=None, can_demo=False,
+    )
+    db.add(su_a)
+    db.add(su_b)
+    db.flush()
+
+    pairing = Pairing(
+        week=week, system=body.system,
+        a_signup_id=su_a.id, b_signup_id=su_b.id,
+        status="pending",
+        a_faction=faction_a, b_faction=faction_b,
+        prearranged=True,
+    )
+    db.add(pairing)
+    db.commit()
+    db.refresh(su_a)
+    db.refresh(su_b)
+    db.refresh(pairing)
+
+    try:
+        count = _signup_count(db, body.system, week)
+        phrase = _signup_count_phrase_for_system(body.system)
+        detail_parts = [f"🎭 {vibe}"]
+        if eta:
+            detail_parts.append(f"⏰ {eta}")
+        if points is not None:
+            detail_parts.append(f"🛡️ {points} pts")
+        detail_line = " • ".join(detail_parts)
+        content = (
+            f"🤝 **Pre-Arranged Game**\n"
+            f"⚔️ **{pa.name}** ({faction_a}) vs **{pb.name}** ({faction_b})\n"
+            f"{detail_line}\n"
+            f"📊 {phrase}: {count}"
+        )
+        _post_webhook(body.system, content)
+    except Exception:
+        pass
+
+    return {"ok": True, "signup_a": su_a, "signup_b": su_b, "pairing": pairing}
