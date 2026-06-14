@@ -18,8 +18,16 @@ from auth import (
     admin_scopes,
     current_user,
     get_session,
+    require_scope,
     require_super_admin,
     require_user,
+)
+from league import (
+    VALID_GAME_TYPES,
+    VALID_PAINTING,
+    VALID_RESULTS,
+    _normalise_optional,
+    _recalculate_ratings,
 )
 from models import AdminRole, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
 from pairings_engine import generate
@@ -1127,5 +1135,144 @@ def admin_signup_delete(
         db.delete(p)
 
     db.delete(su)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# League result admin — read/edit/delete with full ratings replay
+# ---------------------------------------------------------------------------
+
+def _league_result_row(r: LeagueResult) -> dict:
+    return {
+        "id": r.id,
+        "result_date": r.result_date,
+        "player_1_id": r.player_1_id,
+        "player_1_name": r.player_1_name,
+        "player_1_faction": r.player_1_faction,
+        "player_1_painting_bonus": r.player_1_painting_bonus,
+        "player_1_rating_before": r.player_1_rating_before,
+        "player_1_rating_after": r.player_1_rating_after,
+        "player_2_id": r.player_2_id,
+        "player_2_name": r.player_2_name,
+        "player_2_faction": r.player_2_faction,
+        "player_2_painting_bonus": r.player_2_painting_bonus,
+        "player_2_rating_before": r.player_2_rating_before,
+        "player_2_rating_after": r.player_2_rating_after,
+        "game_type": r.game_type,
+        "result": r.result,
+        "k_factor_used": r.k_factor_used,
+    }
+
+
+@router.get("/league/results")
+def admin_league_results(
+    _: User = Depends(require_scope("League")),
+    db: Session = Depends(get_session),
+):
+    """All LeagueResult rows, newest first (display order; recalc internally is id-ascending)."""
+    rows = db.exec(select(LeagueResult).order_by(LeagueResult.id.desc())).all()
+    return [_league_result_row(r) for r in rows]
+
+
+class AdminLeagueResultPatch(BaseModel):
+    """Partial update for a LeagueResult row.
+
+    Fields result_date, player_1_rating_before, player_1_rating_after,
+    player_2_rating_before, player_2_rating_after, and k_factor_used are
+    intentionally absent — Pydantic silently ignores them if sent, since they
+    are computed outputs of _recalculate_ratings, not editable inputs.
+    """
+    player_1_id: Optional[int] = None
+    player_2_id: Optional[int] = None
+    player_1_faction: Optional[str] = None
+    player_2_faction: Optional[str] = None
+    player_1_painting_bonus: Optional[str] = None
+    player_2_painting_bonus: Optional[str] = None
+    game_type: Optional[str] = None
+    result: Optional[str] = None
+
+
+@router.patch("/league/results/{result_id}")
+def admin_league_result_patch(
+    result_id: int,
+    body: AdminLeagueResultPatch,
+    _: User = Depends(require_scope("League")),
+    db: Session = Depends(get_session),
+):
+    """Partial update of a league result, followed by a full ratings replay."""
+    row = db.get(LeagueResult, result_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="League result not found.")
+
+    provided = body.model_fields_set
+
+    if "player_1_id" in provided:
+        p1 = db.get(Player, body.player_1_id)
+        if p1 is None or not p1.active:
+            raise HTTPException(status_code=404, detail="Player 1 not found or inactive.")
+        row.player_1_id = p1.id
+        row.player_1_name = p1.name
+
+    if "player_2_id" in provided:
+        p2 = db.get(Player, body.player_2_id)
+        if p2 is None or not p2.active:
+            raise HTTPException(status_code=404, detail="Player 2 not found or inactive.")
+        row.player_2_id = p2.id
+        row.player_2_name = p2.name
+
+    if "player_1_faction" in provided:
+        row.player_1_faction = _normalise_optional(body.player_1_faction)
+
+    if "player_2_faction" in provided:
+        row.player_2_faction = _normalise_optional(body.player_2_faction)
+
+    if "player_1_painting_bonus" in provided:
+        val = _normalise_optional(body.player_1_painting_bonus)
+        if val not in VALID_PAINTING:
+            raise HTTPException(status_code=422, detail="Invalid player 1 painting bonus.")
+        row.player_1_painting_bonus = val
+
+    if "player_2_painting_bonus" in provided:
+        val = _normalise_optional(body.player_2_painting_bonus)
+        if val not in VALID_PAINTING:
+            raise HTTPException(status_code=422, detail="Invalid player 2 painting bonus.")
+        row.player_2_painting_bonus = val
+
+    if "game_type" in provided:
+        if body.game_type not in VALID_GAME_TYPES:
+            raise HTTPException(status_code=422, detail="Game type must be Casual or Competitive.")
+        row.game_type = body.game_type
+
+    if "result" in provided:
+        if body.result not in VALID_RESULTS:
+            raise HTTPException(status_code=422, detail=f"Result must be one of: {', '.join(sorted(VALID_RESULTS))}")
+        row.result = body.result
+
+    if row.player_1_id == row.player_2_id:
+        raise HTTPException(status_code=422, detail="Players must be distinct.")
+
+    db.add(row)
+    db.flush()
+    _recalculate_ratings(db)
+    db.commit()
+    db.refresh(row)
+    return _league_result_row(row)
+
+
+@router.delete("/league/results/{result_id}")
+def admin_league_result_delete(
+    result_id: int,
+    _: User = Depends(require_scope("League")),
+    db: Session = Depends(get_session),
+):
+    """Delete a league result and replay ratings from scratch."""
+    row = db.get(LeagueResult, result_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="League result not found.")
+
+    db.delete(row)
+    db.flush()
+    _recalculate_ratings(db)
     db.commit()
     return {"ok": True}
