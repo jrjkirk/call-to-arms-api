@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
@@ -252,6 +252,39 @@ def league_rankings(session: Session = Depends(get_session)):
     )
     rows = session.exec(statement).all()
 
+    # Build previous_rank using a 7-day rolling comparison.
+    # For each player, find their earliest-processed result in the last 7 days
+    # and use their rating_before from that row as the comparison point.
+    cutoff = datetime.utcnow().date() - timedelta(days=7)
+    earliest_recent: dict[int, LeagueResult] = {}
+    for r in session.exec(select(LeagueResult)).all():
+        if not r.result_date:
+            continue
+        parsed = None
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                parsed = datetime.strptime(r.result_date, fmt).date()
+                break
+            except ValueError:
+                continue
+        if parsed is None or parsed < cutoff:
+            continue
+        for pid in (r.player_1_id, r.player_2_id):
+            if pid is None:
+                continue
+            if pid not in earliest_recent or r.id < earliest_recent[pid].id:
+                earliest_recent[pid] = r
+
+    def _comparison_rating(rating: LeagueRating, player: Player) -> float:
+        r = earliest_recent.get(player.id)
+        if r is None:
+            return rating.rating
+        before = r.player_1_rating_before if r.player_1_id == player.id else r.player_2_rating_before
+        return before if before is not None else rating.rating
+
+    sorted_by_prev = sorted(rows, key=lambda x: _comparison_rating(x[0], x[1]), reverse=True)
+    previous_rank_map = {player.id: i for i, (_, player) in enumerate(sorted_by_prev, start=1)}
+
     rankings = []
     for rank, (rating, player) in enumerate(rows, start=1):
         results = fetch_player_results(session, player.id)
@@ -266,6 +299,7 @@ def league_rankings(session: Session = Depends(get_session)):
 
         rankings.append({
             "rank": rank,
+            "previous_rank": previous_rank_map[player.id],
             "player_id": player.id,
             "name": player.name,
             "default_faction": player.default_faction,
