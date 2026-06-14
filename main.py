@@ -17,7 +17,7 @@ from services import (
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
-from auth import router as auth_router
+from auth import router as auth_router, require_user
 from signups import router as signups_router
 from league import router as league_router
 from admin import router as admin_router
@@ -51,7 +51,7 @@ def health():
 
 
 @app.get("/players")
-def list_players(session: Session = Depends(get_session)):
+def list_players(_: User = Depends(require_user), session: Session = Depends(get_session)):
     players = session.exec(
         select(Player).where(Player.active == True).order_by(Player.name)
     ).all()
@@ -82,7 +82,7 @@ def _parse_week(week: str) -> datetime:
 
 
 @app.get("/players/{player_id}")
-def get_player(player_id: int, session: Session = Depends(get_session)):
+def get_player(player_id: int, _: User = Depends(require_user), session: Session = Depends(get_session)):
     player = session.get(Player, player_id)
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -243,7 +243,7 @@ def get_player(player_id: int, session: Session = Depends(get_session)):
 
 
 @app.get("/league/rankings")
-def league_rankings(session: Session = Depends(get_session)):
+def league_rankings(_: User = Depends(require_user), session: Session = Depends(get_session)):
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
@@ -312,7 +312,7 @@ def league_rankings(session: Session = Depends(get_session)):
 
 
 @app.get("/signups/stats")
-def signups_stats(system: str, week: str, session: Session = Depends(get_session)):
+def signups_stats(system: str, week: str, _: User = Depends(require_user), session: Session = Depends(get_session)):
     rows = session.exec(
         select(Signup)
         .where(Signup.system == system)
