@@ -23,6 +23,14 @@ from auth import (
 )
 from models import AdminRole, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
 from pairings_engine import generate
+from signups import (
+    EXPERIENCE_OPTIONS,
+    HH_VIBES,
+    SCENARIO_OPTIONS,
+    SYSTEMS,
+    TOW_VIBES,
+    _validate_week,
+)
 
 DISCORD_TOW_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_TOW_PAIRINGS_WEBHOOK_URL", "")
 DISCORD_HH_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_HH_PAIRINGS_WEBHOOK_URL", "")
@@ -829,3 +837,295 @@ def pairings_post_discord(
         return {"posted": False, "reason": "webhook request failed"}
 
     return {"posted": True}
+
+
+# ---------------------------------------------------------------------------
+# Signup management — admin read/write for a week's signups
+# ---------------------------------------------------------------------------
+
+def _signup_row(su: Signup) -> dict:
+    return {
+        "id": su.id,
+        "player_id": su.player_id,
+        "player_name": su.player_name,
+        "faction": su.faction,
+        "points": su.points,
+        "eta": su.eta,
+        "experience": su.experience,
+        "vibe": su.vibe,
+        "standby_ok": su.standby_ok,
+        "scenario": su.scenario,
+        "can_demo": su.can_demo,
+    }
+
+
+def _system_config(system: str) -> dict:
+    """Per-system field visibility config for the admin signup editor."""
+    if system == "Kill Team":
+        return {
+            "show_points": False,
+            "default_points": None,
+            "show_scenario": False,
+            "show_standby": False,
+            "show_can_demo": False,
+            "vibe_options": ["Standard"],
+            "vibe_fixed": "Standard",
+        }
+    if system == "The Horus Heresy":
+        return {
+            "show_points": True,
+            "default_points": 3000,
+            "show_scenario": False,
+            "show_standby": False,
+            "show_can_demo": True,
+            "vibe_options": sorted(HH_VIBES),
+            "vibe_fixed": None,
+        }
+    # The Old World (and any future system)
+    return {
+        "show_points": True,
+        "default_points": 2000,
+        "show_scenario": True,
+        "show_standby": True,
+        "show_can_demo": True,
+        "vibe_options": sorted(TOW_VIBES),
+        "vibe_fixed": None,
+    }
+
+
+@router.get("/signups")
+def admin_signups_list(
+    system: str,
+    week: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """All signups for a week/system, ordered by player_name, with per-system field config."""
+    _require_system_scope(system, user, db)
+
+    rows = db.exec(
+        select(Signup)
+        .where(Signup.system == system)
+        .where(Signup.week == week)
+        .order_by(Signup.player_name)
+    ).all()
+
+    return {
+        "signups": [_signup_row(su) for su in rows],
+        "config": _system_config(system),
+    }
+
+
+class AdminSignupPatch(BaseModel):
+    faction: Optional[str] = None
+    points: Optional[int] = None
+    eta: Optional[str] = None
+    experience: Optional[str] = None
+    vibe: Optional[str] = None
+    standby_ok: Optional[bool] = None
+    scenario: Optional[str] = None
+    can_demo: Optional[bool] = None
+
+
+@router.patch("/signups/{signup_id}")
+def admin_signup_patch(
+    signup_id: int,
+    body: AdminSignupPatch,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Partial update of a signup row.
+
+    player_id and player_name are NOT editable — silently ignored if present in
+    the JSON body (Pydantic strips them because they are not in AdminSignupPatch).
+    All other fields use the same per-system normalisation as POST /signups:
+    invalid vibe → system default; points clamped 0-10000; invalid experience → 'New';
+    '— None —' / '' normalises faction/scenario to null.
+    Only fields present in the request body are updated; omitted fields are left unchanged.
+    """
+    su = db.get(Signup, signup_id)
+    if su is None:
+        raise HTTPException(status_code=404, detail="Signup not found.")
+
+    _require_system_scope(su.system, user, db)
+
+    provided = body.model_fields_set
+    is_kt = su.system == "Kill Team"
+    is_hh = su.system == "The Horus Heresy"
+
+    if "faction" in provided:
+        f = body.faction
+        su.faction = None if f in (None, "", "— None —") else f
+
+    if "points" in provided:
+        if is_kt or body.points is None:
+            su.points = None if is_kt else None
+        else:
+            su.points = max(0, min(int(body.points), 10000))
+
+    if "eta" in provided:
+        su.eta = (body.eta or "").strip() or None
+
+    if "experience" in provided:
+        su.experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
+
+    if "vibe" in provided:
+        if is_kt:
+            su.vibe = "Standard"
+        elif is_hh:
+            su.vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
+        else:
+            su.vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
+
+    if "standby_ok" in provided:
+        su.standby_ok = bool(body.standby_ok) if body.standby_ok is not None else False
+
+    if "scenario" in provided:
+        if is_kt or is_hh:
+            su.scenario = None
+        else:
+            s = body.scenario
+            su.scenario = None if s in (None, "", "— None —") else s
+
+    if "can_demo" in provided:
+        su.can_demo = False if is_kt else (bool(body.can_demo) if body.can_demo is not None else False)
+
+    db.add(su)
+    db.commit()
+    db.refresh(su)
+    return _signup_row(su)
+
+
+class AdminSignupCreate(BaseModel):
+    system: str
+    week: str
+    player_id: int
+    faction: Optional[str] = None
+    points: Optional[int] = None
+    eta: Optional[str] = None
+    experience: Optional[str] = None
+    vibe: Optional[str] = None
+    standby_ok: bool = False
+    scenario: Optional[str] = None
+    can_demo: bool = False
+
+
+@router.post("/signups", status_code=201)
+def admin_signup_create(
+    body: AdminSignupCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Add a signup on behalf of a player (admin correction / manual entry).
+
+    Unlike POST /signups, this does NOT upsert — a 409 is returned if the player
+    already has a signup for this week/system so the admin uses PATCH instead.
+    Discord signup webhook is NOT fired (avoid spurious 'X signed up' posts for
+    admin corrections).
+    Per-system defaults and normalisation match the regular POST /signups exactly.
+    """
+    if body.system not in SYSTEMS:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    _require_system_scope(body.system, user, db)
+    week = _validate_week(body.week)
+
+    player = db.get(Player, body.player_id)
+    if player is None or not player.active:
+        raise HTTPException(status_code=404, detail="Player not found.")
+
+    existing = db.exec(
+        select(Signup)
+        .where(Signup.week == week)
+        .where(Signup.system == body.system)
+        .where(Signup.player_id == body.player_id)
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="This player is already signed up for this week — edit their existing row instead.",
+        )
+
+    is_kt = body.system == "Kill Team"
+    is_hh = body.system == "The Horus Heresy"
+
+    faction = body.faction
+    if faction in (None, "", "— None —"):
+        faction = None
+
+    experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
+    eta = (body.eta or "").strip() or None
+
+    if is_kt:
+        vibe = "Standard"
+        points = None
+        scenario = None
+        can_demo = False
+        standby_ok = False
+    elif is_hh:
+        vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
+        points = max(0, min(int(body.points or 3000), 10000))
+        scenario = None
+        can_demo = bool(body.can_demo)
+        standby_ok = False
+    else:
+        vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
+        points = max(0, min(int(body.points or 2000), 10000))
+        s = body.scenario
+        scenario = None if s in (None, "", "— None —") else s
+        can_demo = bool(body.can_demo)
+        standby_ok = bool(body.standby_ok)
+
+    su = Signup(
+        week=week,
+        system=body.system,
+        player_id=player.id,
+        player_name=player.name,
+        faction=faction,
+        points=points,
+        eta=eta,
+        experience=experience,
+        vibe=vibe,
+        standby_ok=standby_ok,
+        tnt_ok=False,
+        scenario=scenario,
+        can_demo=can_demo,
+    )
+    db.add(su)
+    db.commit()
+    db.refresh(su)
+    return _signup_row(su)
+
+
+@router.delete("/signups/{signup_id}")
+def admin_signup_delete(
+    signup_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Force-drop a signup, bypassing the PublishState check that blocks player self-drops.
+
+    Mirrors the regular drop logic: any prearranged=True Pairing referencing this
+    signup is deleted (the other player's signup is untouched and re-enters the pool).
+    Discord drop webhook is NOT fired (avoid spurious 'X dropped' posts for admin
+    corrections).
+    """
+    su = db.get(Signup, signup_id)
+    if su is None:
+        raise HTTPException(status_code=404, detail="Signup not found.")
+
+    _require_system_scope(su.system, user, db)
+
+    prearranged = db.exec(
+        select(Pairing)
+        .where(Pairing.week == su.week)
+        .where(Pairing.system == su.system)
+        .where(Pairing.prearranged == True)
+        .where((Pairing.a_signup_id == signup_id) | (Pairing.b_signup_id == signup_id))
+    ).all()
+    for p in prearranged:
+        db.delete(p)
+
+    db.delete(su)
+    db.commit()
+    return {"ok": True}
