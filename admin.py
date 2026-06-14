@@ -389,11 +389,19 @@ def admin_history(
 # ---------------------------------------------------------------------------
 
 def _public_vibe_display(a_vibe, b_vibe):
-    if a_vibe and b_vibe:
-        if a_vibe.strip().lower() == b_vibe.strip().lower():
-            return a_vibe
-        return None
-    return a_vibe or b_vibe or None
+    av = (a_vibe or "").strip()
+    bv = (b_vibe or "").strip()
+    av_l = av.lower()
+    bv_l = bv.lower()
+    if av_l == "intro" or bv_l == "intro":
+        return "Intro"
+    if av_l == "either" and bv_l == "either":
+        return "Either"
+    if av_l == "either" and bv:
+        return bv
+    if bv_l == "either" and av:
+        return av
+    return av or bv or None
 
 
 def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
@@ -405,12 +413,8 @@ def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
 
 
 def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
-    a_pts = a_su.points if a_su else None
-    b_pts = b_su.points if b_su else None
-    if a_pts and b_pts:
-        return str(a_pts) if a_pts == b_pts else f"{min(a_pts, b_pts)}-{max(a_pts, b_pts)}"
-    val = a_pts or b_pts
-    return str(val) if val else None
+    vals = [su.points for su in (a_su, b_su) if su is not None and isinstance(su.points, int)]
+    return str(min(vals)) if vals else None
 
 
 def _build_display_row(

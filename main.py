@@ -341,11 +341,19 @@ def signups_stats(system: str, week: str, session: Session = Depends(get_session
 
 
 def _public_vibe_display(a_vibe, b_vibe):
-    if a_vibe and b_vibe:
-        if a_vibe.strip().lower() == b_vibe.strip().lower():
-            return a_vibe
-        return None
-    return a_vibe or b_vibe or None
+    av = (a_vibe or "").strip()
+    bv = (b_vibe or "").strip()
+    av_l = av.lower()
+    bv_l = bv.lower()
+    if av_l == "intro" or bv_l == "intro":
+        return "Intro"
+    if av_l == "either" and bv_l == "either":
+        return "Either"
+    if av_l == "either" and bv:
+        return bv
+    if bv_l == "either" and av:
+        return av
+    return av or bv or None
 
 
 @app.get("/pairings")
@@ -381,12 +389,8 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
             b.vibe if b else None,
         )
 
-        a_pts = a.points if a else None
-        b_pts = b.points if b else None
-        if a_pts and b_pts:
-            points = str(min(a_pts, b_pts)) if a_pts == b_pts else f"{min(a_pts, b_pts)}-{max(a_pts, b_pts)}"
-        else:
-            points = str(a_pts or b_pts) if (a_pts or b_pts) else None
+        pts_vals = [v for v in (a.points if a else None, b.points if b else None) if isinstance(v, int)]
+        points = str(min(pts_vals)) if pts_vals else None
 
         a_eta = a.eta if a else None
         b_eta = b.eta if b else None
