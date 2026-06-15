@@ -31,7 +31,7 @@ from league import (
     _recalculate_ratings,
 )
 from models import AdminRole, AppSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
-from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, post_discord_achievement
+from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
 from signups import (
     EXPERIENCE_OPTIONS,
@@ -212,6 +212,51 @@ def admin_players(
         select(Player).where(Player.active == True).order_by(Player.name)
     ).all()
     return [{"id": p.id, "name": p.name, "active": p.active} for p in players]
+
+
+class PatchPlayerBody(BaseModel):
+    name: Optional[str] = None
+    titles: Optional[list[str]] = None
+    active: Optional[bool] = None
+    admin_notes: Optional[str] = None
+
+
+@router.patch("/players/{player_id}")
+def patch_player(
+    player_id: int,
+    body: PatchPlayerBody,
+    _: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    player = db.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found.")
+
+    if body.name is not None:
+        stripped = body.name.strip()
+        if stripped:
+            player.name = stripped
+
+    if body.titles is not None:
+        set_player_titles(player, body.titles)
+
+    if body.active is not None:
+        player.active = body.active
+
+    if body.admin_notes is not None:
+        player.admin_notes = body.admin_notes.strip() or None
+
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+
+    return {
+        "id": player.id,
+        "name": player.name,
+        "titles": player_titles(player),
+        "active": player.active,
+        "admin_notes": player.admin_notes,
+    }
 
 
 # ---------------------------------------------------------------------------

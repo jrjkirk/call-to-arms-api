@@ -218,6 +218,11 @@ def player_titles(player: Player) -> list[str]:
     return []
 
 
+def set_player_titles(player: Player, titles: list[str]) -> None:
+    cleaned = [t.strip() for t in titles if t and t.strip()]
+    player.titles = json.dumps(cleaned) if cleaned else None
+
+
 # Tooltip text for each achievement, shown in the UI.
 ACHIEVEMENT_DESCRIPTIONS: dict[str, str] = {
     "First Blood": "Was the very first player to win an Old World League game.",
