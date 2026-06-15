@@ -158,31 +158,13 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
 
         idx_x = card_left + inner_pad + 0.08
         cy = (card_top + card_bottom) / 2
-        ax.text(idx_x, cy, f"{i + 1}", color=name_color, fontsize=18, fontweight="bold",
-                ha="left", va="center", zorder=3)
 
         icon_size = 0.78
         icon_a_x = idx_x + 0.45
-        icon_a_path = _icon_png_path(r.get("Faction A"))
-        if icon_a_path:
-            try:
-                img = mpimg.imread(icon_a_path)
-                ax.imshow(img,
-                          extent=[icon_a_x, icon_a_x + icon_size,
-                                  cy - icon_size / 2, cy + icon_size / 2],
-                          aspect="auto", zorder=4)
-            except Exception:
-                pass
-
         name_a_x = icon_a_x + icon_size + 0.18
-        name_a = str(r.get("A") or "").strip()
-        faction_a = str(r.get("Faction A") or "").strip() or "—"
-        name_a_fontsize = _fit_fontsize(fig, name_a, max_width_in=3.6)
-        ax.text(name_a_x, cy + 0.18, name_a, color=name_color, fontsize=name_a_fontsize,
-                fontweight="bold", ha="left", va="center", zorder=3)
-        ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
-                style="italic", ha="left", va="center", zorder=3)
 
+        # ---- Compute meta-block geometry first — depends only on
+        # Type/ETA/Points and fixed icon sizes, not on player names ----
         right_edge = card_right - inner_pad
         meta_pairs = []
         if r.get("Type"):    meta_pairs.append(("TYPE", str(r["Type"])))
@@ -206,24 +188,57 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             running_x = x_left - meta_gap
         meta_x_positions.reverse()
 
-        for x_center, label, value, _w in meta_x_positions:
-            ax.text(x_center, cy + 0.22, label, color=meta_label_color, fontsize=8,
-                    fontweight="bold", ha="center", va="center", zorder=3)
-            ax.text(x_center, cy - 0.13, value, color=meta_value_color, fontsize=12,
-                    fontweight="bold", ha="center", va="center", zorder=3)
-
         if meta_x_positions:
             first_x_center, _, _, first_w = meta_x_positions[0]
             meta_left = first_x_center - first_w / 2
         else:
             meta_left = right_edge
 
+        # ---- Compute icon B / separator / VS geometry — also independent
+        # of player names ----
         b_name = r.get("B")
         is_bye = (not b_name) or str(b_name).strip().upper().startswith("BYE")
         b_text = "BYE / Standby" if is_bye else str(b_name)
 
         icon_b_x_right = meta_left - 0.50
         icon_b_x_left = icon_b_x_right - icon_size
+        name_b_right = icon_b_x_left - 0.18
+
+        left_content_end = name_a_x
+        sep_x = (icon_b_x_right + meta_left) / 2
+        vs_x = left_content_end + (sep_x - left_content_end) * 0.40
+
+        # ---- Now draw everything, fitting names to the real space
+        # available before VS on each side ----
+        ax.text(idx_x, cy, f"{i + 1}", color=name_color, fontsize=18, fontweight="bold",
+                ha="left", va="center", zorder=3)
+
+        icon_a_path = _icon_png_path(r.get("Faction A"))
+        if icon_a_path:
+            try:
+                img = mpimg.imread(icon_a_path)
+                ax.imshow(img,
+                          extent=[icon_a_x, icon_a_x + icon_size,
+                                  cy - icon_size / 2, cy + icon_size / 2],
+                          aspect="auto", zorder=4)
+            except Exception:
+                pass
+
+        name_a = str(r.get("A") or "").strip()
+        faction_a = str(r.get("Faction A") or "").strip() or "—"
+        name_a_max_w = max(vs_x - name_a_x - 0.15, 0.5)
+        name_a_fontsize = _fit_fontsize(fig, name_a, max_width_in=name_a_max_w)
+        ax.text(name_a_x, cy + 0.18, name_a, color=name_color, fontsize=name_a_fontsize,
+                fontweight="bold", ha="left", va="center", zorder=3)
+        ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
+                style="italic", ha="left", va="center", zorder=3)
+
+        for x_center, label, value, _w in meta_x_positions:
+            ax.text(x_center, cy + 0.22, label, color=meta_label_color, fontsize=8,
+                    fontweight="bold", ha="center", va="center", zorder=3)
+            ax.text(x_center, cy - 0.13, value, color=meta_value_color, fontsize=12,
+                    fontweight="bold", ha="center", va="center", zorder=3)
+
         if not is_bye:
             icon_b_path = _icon_png_path(r.get("Faction B"))
             if icon_b_path:
@@ -236,11 +251,11 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
                 except Exception:
                     pass
 
-        name_b_right = icon_b_x_left - 0.18
         b_color = bye_color if is_bye else name_color
         b_style = "italic" if is_bye else "normal"
         b_weight = "normal" if is_bye else "bold"
-        name_b_fontsize = _fit_fontsize(fig, b_text, max_width_in=3.6)
+        name_b_max_w = max(name_b_right - vs_x - 0.15, 0.5)
+        name_b_fontsize = _fit_fontsize(fig, b_text, max_width_in=name_b_max_w)
         ax.text(name_b_right, cy + 0.18, b_text, color=b_color, fontsize=name_b_fontsize,
                 fontweight=b_weight, ha="right", va="center", zorder=3, style=b_style)
         if not is_bye:
@@ -248,15 +263,12 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             ax.text(name_b_right, cy - 0.18, faction_b, color=faction_color, fontsize=11,
                     style="italic", ha="right", va="center", zorder=3)
 
-        left_content_end = icon_a_x + icon_size + 0.18
-        sep_x = (icon_b_x_right + meta_left) / 2
         sep_top = card_top - 0.22
         sep_bot = card_bottom + 0.22
         ax.plot([sep_x, sep_x], [sep_bot, sep_top],
                 color=accent, alpha=0.35, linewidth=1.0, zorder=2,
                 solid_capstyle="round")
 
-        vs_x = left_content_end + (sep_x - left_content_end) * 0.40
         ax.text(vs_x, cy, "VS", color=vs_color, fontsize=18, fontweight="bold",
                 ha="center", va="center", zorder=3)
 
