@@ -412,7 +412,9 @@ def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
     return a_eta or b_eta
 
 
-def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
+def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup], system: str) -> Optional[str]:
+    if system == "Kill Team":
+        return None
     vals = [su.points for su in (a_su, b_su) if su is not None and isinstance(su.points, int)]
     return str(min(vals)) if vals else None
 
@@ -425,6 +427,7 @@ def _build_display_row(
     b_faction: Optional[str],
     prearranged: bool,
     signups_by_id: dict,
+    system: str,
 ) -> dict:
     a_su = signups_by_id.get(a_signup_id)
     b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
@@ -447,7 +450,7 @@ def _build_display_row(
         "b_vibe": b_vibe,
         "type": _public_vibe_display(a_vibe, b_vibe),
         "eta": _eta_show(a_su, b_su),
-        "points": _pts_show(a_su, b_su),
+        "points": _pts_show(a_su, b_su, system),
         "prearranged": prearranged,
     }
 
@@ -470,7 +473,7 @@ def _collect_signups_for_rows(rows, db: Session) -> dict:
     return {s.id: s for s in rows_q}
 
 
-def _pairing_rows_to_display(pairings: list, signups_by_id: dict) -> list:
+def _pairing_rows_to_display(pairings: list, signups_by_id: dict, system: str) -> list:
     result = []
     for p in pairings:
         a_faction = p.a_faction or (signups_by_id.get(p.a_signup_id, None) and signups_by_id[p.a_signup_id].faction)
@@ -480,18 +483,18 @@ def _pairing_rows_to_display(pairings: list, signups_by_id: dict) -> list:
         result.append(_build_display_row(
             p.id, p.a_signup_id, p.b_signup_id,
             a_faction, b_faction,
-            p.prearranged, signups_by_id,
+            p.prearranged, signups_by_id, system,
         ))
     return result
 
 
-def _dicts_to_display(dicts: list, signups_by_id: dict) -> list:
+def _dicts_to_display(dicts: list, signups_by_id: dict, system: str) -> list:
     return [
         _build_display_row(
             None,
             d["a_signup_id"], d.get("b_signup_id"),
             d.get("a_faction"), d.get("b_faction"),
-            False, signups_by_id,
+            False, signups_by_id, system,
         )
         for d in dicts
     ]
@@ -603,8 +606,8 @@ def pairings_preview(
     all_rows = list(prearranged) + proposed_dicts
     signups_by_id = _collect_signups_for_rows(all_rows, db)
 
-    display = _pairing_rows_to_display(prearranged, signups_by_id) + \
-              _dicts_to_display(proposed_dicts, signups_by_id)
+    display = _pairing_rows_to_display(prearranged, signups_by_id, body.system) + \
+              _dicts_to_display(proposed_dicts, signups_by_id, body.system)
 
     return {"rows": display, "preview": True}
 
@@ -632,7 +635,7 @@ def pairings_generate(
     new_pairings = generate(db, body.week, body.system, persist=True)
 
     signups_by_id = _collect_signups_for_rows(new_pairings, db)
-    display = _pairing_rows_to_display(new_pairings, signups_by_id)
+    display = _pairing_rows_to_display(new_pairings, signups_by_id, body.system)
     return {"rows": display}
 
 
@@ -661,7 +664,7 @@ def pairings_get(
     published = gate.published if gate else False
 
     signups_by_id = _collect_signups_for_rows(rows, db)
-    display = _pairing_rows_to_display(rows, signups_by_id)
+    display = _pairing_rows_to_display(rows, signups_by_id, system)
     return {"rows": display, "published": published}
 
 

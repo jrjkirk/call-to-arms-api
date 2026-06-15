@@ -391,8 +391,11 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
             b.vibe if b else None,
         )
 
-        pts_vals = [v for v in (a.points if a else None, b.points if b else None) if isinstance(v, int)]
-        points = str(min(pts_vals)) if pts_vals else None
+        if system == "Kill Team":
+            points = None
+        else:
+            pts_vals = [v for v in (a.points if a else None, b.points if b else None) if isinstance(v, int)]
+            points = str(min(pts_vals)) if pts_vals else None
 
         a_eta = a.eta if a else None
         b_eta = b.eta if b else None
