@@ -16,6 +16,7 @@ from sqlmodel import Session, select
 from auth import require_user
 from database import get_session
 from models import LeagueRating, LeagueResult, Player, User
+from services import announce_new_achievements
 
 router = APIRouter(prefix="/league", tags=["league"])
 
@@ -250,5 +251,7 @@ def submit_result(
     db.refresh(row)
 
     _post_league_webhook(row)
+    announce_new_achievements(db, row.player_1_id)
+    announce_new_achievements(db, row.player_2_id)
 
     return {"ok": True, "duplicate": False, "result": row}

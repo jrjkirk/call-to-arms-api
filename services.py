@@ -4,10 +4,15 @@ Functions here compute things from data. They don't know about FastAPI,
 requests, or responses — just take a session and inputs, return outputs.
 """
 import json
+import os
 from typing import Iterable, Optional
+
+import httpx
 from sqlmodel import Session, select, or_
 
 from models import LeagueResult, Signup, Player
+
+DISCORD_ACHIEVEMENT_WEBHOOK_URL = os.environ.get("DISCORD_ACHIEVEMENT_WEBHOOK_URL", "")
 
 
 def compute_league_record(player_id: int, results: Iterable[LeagueResult]) -> dict:
@@ -232,3 +237,106 @@ ACHIEVEMENT_DESCRIPTIONS: dict[str, str] = {
     "Hobby Hopper": "Has signed up for at least 2 different game systems.",
     "Triple Threat": "Has signed up for 3 different game systems.",
 }
+
+# Subset of achievements eligible for Discord announcement.
+# Cross-system / signup-volume achievements like "Hobby Hopper" stay silent.
+LEAGUE_ANNOUNCED_ACHIEVEMENTS: set[str] = {
+    "First Blood",
+    "Grizzled",
+    "Battle-Hardened",
+    "Hat-Trick",
+    "Unstoppable",
+    "Loyalist",
+    "Giant Slayer",
+    "Climber",
+}
+
+
+def _player_announced_achievements(player: Player) -> list[str]:
+    """JSON-decode Player.announced_achievements; return [] if empty/invalid."""
+    raw = getattr(player, "announced_achievements", None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(a) for a in parsed]
+    except Exception:
+        pass
+    return []
+
+
+def _set_player_announced_achievements(player: Player, names: Iterable[str]) -> None:
+    """JSON-encode sorted(set(names)) into Player.announced_achievements.
+
+    Always writes a valid JSON array so None (never snapshotted) vs '[]'
+    (snapshotted with zero) remain distinguishable.
+    """
+    player.announced_achievements = json.dumps(sorted(set(names)))
+
+
+def post_discord_achievement(player_name: str, achievement: str) -> None:
+    """Post an achievement unlock message to Discord. No-op if webhook unset."""
+    url = DISCORD_ACHIEVEMENT_WEBHOOK_URL
+    if not url:
+        return
+    lines = [
+        "🏅 **Achievement Unlocked!**",
+        f"**{player_name}** earned **{achievement}**",
+    ]
+    desc = ACHIEVEMENT_DESCRIPTIONS.get(achievement)
+    if desc:
+        lines.append(f"*{desc}*")
+    try:
+        httpx.post(url, json={"content": "\n".join(lines)}, timeout=5.0)
+    except Exception:
+        pass
+
+
+def announce_new_achievements(db: Session, player_id: int) -> None:
+    """Check for newly earned league achievements and post to Discord.
+
+    Best-effort: the whole function is wrapped in try/except so a failure
+    never breaks the caller (result submission, etc.).
+
+    First call per player silently snapshots their current state — pre-existing
+    players don't receive a retroactive flood of notifications.
+    """
+    if not DISCORD_ACHIEVEMENT_WEBHOOK_URL:
+        return
+    try:
+        player = db.get(Player, player_id)
+        if player is None:
+            return
+
+        results = fetch_player_results(db, player_id)
+        record = compute_league_record(player_id, results)
+        elo_history = build_elo_history(player_id, results)
+        signups = fetch_player_signups(db, player_id)
+        fac_usage = faction_usage_per_system(signups)
+        first_winner = first_league_winner_id(db)
+
+        current = set(compute_achievements(player_id, record, results, fac_usage, elo_history, first_winner))
+        eligible_current = current & LEAGUE_ANNOUNCED_ACHIEVEMENTS
+
+        if player.announced_achievements is None:
+            # First snapshot — backfill silently, no Discord post
+            _set_player_announced_achievements(player, eligible_current)
+            db.add(player)
+            db.commit()
+            return
+
+        already = set(_player_announced_achievements(player))
+        new_unlocks = eligible_current - already
+        if not new_unlocks:
+            return
+
+        # Persist before posting — a webhook hiccup must not cause re-announcement
+        _set_player_announced_achievements(player, already | eligible_current)
+        db.add(player)
+        db.commit()
+
+        for ach in sorted(new_unlocks):
+            post_discord_achievement(player.name, ach)
+    except Exception:
+        pass

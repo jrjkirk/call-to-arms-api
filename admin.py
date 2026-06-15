@@ -31,6 +31,7 @@ from league import (
     _recalculate_ratings,
 )
 from models import AdminRole, AppSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, post_discord_achievement
 from pairings_engine import generate
 from signups import (
     EXPERIENCE_OPTIONS,
@@ -1321,4 +1322,40 @@ def admin_league_result_delete(
     db.flush()
     _recalculate_ratings(db)
     db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Achievement announcements — admin manual post + options list
+# ---------------------------------------------------------------------------
+
+class AchievementPostBody(BaseModel):
+    player_name: str
+    achievement: str
+
+
+@router.get("/achievements/options")
+def achievement_options(
+    _: User = Depends(require_super_admin),
+):
+    """Return the sorted list of achievements eligible for Discord announcement."""
+    return {"achievements": sorted(LEAGUE_ANNOUNCED_ACHIEVEMENTS)}
+
+
+@router.post("/achievements/post-discord")
+def achievement_post_discord(
+    body: AchievementPostBody,
+    _: User = Depends(require_super_admin),
+):
+    """Manually post an achievement unlock to Discord.
+
+    No DB writes or announced-set checks — this is a direct override for
+    admin corrections. Requires super-admin.
+    """
+    if body.achievement not in LEAGUE_ANNOUNCED_ACHIEVEMENTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Achievement must be one of: {sorted(LEAGUE_ANNOUNCED_ACHIEVEMENTS)}",
+        )
+    post_discord_achievement(body.player_name, body.achievement)
     return {"ok": True}
