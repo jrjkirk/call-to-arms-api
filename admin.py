@@ -198,20 +198,40 @@ def remove_role(
 
 @router.get("/players")
 def admin_players(
-    scope: str,
+    scope: Optional[str] = None,
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """Scoped read — 403 unless the caller holds that scope."""
-    if scope not in VALID_SCOPES:
-        raise HTTPException(status_code=422, detail="Invalid scope.")
-    if scope not in admin_scopes(user, db):
-        raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
+    """Scoped read (scope provided) or global super-admin read (scope omitted).
 
-    players = db.exec(
-        select(Player).where(Player.active == True).order_by(Player.name)
-    ).all()
-    return [{"id": p.id, "name": p.name, "active": p.active} for p in players]
+    scope provided: 403 unless the caller holds that scope; returns active players.
+    scope omitted:  403 unless super-admin; returns all players with full profile
+                    fields so the edit-player panel can pre-fill forms.
+    """
+    if scope is not None:
+        if scope not in VALID_SCOPES:
+            raise HTTPException(status_code=422, detail="Invalid scope.")
+        if scope not in admin_scopes(user, db):
+            raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
+        players = db.exec(
+            select(Player).where(Player.active == True).order_by(Player.name)
+        ).all()
+        return [{"id": p.id, "name": p.name, "active": p.active} for p in players]
+
+    # No scope — super-admin only, full player list for the edit-player panel.
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Super-admin access required.")
+    players = db.exec(select(Player).order_by(Player.name)).all()
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "titles": player_titles(p),
+            "active": p.active,
+            "admin_notes": p.admin_notes,
+        }
+        for p in players
+    ]
 
 
 class PatchPlayerBody(BaseModel):
