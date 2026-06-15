@@ -27,6 +27,7 @@ def _to_rankings_render_rows(rankings: list[dict]) -> list[dict]:
     for r in rankings:
         out.append({
             "Rank": r.get("rank"),
+            "Previous Rank": r.get("previous_rank"),
             "ELO": round(r.get("rating", 0)),
             "Name": r.get("name"),
             "Most Played Faction": r.get("most_played_faction") or "—",
@@ -158,6 +159,17 @@ def render_league_rankings_image(rankings: list[dict]) -> io.BytesIO | None:
         else:
             ax.text(col_rank_x, cy, str(rank), ha="center", va="center",
                     color=text_color, fontsize=14, fontweight="bold", zorder=4)
+
+        # Rank-change indicator — mirrors the live table's ▲N/▼N badges
+        prev_rank = r.get("Previous Rank")
+        if prev_rank is not None and prev_rank != rank:
+            delta = prev_rank - rank
+            if delta > 0:
+                change_text, change_color = f"▲{delta}", "#6eb46e"
+            else:
+                change_text, change_color = f"▼{abs(delta)}", "#d25050"
+            ax.text(col_rank_x, cy - 0.28, change_text, ha="center", va="center",
+                    color=change_color, fontsize=9, fontweight="bold", zorder=4)
 
         ax.text(col_elo_x, cy, str(r.get("ELO", "")), ha="center", va="center",
                 color=text_color, fontsize=13, fontweight="bold", zorder=4)
