@@ -1,0 +1,23 @@
+name: Auto-Pairings Check
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt matplotlib
+      - run: python run_auto_pairings_check.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}
+          DISCORD_TOW_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_TOW_PAIRINGS_WEBHOOK_URL }}
+          DISCORD_HH_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_HH_PAIRINGS_WEBHOOK_URL }}
+          DISCORD_KT_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_KT_PAIRINGS_WEBHOOK_URL }}

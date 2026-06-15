@@ -29,6 +29,7 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "league_ratings", # result submission + full ratings recalc
     "admin_roles",    # admin appointment/removal
     "pairing_blocks", # admin block add/remove
+    "app_settings",   # auto-pairings scheduler updates last_week after each run
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
