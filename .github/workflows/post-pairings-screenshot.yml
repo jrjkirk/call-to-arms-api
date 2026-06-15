@@ -1,0 +1,34 @@
+name: Post Pairings Screenshot to Discord
+on:
+  workflow_dispatch:
+    inputs:
+      system:
+        description: 'System'
+        required: true
+        type: choice
+        options:
+          - 'The Old World'
+          - 'The Horus Heresy'
+          - 'Kill Team'
+      week:
+        description: 'Week (DD/MM/YYYY)'
+        required: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright httpx
+      - run: playwright install chromium --with-deps
+      - run: python post_pairings_screenshot.py
+        env:
+          SYSTEM: ${{ inputs.system }}
+          WEEK: ${{ inputs.week }}
+          APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}
+          DISCORD_TOW_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_TOW_PAIRINGS_WEBHOOK_URL }}
+          DISCORD_HH_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_HH_PAIRINGS_WEBHOOK_URL }}
+          DISCORD_KT_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_KT_PAIRINGS_WEBHOOK_URL }}
