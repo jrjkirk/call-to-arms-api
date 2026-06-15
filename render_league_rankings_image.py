@@ -94,6 +94,7 @@ def render_league_rankings_image(rankings: list[dict]) -> io.BytesIO | None:
     inner_left = 0.40
     inner_right = fig_width_in - 0.40
     col_rank_x = inner_left + 0.30
+    col_rank_change_x = inner_left + 0.60
     col_elo_x = inner_left + 0.95
     col_name_x = inner_left + 1.55
     col_faction_x = inner_left + 4.30
@@ -160,7 +161,8 @@ def render_league_rankings_image(rankings: list[dict]) -> io.BytesIO | None:
             ax.text(col_rank_x, cy, str(rank), ha="center", va="center",
                     color=text_color, fontsize=14, fontweight="bold", zorder=4)
 
-        # Rank-change indicator — mirrors the live table's ▲N/▼N badges
+        # Rank-change indicator — its own unlabeled column, mirroring the
+        # live table's rank-change-col (sits between RANK and ELO)
         prev_rank = r.get("Previous Rank")
         if prev_rank is not None and prev_rank != rank:
             delta = prev_rank - rank
@@ -168,8 +170,8 @@ def render_league_rankings_image(rankings: list[dict]) -> io.BytesIO | None:
                 change_text, change_color = f"▲{delta}", "#6eb46e"
             else:
                 change_text, change_color = f"▼{abs(delta)}", "#d25050"
-            ax.text(col_rank_x, cy - 0.28, change_text, ha="center", va="center",
-                    color=change_color, fontsize=9, fontweight="bold", zorder=4)
+            ax.text(col_rank_change_x, cy, change_text, ha="center", va="center",
+                    color=change_color, fontsize=8, fontweight="bold", zorder=4)
 
         ax.text(col_elo_x, cy, str(r.get("ELO", "")), ha="center", va="center",
                 color=text_color, fontsize=13, fontweight="bold", zorder=4)
