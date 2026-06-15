@@ -32,6 +32,8 @@ app.add_middleware(
         "http://localhost:5174",
         "http://127.0.0.1:5174",
         "https://call-to-arms-web.vercel.app",
+        "https://www.calltoarms.app",
+        "https://calltoarms.app",
     ],
     allow_origin_regex=r"https://call-to-arms-web.*\.vercel\.app",
     allow_credentials=True,
