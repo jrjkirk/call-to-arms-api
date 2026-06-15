@@ -6,6 +6,7 @@ Permission model:
 - Scope admin: a row in admin_roles (user_id, scope). One row per scope held.
 """
 import os
+import re
 from typing import Any, Optional
 
 import httpx
@@ -29,7 +30,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from models import AdminRole, AppSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
 from pairings_engine import generate
 from signups import (
     EXPERIENCE_OPTIONS,
@@ -499,11 +500,76 @@ def _dicts_to_display(dicts: list, signups_by_id: dict, system: str) -> list:
         for d in dicts
     ]
 
+_VALID_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_TIME_RE = re.compile(r"^(2[0-3]|[01]\d):[0-5]\d$")
+
+
+def _slug(system: str) -> str:
+    return system.replace(" ", "").replace("'", "")
+
+
+def _get_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
+    row = db.get(AppSetting, key)
+    return row.value if row is not None else default
+
+
+def _upsert_setting(db: Session, key: str, value: str) -> None:
+    row = db.get(AppSetting, key)
+    if row is None:
+        row = AppSetting(key=key, value=value)
+    else:
+        row.value = value
+    db.add(row)
+
+
 def _require_system_scope(system: str, user: User, db: Session) -> None:
     if system not in VALID_SCOPES:
         raise HTTPException(status_code=422, detail="Invalid scope.")
     if system not in admin_scopes(user, db):
         raise HTTPException(status_code=403, detail=f"Admin access for '{system}' required.")
+
+
+class AutoPairingsSettingsBody(BaseModel):
+    system: str
+    enabled: bool
+    day: str
+    time: str
+
+
+@router.get("/auto-pairings-settings")
+def get_auto_pairings_settings(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(system, user, db)
+    slug = _slug(system)
+    enabled_str = (_get_setting(db, f"auto_pairings_{slug}_enabled", "false") or "false").lower()
+    return {
+        "enabled": enabled_str == "true",
+        "day": _get_setting(db, f"auto_pairings_{slug}_day", "Tuesday") or "Tuesday",
+        "time": _get_setting(db, f"auto_pairings_{slug}_time", "20:00") or "20:00",
+        "last_week": _get_setting(db, f"auto_pairings_{slug}_last_week"),
+    }
+
+
+@router.post("/auto-pairings-settings")
+def post_auto_pairings_settings(
+    body: AutoPairingsSettingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(body.system, user, db)
+    if body.day not in _VALID_DAYS:
+        raise HTTPException(status_code=422, detail=f"day must be one of {_VALID_DAYS}")
+    if not _TIME_RE.match(body.time):
+        raise HTTPException(status_code=422, detail="time must match HH:MM (00-23 / 00-59)")
+    slug = _slug(body.system)
+    _upsert_setting(db, f"auto_pairings_{slug}_enabled", "true" if body.enabled else "false")
+    _upsert_setting(db, f"auto_pairings_{slug}_day", body.day)
+    _upsert_setting(db, f"auto_pairings_{slug}_time", body.time)
+    db.commit()
+    return {"ok": True}
 
 
 class PairingsWeekBody(BaseModel):
