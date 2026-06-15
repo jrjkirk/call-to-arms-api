@@ -195,7 +195,7 @@ async def discord_callback(
         cookie_value,
         max_age=60 * 60 * 24 * 30,  # 30 days
         httponly=True,
-        samesite="none",
+        samesite="lax",
         secure=True,
     )
     response.delete_cookie("cta_oauth_state")
@@ -294,7 +294,7 @@ def logout(response: Response):
     response.delete_cookie(
         "cta_session",
         httponly=True,
-        samesite="none",
+        samesite="lax",
         secure=True,
     )
     return {"ok": True}
