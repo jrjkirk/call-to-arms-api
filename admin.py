@@ -40,9 +40,9 @@ from signups import (
     _validate_week,
 )
 
-DISCORD_TOW_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_TOW_PAIRINGS_WEBHOOK_URL", "")
-DISCORD_HH_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_HH_PAIRINGS_WEBHOOK_URL", "")
-DISCORD_KT_PAIRINGS_WEBHOOK_URL = os.environ.get("DISCORD_KT_PAIRINGS_WEBHOOK_URL", "")
+GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "")
+GH_REPO = os.environ.get("GH_REPO", "jrjkirk/call-to-arms-api")
+GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-screenshot.yml"
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -499,17 +499,6 @@ def _dicts_to_display(dicts: list, signups_by_id: dict, system: str) -> list:
         for d in dicts
     ]
 
-
-def _pairings_webhook_url(system: str) -> str:
-    if system == "The Old World":
-        return DISCORD_TOW_PAIRINGS_WEBHOOK_URL
-    if system == "The Horus Heresy":
-        return DISCORD_HH_PAIRINGS_WEBHOOK_URL
-    if system == "Kill Team":
-        return DISCORD_KT_PAIRINGS_WEBHOOK_URL
-    return ""
-
-
 def _require_system_scope(system: str, user: User, db: Session) -> None:
     if system not in VALID_SCOPES:
         raise HTTPException(status_code=422, detail="Invalid scope.")
@@ -805,53 +794,37 @@ def pairings_post_discord(
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """Build the public pairing list and POST it to the system Discord webhook.
+    """Trigger the GitHub Actions workflow that screenshots the public
+    /pairings page for this system/week and posts it to that system's
+    Discord channel.
 
-    Note: posts a plain-text table (the original app posts an image; text is an
-    acceptable simplification for v1).
-    Webhooks are intentionally unset so nothing posts during development.
+    Fire-and-forget: a successful response means the workflow was queued,
+    not that the Discord post has happened yet — Playwright + Chromium
+    install takes roughly 30-60 seconds to run in CI.
     """
     _require_system_scope(body.system, user, db)
 
-    webhook_url = _pairings_webhook_url(body.system)
-    if not webhook_url:
-        return {"posted": False, "reason": "no webhook"}
+    if not GH_DISPATCH_TOKEN:
+        return {"posted": False, "reason": "no dispatch token configured"}
 
-    rows = db.exec(
-        select(Pairing)
-        .where(Pairing.week == body.week)
-        .where(Pairing.system == body.system)
-        .order_by(Pairing.id)
-    ).all()
-
-    signup_ids = {p.a_signup_id for p in rows} | {
-        p.b_signup_id for p in rows if p.b_signup_id
-    }
-    signups_by_id: dict = {}
-    if signup_ids:
-        su_rows = db.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
-        signups_by_id = {s.id: s for s in su_rows}
-
-    lines = [f"**{body.system} — {body.week}**\n"]
-    for p in rows:
-        a_su = signups_by_id.get(p.a_signup_id)
-        b_su = signups_by_id.get(p.b_signup_id) if p.b_signup_id else None
-        a_name = a_su.player_name if a_su else f"#{p.a_signup_id}"
-        a_fac = p.a_faction or (a_su.faction if a_su else None) or "—"
-        if b_su:
-            b_name = b_su.player_name
-            b_fac = p.b_faction or b_su.faction or "—"
-            lines.append(f"**{a_name}** ({a_fac}) vs **{b_name}** ({b_fac})")
-        else:
-            lines.append(f"**{a_name}** — BYE")
-
-    content = "\n".join(lines)
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{GH_PAIRINGS_SCREENSHOT_WORKFLOW}/dispatches"
     try:
-        httpx.post(webhook_url, json={"content": content}, timeout=8.0)
+        resp = httpx.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {GH_DISPATCH_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            },
+            json={"ref": "main", "inputs": {"system": body.system, "week": body.week}},
+            timeout=10.0,
+        )
     except Exception:
-        return {"posted": False, "reason": "webhook request failed"}
+        return {"posted": False, "reason": "GitHub API request failed"}
 
-    return {"posted": True}
+    if resp.status_code != 204:
+        return {"posted": False, "reason": f"GitHub API returned {resp.status_code}"}
+
+    return {"posted": True, "queued": True}
 
 
 # ---------------------------------------------------------------------------
