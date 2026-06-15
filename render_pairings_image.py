@@ -17,6 +17,21 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.image as mpimg
 
+def _fit_fontsize(fig, text: str, max_width_in: float, base_size: int = 15, min_size: int = 9) -> int:
+    """Return the largest fontsize <= base_size (down to min_size) at which
+    `text` rendered bold fits within max_width_in inches, measured via the
+    figure's renderer."""
+    if not text:
+        return base_size
+    renderer = fig.canvas.get_renderer()
+    for size in range(base_size, min_size - 1, -1):
+        t = fig.text(0, 0, text, fontsize=size, fontweight="bold")
+        bbox = t.get_window_extent(renderer=renderer)
+        width_in = bbox.width / fig.dpi
+        t.remove()
+        if width_in <= max_width_in:
+            return size
+    return min_size
 
 def _faction_slug(name: str | None) -> str:
     """Convert a faction name into a filename slug.
@@ -162,7 +177,8 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
         name_a_x = icon_a_x + icon_size + 0.18
         name_a = str(r.get("A") or "").strip()
         faction_a = str(r.get("Faction A") or "").strip() or "—"
-        ax.text(name_a_x, cy + 0.18, name_a, color=name_color, fontsize=15,
+        name_a_fontsize = _fit_fontsize(fig, name_a, max_width_in=3.6)
+        ax.text(name_a_x, cy + 0.18, name_a, color=name_color, fontsize=name_a_fontsize,
                 fontweight="bold", ha="left", va="center", zorder=3)
         ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
                 style="italic", ha="left", va="center", zorder=3)
@@ -224,7 +240,8 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
         b_color = bye_color if is_bye else name_color
         b_style = "italic" if is_bye else "normal"
         b_weight = "normal" if is_bye else "bold"
-        ax.text(name_b_right, cy + 0.18, b_text, color=b_color, fontsize=15,
+        name_b_fontsize = _fit_fontsize(fig, b_text, max_width_in=3.6)
+        ax.text(name_b_right, cy + 0.18, b_text, color=b_color, fontsize=name_b_fontsize,
                 fontweight=b_weight, ha="right", va="center", zorder=3, style=b_style)
         if not is_bye:
             faction_b = str(r.get("Faction B") or "").strip() or "—"
