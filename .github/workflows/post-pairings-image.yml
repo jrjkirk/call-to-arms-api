@@ -1,4 +1,4 @@
-name: Post Pairings Screenshot to Discord
+name: Post Pairings Image to Discord
 on:
   workflow_dispatch:
     inputs:
@@ -22,13 +22,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install playwright httpx
-      - run: playwright install chromium --with-deps
-      - run: python post_pairings_screenshot.py
+      - run: pip install -r requirements.txt matplotlib
+      - run: python post_pairings_image.py
         env:
           SYSTEM: ${{ inputs.system }}
           WEEK: ${{ inputs.week }}
-          APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DISCORD_TOW_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_TOW_PAIRINGS_WEBHOOK_URL }}
           DISCORD_HH_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_HH_PAIRINGS_WEBHOOK_URL }}
           DISCORD_KT_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_KT_PAIRINGS_WEBHOOK_URL }}

@@ -42,7 +42,7 @@ from signups import (
 
 GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "")
 GH_REPO = os.environ.get("GH_REPO", "jrjkirk/call-to-arms-api")
-GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-screenshot.yml"
+GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-image.yml"
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
