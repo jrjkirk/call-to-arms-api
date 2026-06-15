@@ -1,0 +1,19 @@
+name: Weekly League Rankings Image
+on:
+  schedule:
+    - cron: '0 19 * * 4'  # Thursdays at 19:00 UTC
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt matplotlib
+      - run: python post_league_rankings_image.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL: ${{ secrets.DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL }}
