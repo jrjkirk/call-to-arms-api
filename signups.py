@@ -19,7 +19,7 @@ from sqlmodel import Session, SQLModel, select
 
 from database import get_session
 from models import Signup, Pairing, PublishState, Player, User
-from auth import require_user
+from auth import admin_scopes, require_user
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
@@ -56,6 +56,7 @@ class SwapIn(SQLModel):
     system: str
     week: str
     opponent_player_id: int
+    player_1_id: Optional[int] = None
 
 
 class PrearrangedGameIn(SQLModel):
@@ -546,7 +547,6 @@ def swap_signups(
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    player = _require_linked_player(user, db)
     week = _validate_week(body.week)
 
     # 1. Pairings must be published
@@ -558,19 +558,30 @@ def swap_signups(
     if not gate or not gate.published:
         raise HTTPException(status_code=422, detail="Pairings are not published for this week.")
 
-    # 2. Find X (authenticated user) signup
+    # 2. Resolve player X.  Admins may supply player_1_id to act on behalf of
+    #    any signed-up player; regular players are always player X themselves.
+    if body.player_1_id is not None:
+        if body.system not in admin_scopes(user, db):
+            raise HTTPException(status_code=403, detail=f"Admin access for '{body.system}' required.")
+        x_player_id = body.player_1_id
+    else:
+        player = _require_linked_player(user, db)
+        x_player_id = player.id
+
+    # 3. Find X signup
     x_signup = db.exec(
         select(Signup)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
-        .where(Signup.player_id == player.id)
+        .where(Signup.player_id == x_player_id)
         .order_by(Signup.id.desc())
     ).first()
     if x_signup is None:
-        raise HTTPException(status_code=422, detail="You are not signed up for this week.")
+        detail = "Player 1 is not signed up for this week." if body.player_1_id is not None else "You are not signed up for this week."
+        raise HTTPException(status_code=422, detail=detail)
 
-    # 3. Must be different players
-    if body.opponent_player_id == player.id:
+    # 4. Must be different players
+    if body.opponent_player_id == x_player_id:
         raise HTTPException(status_code=422, detail="Cannot swap with yourself.")
 
     # 4. Find Y (target player) signup
