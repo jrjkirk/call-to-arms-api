@@ -5,13 +5,14 @@ LeagueResult row and then runs a full recalculation that replays all
 results from scratch, ordered by id ascending.
 """
 import os
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 
 from auth import require_user
 from database import get_session
@@ -149,6 +150,77 @@ def _post_league_webhook(row: LeagueResult) -> None:
         httpx.post(url, json={"content": content}, timeout=5.0)
     except Exception:
         pass
+
+
+@router.get("/factions")
+def list_factions(db: Session = Depends(get_session)):
+    rows = db.exec(select(LeagueResult)).all()
+    factions: set[str] = set()
+    for r in rows:
+        if r.player_1_faction:
+            factions.add(r.player_1_faction)
+        if r.player_2_faction:
+            factions.add(r.player_2_faction)
+    return {"factions": sorted(factions)}
+
+
+@router.get("/faction-stats")
+def faction_stats(
+    faction: str = Query(...),
+    _: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    rows = db.exec(
+        select(LeagueResult).where(
+            or_(
+                LeagueResult.player_1_faction == faction,
+                LeagueResult.player_2_faction == faction,
+            )
+        )
+    ).all()
+
+    # player_id -> {name, wins, draws, losses}
+    stats: dict[int, dict] = defaultdict(lambda: {"name": "", "wins": 0, "draws": 0, "losses": 0})
+
+    for r in rows:
+        p1_used = r.player_1_faction == faction and r.player_1_id is not None
+        p2_used = r.player_2_faction == faction and r.player_2_id is not None
+
+        if p1_used:
+            entry = stats[r.player_1_id]
+            entry["name"] = r.player_1_name
+            if r.result == "Player 1 Victory":
+                entry["wins"] += 1
+            elif r.result == "Player 2 Victory":
+                entry["losses"] += 1
+            else:
+                entry["draws"] += 1
+
+        if p2_used:
+            entry = stats[r.player_2_id]
+            entry["name"] = r.player_2_name
+            if r.result == "Player 2 Victory":
+                entry["wins"] += 1
+            elif r.result == "Player 1 Victory":
+                entry["losses"] += 1
+            else:
+                entry["draws"] += 1
+
+    players = []
+    for player_id, s in stats.items():
+        total = s["wins"] + s["draws"] + s["losses"]
+        players.append({
+            "player_id": player_id,
+            "player_name": s["name"],
+            "wins": s["wins"],
+            "draws": s["draws"],
+            "losses": s["losses"],
+            "total_games": total,
+            "win_rate": s["wins"] / total if total > 0 else 0.0,
+        })
+
+    players.sort(key=lambda p: (-p["win_rate"], -p["total_games"]))
+    return {"faction": faction, "players": players}
 
 
 class SubmitResultIn(BaseModel):
