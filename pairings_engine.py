@@ -1,6 +1,6 @@
 """Pairing generation engine — faithful port of the original Streamlit matcher.
 
-9-tuple _pair_dist order: (block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
+10-tuple _pair_dist order: (last_opp_pen, block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
 Do NOT reorder or "optimise" — the tuple order encodes matchmaking priority.
 T&T / 3-way grouping intentionally removed (club never uses it).
 Odd numbers naturally produce a single BYE via the greedy fallback.
@@ -74,6 +74,59 @@ def previous_pairs_recent(
         if a_name == b_name:
             continue
         result.add(tuple(sorted([a_name, b_name])))
+    return result
+
+
+def last_opponent_pairs(session: Session, system: str, current_week: str) -> set:
+    try:
+        datetime.strptime(current_week, "%d/%m/%Y")
+    except ValueError:
+        return set()
+
+    pairings = session.exec(
+        select(Pairing)
+        .where(Pairing.system == system)
+        .where(Pairing.b_signup_id.isnot(None))
+        .where(Pairing.week != current_week)
+    ).all()
+
+    if not pairings:
+        return set()
+
+    signup_ids = {p.a_signup_id for p in pairings} | {
+        p.b_signup_id for p in pairings if p.b_signup_id
+    }
+    rows = session.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+    signups_by_id = {s.id: s for s in rows}
+
+    # For each player_id, track their most-recent pairing's opponent
+    player_latest: dict = {}
+
+    for pr in pairings:
+        try:
+            pr_week_dt = datetime.strptime(pr.week, "%d/%m/%Y")
+        except ValueError:
+            continue
+
+        a_su = signups_by_id.get(pr.a_signup_id)
+        b_su = signups_by_id.get(pr.b_signup_id) if pr.b_signup_id else None
+        if not a_su or not b_su:
+            continue
+
+        a_pid = a_su.player_id
+        b_pid = b_su.player_id
+        if a_pid is None or b_pid is None:
+            continue
+
+        if a_pid not in player_latest or pr_week_dt > player_latest[a_pid][0]:
+            player_latest[a_pid] = (pr_week_dt, b_pid)
+        if b_pid not in player_latest or pr_week_dt > player_latest[b_pid][0]:
+            player_latest[b_pid] = (pr_week_dt, a_pid)
+
+    result: set = set()
+    for player_id, (_, opponent_id) in player_latest.items():
+        result.add(tuple(sorted([player_id, opponent_id])))
+
     return result
 
 
@@ -158,9 +211,16 @@ def _pair_dist(
     seen_recent: set,
     seen_extended: set,
     blocks: set,
+    last_opp_pairs: set,
 ) -> tuple:
     a_pid = ms.row.player_id
     b_pid = other.row.player_id
+    last_opp_pen = (
+        1
+        if (a_pid is not None and b_pid is not None
+            and tuple(sorted([a_pid, b_pid])) in last_opp_pairs)
+        else 0
+    )
     block_pen = (
         1
         if (
@@ -187,7 +247,7 @@ def _pair_dist(
     scen_d = _scenario_diff_tow(ms, other, system)
     dp = 0 if system == "Kill Team" else abs(ms.preference[2] - other.preference[2])
 
-    return (block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
+    return (last_opp_pen, block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +382,8 @@ def generate(
     block_rows = session.exec(select(PairingBlock)).all()
     blocks: set = {tuple(sorted([b.player_a_id, b.player_b_id])) for b in block_rows}
 
+    last_opp_pairs = last_opponent_pairs(session, system, week)
+
     # 7. Greedy matching; out starts with intro pairs
     used: set[str] = set()
     out: list = list(intro_pairs)
@@ -333,31 +395,36 @@ def generate(
         best_j: Optional[int] = None
         best_dist: Optional[tuple] = None
 
-        # First pass: skip recent repeats
+        # First pass: skip recent repeats and hard-block last opponents
         for j in range(i + 1, len(candidates)):
             other = candidates[j]
             if other.key in used:
                 continue
+            if (ms.row.player_id is not None
+                    and other.row.player_id is not None
+                    and tuple(sorted([ms.row.player_id, other.row.player_id]))
+                        in last_opp_pairs):
+                continue
             if has_played(ms, other):
                 continue
-            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks)
+            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs)
             if best_dist is None or d < best_dist:
                 best_dist = d
                 best_j = j
-                if d[:7] == (0, 0, 0, 0, 0, 0, 0):
+                if d[:8] == (0, 0, 0, 0, 0, 0, 0, 0):
                     break
 
-        # Second pass: allow recent repeats if needed
+        # Second pass: allow recent repeats if needed (last-opponent escape hatch too)
         if best_j is None and allow_repeats_when_needed:
             for j in range(i + 1, len(candidates)):
                 other = candidates[j]
                 if other.key in used:
                     continue
-                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks)
+                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs)
                 if best_dist is None or d < best_dist:
                     best_dist = d
                     best_j = j
-                    if d[:7] == (0, 0, 0, 0, 0, 0, 0):
+                    if d[:8] == (0, 0, 0, 0, 0, 0, 0, 0):
                         break
 
         if best_j is not None:
