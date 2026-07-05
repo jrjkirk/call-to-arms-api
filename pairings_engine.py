@@ -4,6 +4,9 @@
 Do NOT reorder or "optimise" — the tuple order encodes matchmaking priority.
 T&T / 3-way grouping intentionally removed (club never uses it).
 Odd numbers naturally produce a single BYE via the greedy fallback.
+standby_ok=True players sort later in the candidate list (soft BYE preference).
+Players who received a BYE in their most recent session get an extra pass to find
+any available partner before being assigned a consecutive BYE.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -74,6 +77,49 @@ def previous_pairs_recent(
         if a_name == b_name:
             continue
         result.add(tuple(sorted([a_name, b_name])))
+    return result
+
+
+def previous_bye_player_ids(session: Session, system: str, current_week: str) -> set[int]:
+    try:
+        datetime.strptime(current_week, "%d/%m/%Y")
+    except ValueError:
+        return set()
+
+    pairings = session.exec(
+        select(Pairing)
+        .where(Pairing.system == system)
+        .where(Pairing.b_signup_id.is_(None))
+        .where(Pairing.week != current_week)
+    ).all()
+
+    if not pairings:
+        return set()
+
+    # Track most recent BYE week per signup_id
+    latest_bye: dict[int, datetime] = {}
+    for pr in pairings:
+        try:
+            pr_week_dt = datetime.strptime(pr.week, "%d/%m/%Y")
+        except ValueError:
+            continue
+        sid = pr.a_signup_id
+        if sid not in latest_bye or pr_week_dt > latest_bye[sid]:
+            latest_bye[sid] = pr_week_dt
+
+    if not latest_bye:
+        return set()
+
+    rows = session.exec(select(Signup).where(Signup.id.in_(latest_bye.keys()))).all()
+    signups_by_id = {s.id: s for s in rows}
+
+    result: set[int] = set()
+    for sid in latest_bye:
+        su = signups_by_id.get(sid)
+        if su is None or su.player_id is None:
+            continue
+        result.add(su.player_id)
+
     return result
 
 
@@ -361,6 +407,7 @@ def generate(
             (0 if (ms.row.vibe or "").lower() == "escalation" else 1)
             if system == "The Old World"
             else 0,
+            0 if ms.row.standby_ok else 1,
             ms.preference,
             ms.key,
         )
@@ -383,6 +430,7 @@ def generate(
     blocks: set = {tuple(sorted([b.player_a_id, b.player_b_id])) for b in block_rows}
 
     last_opp_pairs = last_opponent_pairs(session, system, week)
+    bye_player_ids = previous_bye_player_ids(session, system, week)
 
     # 7. Greedy matching; out starts with intro pairs
     used: set[str] = set()
@@ -414,8 +462,10 @@ def generate(
                 if d[:8] == (0, 0, 0, 0, 0, 0, 0, 0):
                     break
 
-        # Second pass: allow recent repeats if needed (last-opponent escape hatch too)
-        if best_j is None and allow_repeats_when_needed:
+        # Second pass: lift recent-repeat and last-opponent constraints.
+        # Runs if allow_repeats_when_needed=True OR the player had a BYE
+        # last session (avoid consecutive BYEs where any alternative exists).
+        if best_j is None and (allow_repeats_when_needed or ms.row.player_id in bye_player_ids):
             for j in range(i + 1, len(candidates)):
                 other = candidates[j]
                 if other.key in used:
