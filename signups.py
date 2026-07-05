@@ -34,6 +34,7 @@ SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
 DISCORD_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_SIGNUP_WEBHOOK_URL", "")
 DISCORD_HH_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_HH_SIGNUP_WEBHOOK_URL", "")
 DISCORD_KT_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_KT_SIGNUP_WEBHOOK_URL", "")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 
 
 class SignupIn(SQLModel):
@@ -48,6 +49,13 @@ class SignupIn(SQLModel):
     standby_ok: bool = False
     scenario: Optional[str] = None
     can_demo: bool = False
+
+
+class SwapIn(SQLModel):
+    """Request body for POST /signups/swap."""
+    system: str
+    week: str
+    opponent_player_id: int
 
 
 class PrearrangedGameIn(SQLModel):
@@ -140,6 +148,57 @@ def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vi
     count = _signup_count(db, system, week)
     phrase = _signup_count_phrase_for_system(system)
     _post_webhook(system, f"❌ **{player_name}** dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+
+
+def _get_all_byes(db: Session, system: str, week: str) -> list[dict]:
+    """Return all current BYE players for this week/system, ordered by player name."""
+    pub = db.exec(
+        select(PublishState)
+        .where(PublishState.system == system)
+        .where(PublishState.week == week)
+    ).first()
+    if not pub or not pub.published:
+        return []
+    bye_pairings = db.exec(
+        select(Pairing)
+        .where(Pairing.system == system)
+        .where(Pairing.week == week)
+        .where(Pairing.b_signup_id.is_(None))
+    ).all()
+    if not bye_pairings:
+        return []
+    signup_ids = [p.a_signup_id for p in bye_pairings]
+    signups = db.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+    signups_by_id = {s.id: s for s in signups}
+    result = []
+    for p in bye_pairings:
+        su = signups_by_id.get(p.a_signup_id)
+        if su:
+            result.append({
+                "player_name": su.player_name,
+                "signup_id": p.a_signup_id,
+                "is_new": False,
+            })
+    result.sort(key=lambda x: x["player_name"])
+    return result
+
+
+def _build_bye_discord_message(
+    header: str,
+    newly_displaced_names: list[str],
+    all_byes: list[dict],
+    app_url: str,
+) -> str:
+    """Build a consistent Discord message for swap/drop events."""
+    if not all_byes:
+        return f"{header}\n\n➡️ {app_url}" if app_url else header
+    lines = [header, "", "⚠️ The following players are now without an opponent this week:"]
+    for bye in all_byes:
+        suffix = " (existing bye)" if not bye["is_new"] else ""
+        lines.append(f"• {bye['player_name']}{suffix}")
+    lines.append("")
+    lines.append(f"Head to the app to re-arrange your game: {app_url}")
+    return "\n".join(lines)
 
 
 @router.get("/mine")
@@ -267,18 +326,71 @@ def drop_signup(
     player = _require_linked_player(user, db)
     week = _validate_week(week)
 
-    # Block drops once pairings are published for this week/system
     gate = db.exec(
         select(PublishState)
         .where(PublishState.week == week)
         .where(PublishState.system == system)
     ).first()
-    if gate and gate.published:
-        raise HTTPException(
-            status_code=409,
-            detail="Pairings have been published — contact the session organiser if you need to drop out.",
-        )
 
+    if gate and gate.published:
+        # Post-publish drop: reroute opponent to a BYE pairing, delete our pairing + signup
+        rows = db.exec(
+            select(Signup)
+            .where(Signup.week == week)
+            .where(Signup.system == system)
+            .where(Signup.player_id == player.id)
+        ).all()
+        if not rows:
+            return {"ok": True, "dropped": False}
+
+        my_ids = {s.id for s in rows}
+
+        pairing = db.exec(
+            select(Pairing)
+            .where(Pairing.week == week)
+            .where(Pairing.system == system)
+            .where((Pairing.a_signup_id.in_(my_ids)) | (Pairing.b_signup_id.in_(my_ids)))
+        ).first()
+
+        opponent_name: Optional[str] = None
+        if pairing:
+            if pairing.b_signup_id is not None:
+                opponent_signup_id = (
+                    pairing.b_signup_id if pairing.a_signup_id in my_ids
+                    else pairing.a_signup_id
+                )
+                opponent_signup = db.get(Signup, opponent_signup_id)
+                if opponent_signup:
+                    opponent_name = opponent_signup.player_name
+                    db.add(Pairing(
+                        week=week, system=system,
+                        a_signup_id=opponent_signup_id, b_signup_id=None,
+                        status="pending", prearranged=False,
+                        a_faction=opponent_signup.faction, b_faction=None,
+                    ))
+            db.delete(pairing)
+
+        for s in rows:
+            db.delete(s)
+
+        db.commit()
+
+        all_byes = _get_all_byes(db, system, week)
+        newly_displaced_names = [opponent_name] if opponent_name else []
+        for bye in all_byes:
+            if bye["player_name"] in newly_displaced_names:
+                bye["is_new"] = True
+        content = _build_bye_discord_message(
+            header=f"❌ **{player.name}** has dropped out of this week's session.",
+            newly_displaced_names=newly_displaced_names,
+            all_byes=all_byes,
+            app_url=APP_PUBLIC_URL,
+        )
+        _post_webhook(system, content)
+
+        return {"ok": True, "dropped": True, "published": True}
+
+    # Pre-publish drop path (unchanged)
     rows = db.exec(
         select(Signup)
         .where(Signup.week == week)
@@ -426,3 +538,191 @@ def submit_prearranged(
         pass
 
     return {"ok": True, "signup_a": su_a, "signup_b": su_b, "pairing": pairing}
+
+
+@router.post("/swap")
+def swap_signups(
+    body: SwapIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    player = _require_linked_player(user, db)
+    week = _validate_week(body.week)
+
+    # 1. Pairings must be published
+    gate = db.exec(
+        select(PublishState)
+        .where(PublishState.week == week)
+        .where(PublishState.system == body.system)
+    ).first()
+    if not gate or not gate.published:
+        raise HTTPException(status_code=422, detail="Pairings are not published for this week.")
+
+    # 2. Find X (authenticated user) signup
+    x_signup = db.exec(
+        select(Signup)
+        .where(Signup.week == week)
+        .where(Signup.system == body.system)
+        .where(Signup.player_id == player.id)
+        .order_by(Signup.id.desc())
+    ).first()
+    if x_signup is None:
+        raise HTTPException(status_code=422, detail="You are not signed up for this week.")
+
+    # 3. Must be different players
+    if body.opponent_player_id == player.id:
+        raise HTTPException(status_code=422, detail="Cannot swap with yourself.")
+
+    # 4. Find Y (target player) signup
+    y_signup = db.exec(
+        select(Signup)
+        .where(Signup.week == week)
+        .where(Signup.system == body.system)
+        .where(Signup.player_id == body.opponent_player_id)
+        .order_by(Signup.id.desc())
+    ).first()
+    if y_signup is None:
+        raise HTTPException(status_code=422, detail="That player is not signed up for this week.")
+
+    # 5. Find X's current pairing; capture X's old opponent signup_id
+    x_pairing = db.exec(
+        select(Pairing)
+        .where(Pairing.week == week)
+        .where(Pairing.system == body.system)
+        .where((Pairing.a_signup_id == x_signup.id) | (Pairing.b_signup_id == x_signup.id))
+    ).first()
+
+    z_signup_id: Optional[int] = None
+    if x_pairing:
+        z_signup_id = (
+            x_pairing.b_signup_id if x_pairing.a_signup_id == x_signup.id
+            else x_pairing.a_signup_id
+        )
+
+    # 6. Find Y's current pairing; capture Y's old opponent signup_id
+    y_pairing = db.exec(
+        select(Pairing)
+        .where(Pairing.week == week)
+        .where(Pairing.system == body.system)
+        .where((Pairing.a_signup_id == y_signup.id) | (Pairing.b_signup_id == y_signup.id))
+    ).first()
+
+    w_signup_id: Optional[int] = None
+    if y_pairing:
+        w_signup_id = (
+            y_pairing.b_signup_id if y_pairing.a_signup_id == y_signup.id
+            else y_pairing.a_signup_id
+        )
+
+    # 7. Edge case: X and Y are already paired with each other
+    if x_pairing and y_pairing and x_pairing.id == y_pairing.id:
+        return {"ok": True, "already_paired": True}
+
+    # 8. Capture displaced player data before deleting
+    z_signup: Optional[Signup] = db.get(Signup, z_signup_id) if z_signup_id is not None else None
+    w_signup: Optional[Signup] = db.get(Signup, w_signup_id) if w_signup_id is not None else None
+
+    # 9. Delete X's and Y's current pairings
+    if x_pairing:
+        db.delete(x_pairing)
+    if y_pairing:
+        db.delete(y_pairing)
+
+    # 10. Create new X vs Y prearranged pairing
+    db.add(Pairing(
+        week=week, system=body.system,
+        a_signup_id=x_signup.id, b_signup_id=y_signup.id,
+        status="pending", prearranged=True,
+        a_faction=x_signup.faction, b_faction=y_signup.faction,
+    ))
+
+    # 11. Create BYE pairings for each displaced real player
+    if z_signup is not None:
+        db.add(Pairing(
+            week=week, system=body.system,
+            a_signup_id=z_signup_id, b_signup_id=None,
+            status="pending", prearranged=False,
+            a_faction=z_signup.faction, b_faction=None,
+        ))
+    if w_signup is not None:
+        db.add(Pairing(
+            week=week, system=body.system,
+            a_signup_id=w_signup_id, b_signup_id=None,
+            status="pending", prearranged=False,
+            a_faction=w_signup.faction, b_faction=None,
+        ))
+
+    # 12. Commit
+    db.commit()
+
+    # 13. Discord
+    x_name = x_signup.player_name
+    y_name = y_signup.player_name
+    displaced = []
+    if z_signup is not None:
+        displaced.append({"player_id": z_signup.player_id, "player_name": z_signup.player_name})
+    if w_signup is not None:
+        displaced.append({"player_id": w_signup.player_id, "player_name": w_signup.player_name})
+
+    all_byes = _get_all_byes(db, body.system, week)
+    z_name = z_signup.player_name if z_signup is not None else None
+    w_name = w_signup.player_name if w_signup is not None else None
+    newly_displaced_names = [name for name in [z_name, w_name] if name]
+    for bye in all_byes:
+        if bye["player_name"] in newly_displaced_names:
+            bye["is_new"] = True
+    content = _build_bye_discord_message(
+        header=f"🔀 **{x_name}** and **{y_name}** have re-arranged their games!",
+        newly_displaced_names=newly_displaced_names,
+        all_byes=all_byes,
+        app_url=APP_PUBLIC_URL,
+    )
+    _post_webhook(body.system, content)
+
+    # 14. Return
+    return {
+        "ok": True,
+        "new_pairing": {
+            "x_name": x_name,
+            "y_name": y_name,
+            "x_faction": x_signup.faction,
+            "y_faction": y_signup.faction,
+        },
+        "displaced": displaced,
+    }
+
+
+@router.get("/unpaired")
+def get_unpaired(
+    system: str,
+    week: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    week = _validate_week(week)
+
+    gate = db.exec(
+        select(PublishState)
+        .where(PublishState.week == week)
+        .where(PublishState.system == system)
+    ).first()
+    if not gate or not gate.published:
+        return []
+
+    bye_pairings = db.exec(
+        select(Pairing)
+        .where(Pairing.week == week)
+        .where(Pairing.system == system)
+        .where(Pairing.b_signup_id.is_(None))
+    ).all()
+
+    result = []
+    for p in bye_pairings:
+        signup = db.get(Signup, p.a_signup_id)
+        if signup:
+            result.append({
+                "player_id": signup.player_id,
+                "player_name": signup.player_name,
+                "signup_id": signup.id,
+            })
+    return result
