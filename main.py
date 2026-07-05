@@ -409,8 +409,10 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
         matchups.append({
             "id": p.id,
             "player_a_name": a.player_name if a else f"A#{p.a_signup_id}",
+            "player_a_id": a.player_id if a else None,
             "player_a_faction": p.a_faction or (a.faction if a else None),
             "player_b_name": b.player_name if b else None,
+            "player_b_id": b.player_id if b else None,
             "player_b_faction": p.b_faction or (b.faction if b else None) if b else None,
             "is_bye": is_bye,
             "game_type": game_type,

@@ -216,7 +216,7 @@ def faction_stats(
             "draws": s["draws"],
             "losses": s["losses"],
             "total_games": total,
-            "adjusted_win_rate": (s["wins"] + 0.5 * s["draws"] + 1.5) / (total + 3),
+            "adjusted_win_rate": (s["wins"] + 0.5 * s["draws"] + 2.5) / (total + 5),
         })
 
     players.sort(key=lambda p: (-p["adjusted_win_rate"], -p["total_games"]))
