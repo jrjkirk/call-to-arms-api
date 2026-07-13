@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
 from database import get_session
-from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User
+from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -53,6 +53,41 @@ app.include_router(admin_router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/systems")
+def list_systems(session: Session = Depends(get_session)):
+    """Public read of the systems-as-data catalogue (Phase 0), for the
+    frontend to fetch signup-form config (vibes/scenarios/points) instead of
+    keeping its own hardcoded copies. No auth required — this is the same
+    information that's currently only available as hardcoded frontend
+    constants, not new access.
+
+    Not gated by the systems_from_catalogue flag: that flag controls whether
+    the backend's own signup/pairing computation uses the catalogue
+    internally. This endpoint is a brand-new read path with no prior
+    behavior to preserve, so it's always on.
+    """
+    rows = session.exec(
+        select(SystemConfig).where(SystemConfig.active == True)
+    ).all()
+    return [
+        {
+            "slug": r.slug,
+            "name": r.name,
+            "legacy_system_name": r.legacy_system_name,
+            "uses_points": r.uses_points,
+            "default_points": r.default_points,
+            "max_points": r.max_points,
+            "vibe_options": r.vibe_options,
+            "default_vibe": r.default_vibe,
+            "uses_scenarios": r.uses_scenarios,
+            "scenario_options": r.scenario_options,
+            "default_scenario": r.default_scenario,
+            "allows_demo": r.allows_demo,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/players")

@@ -6,6 +6,7 @@ strictly reading from these tables until later in the migration.
 """
 from datetime import datetime
 from typing import Optional
+from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 
 
@@ -157,3 +158,66 @@ class AdminRole(SQLModel, table=True):
     user_id: int = Field(index=True)
     scope: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SystemConfig(SQLModel, table=True):
+    """Phase 0 systems-as-data catalogue.
+
+    Additive table — created before any code reads it (expand/contract step 1).
+    Not on the live write path yet; the hardcoded constants in signups.py /
+    pairings_engine.py / render_pairings_image.py remain the source of truth
+    until the `systems_from_catalogue` flag (app_settings) is flipped per
+    system in a later step.
+
+    `slug` is the new short, human-editable identifier (tow/hh/kt) for this
+    catalogue and future code. It is NOT what's stored in
+    Signup.system / Pairing.system / PublishState.system today — those
+    columns hold the full display string ("The Old World", etc.).
+    `legacy_system_name` carries that exact string so catalogue-driven code
+    can still join/filter against the existing columns without a data
+    migration. `name` is the display name shown in UI, distinct in purpose
+    from `legacy_system_name` even though the values coincide today.
+    """
+    __tablename__ = "systems"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    name: str
+    slug: str = Field(unique=True, index=True)
+    legacy_system_name: str = Field(unique=True, index=True)
+
+    uses_points: bool = False
+    default_points: Optional[int] = None
+    max_points: Optional[int] = None
+
+    vibe_options: list = Field(default_factory=list, sa_column=Column(JSON))
+    default_vibe: Optional[str] = None
+
+    uses_scenarios: bool = False
+    scenario_options: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    default_scenario: Optional[str] = None
+
+    allows_demo: bool = False
+    has_intro_prepass: bool = False
+
+    # Pairing-history lookback windows (weeks). HH runs fortnightly so its
+    # windows are roughly double TOW/KT's weekly cadence — see
+    # pairings_engine.generate(): recent_w, extended_w = (6, 12) for HH,
+    # (3, 6) otherwise.
+    recent_weeks: int = 3
+    extended_weeks: int = 6
+
+    # TOW-only: _escalation_priority_penalty() and the candidate sort in
+    # pairings_engine.generate() give "Escalation"-vibe players sort/match
+    # priority. Not tied to uses_scenarios/uses_points.
+    escalation_priority: bool = False
+
+    faction_list: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
+    # Informational only for now — render_pairings_image.py currently
+    # searches icons/TOW, icons/HH, and icons/KT for every faction lookup
+    # regardless of system, so this field does not yet gate anything.
+    icon_folder: Optional[str] = None
+
+    active: bool = True

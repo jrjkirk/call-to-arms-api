@@ -30,6 +30,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "admin_roles",    # admin appointment/removal
     "pairing_blocks", # admin block add/remove
     "app_settings",   # auto-pairings scheduler updates last_week after each run
+    "systems",        # Phase 0 systems-as-data catalogue: seeded once by
+                       # seed_systems_config.py, then read-only until the
+                       # systems_from_catalogue flag flips app code onto it
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
