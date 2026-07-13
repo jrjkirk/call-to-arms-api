@@ -17,14 +17,25 @@ COOKIE NOTE: cta_session is SameSite=None + Secure, NOT Lax. The frontend
 to attach Lax cookies to cross-site fetch() calls — only None travels.
 The short-lived cta_oauth_state cookie stays Lax because it's only needed
 during top-level redirects, where Lax is sent and is the safer choice.
+
+SUBDOMAIN NOTE: login can be initiated from any club subdomain
+(e.g. test1.calltoarms.app, manchester.calltoarms.app), not just the root
+domain. FRONTEND_URL is a single fixed env var, so on its own it would
+always bounce people back to the root domain after Discord auth regardless
+of which subdomain they started on. _safe_return_to() captures the
+initiating subdomain from the Referer header on /discord/login and carries
+it through a short-lived cookie so /discord/callback can send the user back
+to the right place. The regex restricts this to calltoarms.app (sub)domains
+only, so a spoofed Referer can't be used as an open redirect.
 """
 import hmac
 import hashlib
 import os
+import re
 import secrets
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
@@ -45,6 +56,11 @@ DISCORD_API = "https://discord.com/api"
 SCOPES = "identify"
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Matches calltoarms.app and any subdomain of it (www, test1, manchester, ...).
+# Used to validate the Referer-derived return_to origin so /discord/login
+# can't be abused as an open redirect to an arbitrary host.
+_ALLOWED_RETURN_HOST_RE = re.compile(r"^([a-zA-Z0-9-]+\.)?calltoarms\.app$")
 
 
 def _sign(value: str) -> str:
@@ -77,6 +93,25 @@ def _verify_session_cookie(raw: str) -> Optional[int]:
         return None
 
 
+def _safe_return_to(request: Request) -> str:
+    """Work out which frontend origin to send the user back to after login.
+
+    Defaults to FRONTEND_URL (the root domain). If the login was initiated
+    from a recognized calltoarms.app subdomain — inferred from the Referer
+    header on the /discord/login navigation — return that origin instead,
+    so club subdomains land back on themselves rather than bouncing to root.
+    """
+    referer = request.headers.get("referer")
+    if not referer:
+        return FRONTEND_URL
+    parsed = urlparse(referer)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return FRONTEND_URL
+    if not _ALLOWED_RETURN_HOST_RE.match(parsed.hostname):
+        return FRONTEND_URL
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def current_user(
     session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
     db: Session = Depends(get_session),
@@ -104,6 +139,7 @@ def discord_login(request: Request):
         raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
 
     state = secrets.token_urlsafe(24)
+    return_to = _safe_return_to(request)
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
     params = {
         "client_id": DISCORD_CLIENT_ID,
@@ -116,6 +152,7 @@ def discord_login(request: Request):
 
     response = RedirectResponse(auth_url)
     response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax")
+    response.set_cookie("cta_oauth_return_to", return_to, max_age=300, httponly=True, samesite="lax")
     return response
 
 
@@ -124,6 +161,7 @@ async def discord_callback(
     code: str,
     state: str,
     cta_oauth_state: Optional[str] = Cookie(default=None),
+    cta_oauth_return_to: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_session),
 ):
     """Step 2: Discord redirected back with a ?code= — exchange it for a user."""
@@ -185,7 +223,8 @@ async def discord_callback(
     db.refresh(user)
 
     cookie_value = _make_session_cookie(user.id)
-    response = RedirectResponse(FRONTEND_URL)
+    return_to = cta_oauth_return_to or FRONTEND_URL
+    response = RedirectResponse(return_to)
     # SameSite=None + Secure: the ONLY combination browsers will attach to a
     # cross-site fetch() from the Vercel frontend. Lax silently never arrives.
     # Chrome/Firefox treat http://localhost as trustworthy, so secure=True
@@ -199,6 +238,7 @@ async def discord_callback(
         secure=True,
     )
     response.delete_cookie("cta_oauth_state")
+    response.delete_cookie("cta_oauth_return_to")
     return response
 
 

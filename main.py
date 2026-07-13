@@ -31,11 +31,14 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
-        "https://call-to-arms-web.vercel.app",
-        "https://www.calltoarms.app",
-        "https://calltoarms.app",
     ],
-    allow_origin_regex=r"https://call-to-arms-web.*\.vercel\.app",
+    # Matches:
+    #   - Vercel preview URLs for the frontend (call-to-arms-web*.vercel.app)
+    #   - calltoarms.app, www.calltoarms.app, and any club subdomain
+    #     (e.g. manchester.calltoarms.app, test1.calltoarms.app) now that
+    #     the wildcard domain is live in Vercel. Multi-club rollout needs
+    #     every future subdomain to work here without another deploy.
+    allow_origin_regex=r"^https://(call-to-arms-web.*\.vercel\.app|([a-zA-Z0-9-]+\.)?calltoarms\.app)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
