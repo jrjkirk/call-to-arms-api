@@ -23,6 +23,7 @@ from auth import (
     require_super_admin,
     require_user,
 )
+from database import _default_club_id
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -30,7 +31,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, AppSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from models import AdminRole, ClubSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
 from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
 from signups import (
@@ -168,7 +169,7 @@ def grant_role(
     ).first()
 
     if existing is None:
-        db.add(AdminRole(user_id=body.user_id, scope=body.scope))
+        db.add(AdminRole(user_id=body.user_id, scope=body.scope, club_id=_default_club_id(db)))
         db.commit()
 
     return {"ok": True}
@@ -360,7 +361,7 @@ def add_block(
             db.commit()
         return {"ok": True, "created": False}
 
-    db.add(PairingBlock(player_a_id=low, player_b_id=high, note=note))
+    db.add(PairingBlock(player_a_id=low, player_b_id=high, note=note, club_id=_default_club_id(db)))
     db.commit()
     return {"ok": True, "created": True}
 
@@ -575,14 +576,16 @@ def _slug(system: str) -> str:
 
 
 def _get_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
-    row = db.get(AppSetting, key)
+    club_id = _default_club_id(db)
+    row = db.get(ClubSetting, (club_id, key))
     return row.value if row is not None else default
 
 
 def _upsert_setting(db: Session, key: str, value: str) -> None:
-    row = db.get(AppSetting, key)
+    club_id = _default_club_id(db)
+    row = db.get(ClubSetting, (club_id, key))
     if row is None:
-        row = AppSetting(key=key, value=value)
+        row = ClubSetting(club_id=club_id, key=key, value=value)
     else:
         row.value = value
     db.add(row)
@@ -805,7 +808,12 @@ def pairings_publish(
     ).first()
 
     if gate is None:
-        gate = PublishState(week=body.week, system=body.system, published=body.published)
+        gate = PublishState(
+            week=body.week,
+            system=body.system,
+            published=body.published,
+            club_id=_default_club_id(db),
+        )
     else:
         gate.published = body.published
     db.add(gate)
@@ -1210,6 +1218,7 @@ def admin_signup_create(
         tnt_ok=False,
         scenario=scenario,
         can_demo=can_demo,
+        club_id=_default_club_id(db),
     )
     db.add(su)
     db.commit()

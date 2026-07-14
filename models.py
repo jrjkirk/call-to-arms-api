@@ -4,7 +4,7 @@ These mirror the schema in Supabase exactly. We don't manage migrations here —
 the source of truth for the schema is still the Streamlit app for now. We're
 strictly reading from these tables until later in the migration.
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
@@ -22,6 +22,7 @@ class Player(SQLModel, table=True):
     titles: Optional[str] = Field(default=None)
     admin_notes: Optional[str] = Field(default=None)
     announced_achievements: Optional[str] = Field(default=None)
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class Signup(SQLModel, table=True):
@@ -46,6 +47,7 @@ class Signup(SQLModel, table=True):
     tnt_ok: bool = False
     scenario: Optional[str] = None
     can_demo: bool = False
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class Pairing(SQLModel, table=True):
@@ -67,6 +69,7 @@ class Pairing(SQLModel, table=True):
     b_faction: Optional[str] = None
 
     prearranged: bool = Field(default=False)
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class PublishState(SQLModel, table=True):
@@ -77,6 +80,7 @@ class PublishState(SQLModel, table=True):
     week: str
     system: str
     published: bool = False
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class PairingBlock(SQLModel, table=True):
@@ -87,11 +91,27 @@ class PairingBlock(SQLModel, table=True):
     player_b_id: int
     note: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Phase 1 expand/contract step, table 1 of 10. Nullable during
+    # backfill/dual-run; a later contract step makes this NOT NULL once
+    # every row is populated. See multitenancy-plan-v2.md.
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class AppSetting(SQLModel, table=True):
     __tablename__ = "app_settings"
 
+    key: str = Field(primary_key=True)
+    value: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ClubSetting(SQLModel, table=True):
+    """Per-club settings (composite PK), split out of app_settings — see
+    multitenancy-plan-v2.md. app_settings stays global-only (e.g.
+    systems_from_catalogue); auto_pairings_* keys live here instead."""
+    __tablename__ = "club_settings"
+
+    club_id: int = Field(foreign_key="clubs.id", primary_key=True)
     key: str = Field(primary_key=True)
     value: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -122,6 +142,7 @@ class LeagueResult(SQLModel, table=True):
     player_1_rating_after: Optional[float] = None
     player_2_rating_after: Optional[float] = None
     k_factor_used: Optional[int] = None
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class LeagueRating(SQLModel, table=True):
@@ -133,6 +154,7 @@ class LeagueRating(SQLModel, table=True):
     player_name: str
     rating: float = 1000.0
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 class User(SQLModel, table=True):
     """An authenticated user. Links a Discord identity to a player_id (after claim)."""
@@ -147,6 +169,7 @@ class User(SQLModel, table=True):
     is_super_admin: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: datetime = Field(default_factory=datetime.utcnow)
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class AdminRole(SQLModel, table=True):
@@ -158,6 +181,7 @@ class AdminRole(SQLModel, table=True):
     user_id: int = Field(index=True)
     scope: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class SystemConfig(SQLModel, table=True):
@@ -221,3 +245,33 @@ class SystemConfig(SQLModel, table=True):
     icon_folder: Optional[str] = None
 
     active: bool = True
+
+
+class Club(SQLModel, table=True):
+    __tablename__ = "clubs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    slug: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    active: bool = True
+    timezone: str = "Europe/London"
+    contact_email: Optional[str] = None
+    leagues_enabled: bool = True
+
+
+class ClubSystem(SQLModel, table=True):
+    """Which systems a club runs, and that club's schedule for each —
+    doesn't touch SystemConfig itself (that stays platform-managed and
+    shared across all clubs)."""
+    __tablename__ = "club_systems"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+    enabled: bool = True
+    session_day: str  # e.g. "Wednesday", "Friday"
+    session_cadence: str  # "weekly" | "fortnightly"
+    cadence_anchor: Optional[date] = None  # only meaningful when fortnightly

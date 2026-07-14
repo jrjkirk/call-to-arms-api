@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
-from database import engine
-from models import AppSetting, Pairing, PublishState, Signup
+from database import engine, _default_club_id
+from models import ClubSetting, Pairing, PublishState, Signup
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
 from run_hh_call_to_arms import is_hh_session_week
@@ -24,14 +24,16 @@ def _slug(system: str) -> str:
 
 
 def _get_setting(db: Session, key: str, default: str | None = None) -> str | None:
-    row = db.get(AppSetting, key)
+    club_id = _default_club_id(db)
+    row = db.get(ClubSetting, (club_id, key))
     return row.value if row is not None else default
 
 
 def _upsert_setting(db: Session, key: str, value: str) -> None:
-    row = db.get(AppSetting, key)
+    club_id = _default_club_id(db)
+    row = db.get(ClubSetting, (club_id, key))
     if row is None:
-        row = AppSetting(key=key, value=value)
+        row = ClubSetting(club_id=club_id, key=key, value=value)
     else:
         row.value = value
     db.add(row)
@@ -101,7 +103,12 @@ def main() -> None:
                     .where(PublishState.week == target_week)
                 ).first()
                 if gate is None:
-                    gate = PublishState(system=system, week=target_week, published=True)
+                    gate = PublishState(
+                        system=system,
+                        week=target_week,
+                        published=True,
+                        club_id=_default_club_id(db),
+                    )
                 else:
                     gate.published = True
                 db.add(gate)

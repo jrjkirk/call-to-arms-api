@@ -11,8 +11,10 @@ table-by-table, we add the table name here.
 import os
 from dotenv import load_dotenv
 from sqlalchemy import event
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
+
+from models import Club
 
 load_dotenv()
 
@@ -33,6 +35,15 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "systems",        # Phase 0 systems-as-data catalogue: seeded once by
                        # seed_systems_config.py, then read-only until the
                        # systems_from_catalogue flag flips app code onto it
+    "clubs",          # Phase 1 step 1: seeded once by seed_clubs.py, then
+                       # read-only until a later Phase 1 step starts
+                       # scoping queries by club
+    "club_systems",   # Phase 1 step 1: seeded once by seed_clubs.py, then
+                       # read-only until a later Phase 1 step starts
+                       # scoping queries by club
+    "club_settings",  # auto-pairings scheduler settings, now per-club
+                       # (split out of app_settings) — admin.py's
+                       # auto-pairings-settings endpoints + the scheduler
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
@@ -55,3 +66,14 @@ def get_session():
     """FastAPI dependency: yields a database session that closes itself."""
     with Session(engine) as session:
         yield session
+
+
+def _default_club_id(db: Session) -> int:
+    """Placeholder until the Phase 1 scoped-query helper resolves the
+    caller's club from auth. Currently there's only one club, so return
+    it by lookup rather than hardcoding an id. Replace the call sites
+    (not this function) when the real helper lands."""
+    club = db.exec(select(Club).where(Club.slug == "manchester")).first()
+    if club is None:
+        raise RuntimeError("Expected Manchester club row, not found")
+    return club.id

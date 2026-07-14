@@ -14,6 +14,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
+from database import _default_club_id
 from models import Pairing, PairingBlock, Signup, SystemConfig
 from signups import _get_system_config, _systems_from_catalogue_enabled
 
@@ -333,6 +334,7 @@ def generate(
     # below is left completely untouched, gated on `config is None`.
     catalogue_on = _systems_from_catalogue_enabled(session)
     config: Optional[SystemConfig] = _get_system_config(session, system) if catalogue_on else None
+    club_id = _default_club_id(session)
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -411,6 +413,7 @@ def generate(
                         status="pending",
                         a_faction=seeker.row.faction,
                         b_faction=best_leader.row.faction,
+                        club_id=club_id,
                     )
                     session.add(p)
                     session.flush()
@@ -522,6 +525,7 @@ def generate(
                     status="pending",
                     a_faction=ms.row.faction,
                     b_faction=other.row.faction,
+                    club_id=club_id,
                 )
                 session.add(p)
                 session.flush()
@@ -546,6 +550,7 @@ def generate(
                     status="pending",
                     a_faction=ms.row.faction,
                     b_faction=None,
+                    club_id=club_id,
                 )
                 session.add(p)
                 session.flush()

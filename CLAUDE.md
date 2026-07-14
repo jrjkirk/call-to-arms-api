@@ -42,6 +42,31 @@ user: User = Depends(require_user)
 
 Both are defined in `auth.py` and resolve from the `cta_session` HMAC cookie.
 
+## ⚠️ Shared Discord secret (local + production)
+
+`DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` belong to a single Discord
+application whose Redirects list covers both `localhost` and
+`calltoarms.app`/`fly.dev` — **local dev and production share the same
+client secret.** There is no separate "local" secret.
+
+**Incident, 2026-07-13:** the secret was reset in the Discord Developer
+Portal to get local login working, without also updating the Fly secret.
+Discord invalidates the old secret the instant you reset it, so production
+silently broke (`invalid_client` on every `/auth/discord/callback`) until a
+player reported it.
+
+**Rule: any time `DISCORD_CLIENT_SECRET` is reset or rotated, update BOTH in
+the same sitting:**
+```bash
+# local — edit .env
+DISCORD_CLIENT_SECRET=<new value>
+
+# production
+fly secrets set DISCORD_CLIENT_SECRET=<new value> -a call-to-arms-api
+```
+Worth considering a second, separate Discord application for local dev to
+remove this failure mode entirely (not done yet).
+
 ## ⚠️ WRITE_ALLOWED_TABLES guard
 
 `database.py` registers a SQLAlchemy `before_flush` listener that raises `RuntimeError` for any write to a table not in `WRITE_ALLOWED_TABLES`. This is a safety net while the migration from Streamlit is in progress.

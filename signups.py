@@ -17,7 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import get_session
+from database import get_session, _default_club_id
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting
 from auth import admin_scopes, require_user
 
@@ -351,6 +351,7 @@ def submit_signup(
             experience=experience, vibe=vibe,
             standby_ok=bool(body.standby_ok), tnt_ok=False,
             scenario=scenario, can_demo=can_demo,
+            club_id=_default_club_id(db),
         )
         db.add(su)
 
@@ -414,6 +415,7 @@ def drop_signup(
                         a_signup_id=opponent_signup_id, b_signup_id=None,
                         status="pending", prearranged=False,
                         a_faction=opponent_signup.faction, b_faction=None,
+                        club_id=_default_club_id(db),
                     ))
             db.delete(pairing)
 
@@ -560,6 +562,7 @@ def submit_prearranged(
         experience="New", vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
+        club_id=_default_club_id(db),
     )
     su_b = Signup(
         week=week, system=body.system,
@@ -568,6 +571,7 @@ def submit_prearranged(
         experience="New", vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
+        club_id=_default_club_id(db),
     )
     db.add(su_a)
     db.add(su_b)
@@ -579,6 +583,7 @@ def submit_prearranged(
         status="pending",
         a_faction=faction_a, b_faction=faction_b,
         prearranged=True,
+        club_id=_default_club_id(db),
     )
     db.add(pairing)
     db.commit()
@@ -712,6 +717,7 @@ def swap_signups(
         a_signup_id=x_signup.id, b_signup_id=y_signup.id,
         status="pending", prearranged=True,
         a_faction=x_signup.faction, b_faction=y_signup.faction,
+        club_id=_default_club_id(db),
     ))
 
     # 11. Create BYE pairings for each displaced real player
@@ -721,6 +727,7 @@ def swap_signups(
             a_signup_id=z_signup_id, b_signup_id=None,
             status="pending", prearranged=False,
             a_faction=z_signup.faction, b_faction=None,
+            club_id=_default_club_id(db),
         ))
     if w_signup is not None:
         db.add(Pairing(
@@ -728,6 +735,7 @@ def swap_signups(
             a_signup_id=w_signup_id, b_signup_id=None,
             status="pending", prearranged=False,
             a_faction=w_signup.faction, b_faction=None,
+            club_id=_default_club_id(db),
         ))
 
     # 12. Commit

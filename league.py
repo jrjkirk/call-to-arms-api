@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
 from auth import require_user
-from database import get_session
+from database import _default_club_id, get_session
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -97,6 +97,7 @@ def _recalculate_ratings(db: Session) -> None:
     for old in db.exec(select(LeagueRating)).all():
         db.delete(old)
 
+    club_id = _default_club_id(db)
     now = datetime.utcnow()
     for pid, rating in ratings.items():
         db.add(LeagueRating(
@@ -104,6 +105,7 @@ def _recalculate_ratings(db: Session) -> None:
             player_name=latest_name[pid],
             rating=rating,
             updated_at=now,
+            club_id=club_id,
         ))
 
 
@@ -314,6 +316,7 @@ def submit_result(
         player_1_painting_bonus=p1_painting,
         player_2_painting_bonus=p2_painting,
         game_type=body.game_type,
+        club_id=_default_club_id(db),
     )
     db.add(row)
     db.flush()  # assign row.id within the transaction so the recalc includes this row

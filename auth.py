@@ -43,7 +43,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from database import get_session
+from database import get_session, _default_club_id
 from models import User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
@@ -217,6 +217,7 @@ async def discord_callback(
             discord_name=discord_name,
             avatar_url=avatar_url,
             player_id=None,
+            club_id=_default_club_id(db),
         )
         db.add(user)
     db.commit()
@@ -316,7 +317,7 @@ def create_profile(
     if not name:
         raise HTTPException(status_code=422, detail="Name cannot be blank")
 
-    player = Player(name=name, default_faction=body.default_faction or None, active=True)
+    player = Player(name=name, default_faction=body.default_faction or None, active=True, club_id=_default_club_id(db))
     db.add(player)
     db.flush()  # populate player.id before linking
 
