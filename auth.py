@@ -369,6 +369,17 @@ def require_super_admin(user: User = Depends(require_user)) -> User:
     return user
 
 
+def require_platform_admin(user: User = Depends(require_user)) -> User:
+    """Dependency: raises 403 unless the caller is a platform admin.
+
+    Platform admins can act across clubs (e.g. creating new clubs).
+    Set by SQL, never via this API — same pattern as is_super_admin.
+    """
+    if not user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="Platform-admin access required.")
+    return user
+
+
 def require_scope(scope: str):
     """Factory: returns a dependency that 403s unless the caller holds that scope."""
     def _dep(user: User = Depends(require_user), db: Session = Depends(get_session)) -> User:

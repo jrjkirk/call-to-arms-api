@@ -19,6 +19,7 @@ from auth import (
     admin_scopes,
     current_user,
     get_session,
+    require_platform_admin,
     require_scope,
     require_super_admin,
     require_user,
@@ -31,7 +32,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, ClubSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from models import AdminRole, Club, ClubSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
 from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
 from signups import (
@@ -1432,3 +1433,40 @@ def achievement_post_discord(
         )
     post_discord_achievement(body.player_name, body.achievement)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Platform admin — cross-club actions
+# ---------------------------------------------------------------------------
+
+class ClubCreateBody(BaseModel):
+    name: str
+    slug: str
+    timezone: str = "Europe/London"
+    contact_email: Optional[str] = None
+    leagues_enabled: bool = True
+
+
+@router.post("/platform/clubs")
+def create_club(
+    body: ClubCreateBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Create a new club. Platform-admin only — is_platform_admin is set by
+    SQL, never via this API, same pattern as is_super_admin."""
+    existing = db.exec(select(Club).where(Club.slug == body.slug)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="A club with this slug already exists.")
+
+    club = Club(
+        name=body.name,
+        slug=body.slug,
+        timezone=body.timezone,
+        contact_email=body.contact_email,
+        leagues_enabled=body.leagues_enabled,
+    )
+    db.add(club)
+    db.commit()
+    db.refresh(club)
+    return club

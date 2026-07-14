@@ -167,6 +167,7 @@ class User(SQLModel, table=True):
     avatar_url: Optional[str] = None
     player_id: Optional[int] = Field(default=None, index=True)
     is_super_admin: bool = Field(default=False)
+    is_platform_admin: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: datetime = Field(default_factory=datetime.utcnow)
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
