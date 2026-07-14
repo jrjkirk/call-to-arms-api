@@ -134,7 +134,7 @@ def main() -> None:
                         _upsert_setting(db, club_id, f"auto_pairings_{slug}_last_week", target_week)
                         db.commit()
 
-                        posted = post_pairings_image_for(db, system, target_week)
+                        posted = post_pairings_image_for(db, system, target_week, club_id=club_id)
                         print(f"[{system} club={club_id}] DONE — pairings generated+published for {target_week}, image_posted={posted}")
 
                     except Exception as exc:
