@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
 from auth import require_user
-from database import _default_club_id, get_session, scoped
+from database import get_session, scoped
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -46,9 +46,9 @@ def _painting_bonus(value: Optional[str]) -> float:
     return 0.0
 
 
-def _recalculate_ratings(db: Session) -> None:
+def _recalculate_ratings(db: Session, club_id: int) -> None:
     """Full replay of all LeagueResult rows. Rebuilds the LeagueRating table from scratch."""
-    results = db.exec(select(LeagueResult).order_by(LeagueResult.id)).all()
+    results = db.exec(scoped(LeagueResult, club_id).order_by(LeagueResult.id)).all()
 
     ratings: dict[int, float] = {}
     latest_name: dict[int, str] = {}
@@ -94,10 +94,9 @@ def _recalculate_ratings(db: Session) -> None:
         latest_name[p1] = row.player_1_name
         latest_name[p2] = row.player_2_name
 
-    for old in db.exec(select(LeagueRating)).all():
+    for old in db.exec(scoped(LeagueRating, club_id)).all():
         db.delete(old)
 
-    club_id = _default_club_id(db)
     now = datetime.utcnow()
     for pid, rating in ratings.items():
         db.add(LeagueRating(
@@ -321,7 +320,7 @@ def submit_result(
     db.add(row)
     db.flush()  # assign row.id within the transaction so the recalc includes this row
 
-    _recalculate_ratings(db)
+    _recalculate_ratings(db, user.club_id)
     db.commit()  # single commit for insert + full recalc
     db.refresh(row)
 

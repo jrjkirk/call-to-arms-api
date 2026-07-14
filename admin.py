@@ -1374,7 +1374,7 @@ def admin_league_result_patch(
 
     db.add(row)
     db.flush()
-    _recalculate_ratings(db)
+    _recalculate_ratings(db, user.club_id)
     db.commit()
     db.refresh(row)
     return _league_result_row(row)
@@ -1393,7 +1393,7 @@ def admin_league_result_delete(
 
     db.delete(row)
     db.flush()
-    _recalculate_ratings(db)
+    _recalculate_ratings(db, user.club_id)
     db.commit()
     return {"ok": True}
 
