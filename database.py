@@ -9,12 +9,17 @@ WRITE_ALLOWED_TABLES is the explicit allow-list. As we build out write features
 table-by-table, we add the table name here.
 """
 import os
+from typing import Type, TypeVar
+
 from dotenv import load_dotenv
 from sqlalchemy import event
+from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
 from models import Club
+
+T = TypeVar("T")
 
 load_dotenv()
 
@@ -77,3 +82,13 @@ def _default_club_id(db: Session) -> int:
     if club is None:
         raise RuntimeError("Expected Manchester club row, not found")
     return club.id
+
+
+def scoped(model: Type[T], club_id: int) -> Select:
+    """The only sanctioned way to query a club-owned table once the
+    caller's club_id is known. Returns a SELECT pre-filtered to one club;
+    chain further .where()/.order_by()/etc. onto it exactly as you would
+    a plain select(Model). club_id must come from the authenticated
+    caller's context (user.club_id) — never accept it from a request
+    body."""
+    return select(model).where(model.club_id == club_id)

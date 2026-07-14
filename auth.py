@@ -43,7 +43,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from database import get_session, _default_club_id
+from database import get_session, _default_club_id, scoped
 from models import User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
@@ -256,7 +256,7 @@ def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_s
     candidates = []
     if user.player_id is None:
         candidates = db.exec(
-            select(Player).where(Player.active == True).order_by(Player.name)
+            scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
         ).all()
 
     return {
@@ -285,7 +285,7 @@ def claim_player(
         raise HTTPException(status_code=400, detail="That player is already claimed by another user")
 
     player = db.get(Player, player_id)
-    if player is None or not player.active:
+    if player is None or not player.active or player.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player not found")
 
     user.player_id = player_id
@@ -317,7 +317,7 @@ def create_profile(
     if not name:
         raise HTTPException(status_code=422, detail="Name cannot be blank")
 
-    player = Player(name=name, default_faction=body.default_faction or None, active=True, club_id=_default_club_id(db))
+    player = Player(name=name, default_faction=body.default_faction or None, active=True, club_id=user.club_id)
     db.add(player)
     db.flush()  # populate player.id before linking
 
@@ -358,7 +358,7 @@ def admin_scopes(user: Optional[User], db: Session) -> set[str]:
         return set()
     if user.is_super_admin:
         return set(VALID_SCOPES)
-    rows = db.exec(select(AdminRole).where(AdminRole.user_id == user.id)).all()
+    rows = db.exec(scoped(AdminRole, user.club_id).where(AdminRole.user_id == user.id)).all()
     return {r.scope for r in rows}
 
 

@@ -7,9 +7,9 @@ image to Discord. One system failing does not stop the others.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from database import engine, _default_club_id
+from database import engine, _default_club_id, scoped
 from models import ClubSetting, Pairing, PublishState, Signup
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
@@ -72,8 +72,10 @@ def main() -> None:
                     )
                     continue
 
+                club_id = _default_club_id(db)
+
                 signups = db.exec(
-                    select(Signup)
+                    scoped(Signup, club_id)
                     .where(Signup.system == system)
                     .where(Signup.week == target_week)
                 ).all()
@@ -86,7 +88,7 @@ def main() -> None:
 
                 # Delete existing pending non-prearranged pairings before regenerating
                 old = db.exec(
-                    select(Pairing)
+                    scoped(Pairing, club_id)
                     .where(Pairing.system == system)
                     .where(Pairing.week == target_week)
                     .where(Pairing.status == "pending")
@@ -95,10 +97,13 @@ def main() -> None:
                 for p in old:
                     db.delete(p)
 
-                generate(db, target_week, system, allow_repeats_when_needed=True, persist=True)
+                generate(
+                    db, target_week, system, allow_repeats_when_needed=True, persist=True,
+                    club_id=club_id,
+                )
 
                 gate = db.exec(
-                    select(PublishState)
+                    scoped(PublishState, club_id)
                     .where(PublishState.system == system)
                     .where(PublishState.week == target_week)
                 ).first()
@@ -107,7 +112,7 @@ def main() -> None:
                         system=system,
                         week=target_week,
                         published=True,
-                        club_id=_default_club_id(db),
+                        club_id=club_id,
                     )
                 else:
                     gate.published = True

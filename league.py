@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
 from auth import require_user
-from database import _default_club_id, get_session
+from database import _default_club_id, get_session, scoped
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -169,11 +169,11 @@ def list_factions(db: Session = Depends(get_session)):
 @router.get("/faction-stats")
 def faction_stats(
     faction: str = Query(...),
-    _: User = Depends(require_user),
+    user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
     rows = db.exec(
-        select(LeagueResult).where(
+        scoped(LeagueResult, user.club_id).where(
             or_(
                 LeagueResult.player_1_faction == faction,
                 LeagueResult.player_2_faction == faction,
@@ -249,11 +249,11 @@ def submit_result(
         raise HTTPException(status_code=422, detail="Players must be distinct.")
 
     p1 = db.get(Player, body.player_1_id)
-    if p1 is None or not p1.active:
+    if p1 is None or not p1.active or p1.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player 1 not found or inactive.")
 
     p2 = db.get(Player, body.player_2_id)
-    if p2 is None or not p2.active:
+    if p2 is None or not p2.active or p2.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player 2 not found or inactive.")
 
     if body.result not in VALID_RESULTS:
@@ -277,7 +277,7 @@ def submit_result(
     # Duplicate guard: match on every field. NULL == NULL must be handled explicitly
     # because SQL NULL comparisons use IS NULL, not =.
     dup_query = (
-        select(LeagueResult)
+        scoped(LeagueResult, user.club_id)
         .where(LeagueResult.player_1_id == body.player_1_id)
         .where(LeagueResult.player_2_id == body.player_2_id)
         .where(LeagueResult.result == body.result)
@@ -316,7 +316,7 @@ def submit_result(
         player_1_painting_bonus=p1_painting,
         player_2_painting_bonus=p2_painting,
         game_type=body.game_type,
-        club_id=_default_club_id(db),
+        club_id=user.club_id,
     )
     db.add(row)
     db.flush()  # assign row.id within the transaction so the recalc includes this row

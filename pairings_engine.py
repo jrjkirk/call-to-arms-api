@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from database import _default_club_id
+from database import scoped
 from models import Pairing, PairingBlock, Signup, SystemConfig
 from signups import _get_system_config, _systems_from_catalogue_enabled
 
@@ -40,7 +40,7 @@ def build_match_preference(su: Signup) -> tuple:
 
 
 def previous_pairs_recent(
-    session: Session, system: str, current_week: str, max_weeks: int
+    session: Session, system: str, current_week: str, max_weeks: int, club_id: int
 ) -> set:
     try:
         current_dt = datetime.strptime(current_week, "%d/%m/%Y")
@@ -48,7 +48,7 @@ def previous_pairs_recent(
         return set()
 
     pairings = session.exec(
-        select(Pairing)
+        scoped(Pairing, club_id)
         .where(Pairing.system == system)
         .where(Pairing.b_signup_id.isnot(None))
     ).all()
@@ -59,7 +59,7 @@ def previous_pairs_recent(
     signup_ids = {p.a_signup_id for p in pairings} | {
         p.b_signup_id for p in pairings if p.b_signup_id
     }
-    rows = session.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(signup_ids))).all()
     signups_by_id = {s.id: s for s in rows}
 
     result: set = set()
@@ -82,14 +82,16 @@ def previous_pairs_recent(
     return result
 
 
-def previous_bye_player_ids(session: Session, system: str, current_week: str) -> set[int]:
+def previous_bye_player_ids(
+    session: Session, system: str, current_week: str, club_id: int
+) -> set[int]:
     try:
         datetime.strptime(current_week, "%d/%m/%Y")
     except ValueError:
         return set()
 
     pairings = session.exec(
-        select(Pairing)
+        scoped(Pairing, club_id)
         .where(Pairing.system == system)
         .where(Pairing.b_signup_id.is_(None))
         .where(Pairing.week != current_week)
@@ -112,7 +114,7 @@ def previous_bye_player_ids(session: Session, system: str, current_week: str) ->
     if not latest_bye:
         return set()
 
-    rows = session.exec(select(Signup).where(Signup.id.in_(latest_bye.keys()))).all()
+    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(latest_bye.keys()))).all()
     signups_by_id = {s.id: s for s in rows}
 
     result: set[int] = set()
@@ -125,14 +127,16 @@ def previous_bye_player_ids(session: Session, system: str, current_week: str) ->
     return result
 
 
-def last_opponent_pairs(session: Session, system: str, current_week: str) -> set:
+def last_opponent_pairs(
+    session: Session, system: str, current_week: str, club_id: int
+) -> set:
     try:
         datetime.strptime(current_week, "%d/%m/%Y")
     except ValueError:
         return set()
 
     pairings = session.exec(
-        select(Pairing)
+        scoped(Pairing, club_id)
         .where(Pairing.system == system)
         .where(Pairing.b_signup_id.isnot(None))
         .where(Pairing.week != current_week)
@@ -144,7 +148,7 @@ def last_opponent_pairs(session: Session, system: str, current_week: str) -> set
     signup_ids = {p.a_signup_id for p in pairings} | {
         p.b_signup_id for p in pairings if p.b_signup_id
     }
-    rows = session.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(signup_ids))).all()
     signups_by_id = {s.id: s for s in rows}
 
     # For each player_id, track their most-recent pairing's opponent
@@ -323,6 +327,7 @@ def generate(
     allow_repeats_when_needed: bool = True,
     *,
     persist: bool,
+    club_id: int,
 ) -> list:
     """Generate pairings.
 
@@ -334,11 +339,10 @@ def generate(
     # below is left completely untouched, gated on `config is None`.
     catalogue_on = _systems_from_catalogue_enabled(session)
     config: Optional[SystemConfig] = _get_system_config(session, system) if catalogue_on else None
-    club_id = _default_club_id(session)
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
-        select(Pairing)
+        scoped(Pairing, club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == system)
         .where(Pairing.prearranged == True)
@@ -351,7 +355,7 @@ def generate(
 
     # 2. Load signups, filter prearranged, de-dupe to latest-by-normalized-lower-name
     all_signups = session.exec(
-        select(Signup)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == system)
         .order_by(Signup.created_at)
@@ -455,18 +459,18 @@ def generate(
     else:
         recent_w, extended_w = 3, 6
 
-    seen_recent = previous_pairs_recent(session, system, week, recent_w)
-    seen_extended = previous_pairs_recent(session, system, week, extended_w)
+    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
+    seen_extended = previous_pairs_recent(session, system, week, extended_w, club_id)
 
     def has_played(x: MatcherSignup, y: MatcherSignup) -> bool:
         return tuple(sorted([x.key, y.key])) in seen_recent
 
     # 6. Load blocks
-    block_rows = session.exec(select(PairingBlock)).all()
+    block_rows = session.exec(scoped(PairingBlock, club_id)).all()
     blocks: set = {tuple(sorted([b.player_a_id, b.player_b_id])) for b in block_rows}
 
-    last_opp_pairs = last_opponent_pairs(session, system, week)
-    bye_player_ids = previous_bye_player_ids(session, system, week)
+    last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
+    bye_player_ids = previous_bye_player_ids(session, system, week, club_id)
 
     # 7. Greedy matching; out starts with intro pairs
     used: set[str] = set()

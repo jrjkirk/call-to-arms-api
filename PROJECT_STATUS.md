@@ -641,6 +641,381 @@ what looked wrong.
      ~10 files to use it. This is the next major piece of Phase 1 work,
      separate from and larger than everything done so far. Not started,
      not yet planned in detail.
+
+  **Committed** (2026-07-14): all 10-table `club_id` work pushed to
+  GitHub. **Reminder for whoever deploys next: production's Supabase has
+  NOT been migrated — do not `fly deploy` this until the same migration
+  scripts are run against production.** Deploying now would break every
+  write endpoint in production immediately (`club_id` column/table
+  doesn't exist there yet).
+
+  ---
+
+  **Scoped-query helper phase started.** Simpler than the plan doc
+  originally implied: `users.club_id` already exists and
+  `user: User = Depends(require_user)` is already in scope at nearly
+  every write/admin endpoint, so "the caller's club" is just
+  `user.club_id` — no new auth-layer plumbing needed for the common case.
+  **Decided with Joel: no feature flag for this phase** (unlike Phase 0's
+  dual-run, a flag can't catch behavioral regressions here — filtered and
+  unfiltered queries return identical rows while there's one club — only
+  implementation bugs, which a flag doesn't protect against without
+  duplicating query logic at ~88 sites). Safety net instead: convert in
+  small verified chunks, same discipline as the 10 tables, rely on git to
+  revert if something breaks.
+
+  **Chunk 1 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). `scoped(model, club_id)` added to `database.py`,
+  works as designed. `pairing_blocks` (`list_blocks`/`add_block`/
+  `remove_block`) and `admin_roles` (`list_roles`'s join got a manual
+  `.where()` since `scoped()` only covers single-model selects;
+  `grant_role`/`remove_role`; `auth.py::admin_scopes()`) all converted.
+  Both tables' insert sites switched from `_default_club_id()` to real
+  `user.club_id`. **Verification went further than "no errors":** created
+  a genuine second temporary club with rows inserted directly, confirmed
+  the converted endpoints never leak them to Manchester's user — actual
+  cross-club isolation proven, not just byte-identical-with-one-club.
+  **Deviation:** 3 endpoints had `_: User = Depends(require_super_admin)`
+  (unbound) — renamed to `user` to use it, same dependency, no new auth
+  plumbing.
+  **Carried forward for later chunks:** `pairing_blocks`'s
+  `player_a_id`/`player_b_id` and `admin_roles.user_id` have DB-level FKs
+  not declared on the SQLModel classes — future verify scripts should
+  check `information_schema` before assuming synthetic test IDs will
+  insert cleanly.
+
+  **Next chunk: `auth.py` (the rest of it).** Two genuinely
+  security-relevant conversions found while scoping this, not just
+  mechanical — worth calling out ahead of writing that handoff:
+  1. `auth.py::me()`'s `claim_candidates` list
+     (`select(Player).where(Player.active == True)`) currently offers
+     **every** active player as a claimable profile — under multi-tenancy
+     this must be scoped to the caller's own club, or a user could be
+     offered (and claim) another club's player profile.
+  2. `auth.py::claim_player()` doesn't currently check that the player
+     being claimed belongs to the caller's club at all — worth adding an
+     explicit `player.club_id == user.club_id` check, not just a query
+     conversion, since a crafted `player_id` could otherwise claim a
+     cross-club profile.
+  `create_profile()`'s `Player(...)` can also now use real `user.club_id`
+  instead of the placeholder (existing authenticated user creating their
+  own profile).
+
+  **Chunk 2 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). Both security fixes landed and were proven
+  cross-club, not just single-club sanity-checked: a real second temp
+  club/player confirmed the other club's player never appears in
+  `claim_candidates` and `POST /auth/claim/{id}` on it 404s; same-club
+  claim still works correctly; `create_profile` now writes real
+  `user.club_id`. `current_user()`/`discord_callback()` correctly left
+  untouched. `users.player_id → players.id` confirmed as another real
+  undeclared-on-the-model FK (script honored it by linking real rows).
+  Staging restored to exact pre-run state after cleanup.
+
+  **Next chunk: `league.py` + `admin.py`'s league-result endpoints**
+  (grouped together as one feature area, same as chunk 1 grouped
+  `pairing_blocks`+`admin_roles`). Found while scoping ahead — **the same
+  class of missing-ownership-check bug as `claim_player()`, twice more:**
+  `league.py::submit_result()` and `admin.py`'s
+  `PATCH /league/results/{id}` both accept `player_1_id`/`player_2_id` (or
+  a `result_id` to edit) with no check that the players/result belong to
+  the caller's club — a user could submit or an admin could edit a
+  result pairing two players from different clubs, or edit another
+  club's result via a crafted id. Also: `league.py::list_factions()` has
+  **no authenticated user at all** (fully public endpoint today) — can't
+  scope it by `user.club_id` since there's no caller to resolve one from;
+  stays unscoped for now, same deferral class as `discord_callback()`'s
+  new-user creation, pending Phase 3's subdomain-based club resolution
+  for public pages.
+
+  **Chunk 3 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). Both ownership-check bugs fixed and proven
+  cross-club in both directions (`submit_result` 404s whichever player is
+  from the other club; admin `PATCH`/`DELETE` 404 on another club's
+  result, and a cross-club `player_1_id` on a patch of an owned result
+  also 404s). Mechanical conversions done for `faction_stats`,
+  `submit_result`'s duplicate-guard, `admin_history`'s League branch, and
+  `GET /admin/league/results`. `submit_result`'s `LeagueResult(...)`
+  switched to real `user.club_id`. `list_factions()` correctly confirmed
+  still public/unscoped (deferred to Phase 3).
+  **Bonus fix, proactively applying chunk 1's lesson:** found and fixed
+  the same `_: User = Depends(...)` discard-pattern (unbound dependency)
+  on all three admin league-result endpoints.
+  Staging restored to exact pre-run state.
+
+  **`signups.py` — read in full ahead of writing its handoff(s), the
+  biggest/highest-traffic file yet.** Split into two chunks rather than
+  one, given its size (6 endpoints + 2 shared helpers, vs. 3 endpoints for
+  `league.py`):
+  - **Chunk 4a** (this one): `my_signup`, `submit_signup`,
+    `get_unpaired`, plus the `_signup_count` helper (needs a new
+    `club_id` param threaded through, called from 3 places).
+  - **Chunk 4b** (later, separate handoff): `drop_signup`,
+    `submit_prearranged`, `swap_signups`, plus the `_get_all_byes` helper
+    (also needs `club_id` threaded through). **Confirmed missing-ownership-check
+    bug found ahead of time:** `submit_prearranged`'s
+    `pa = db.get(Player, body.player_a_id)` / `pb = db.get(Player,
+    body.player_b_id)` have no club check at all — same class of bug as
+    `claim_player`/`submit_result` from chunks 2-3, but arguably worse
+    here since a successful cross-club prearranged game would create
+    real `Signup`+`Pairing` rows mixing two clubs' players under
+    Manchester's `club_id`, not just leak/misattribute a read.
+
+  **Chunk 4a done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). `my_signup`, `submit_signup`, `get_unpaired`, and
+  `_signup_count` (gained a `club_id` param) all converted, no
+  deviations. Clever verification: a foreign-club row sharing the same
+  `player_id` but a higher row `id` was excluded from `my_signup`'s
+  `current`/`last` — proves `scoped()` is doing real filtering, not
+  coincidentally-correct ordering. `_signup_count` confirmed two clubs'
+  identically-shaped signups count separately (1 each, not 2 combined).
+  **Signature-threading decision:** `_post_discord_signup`/
+  `_post_discord_drop` both gained a required `club_id` param; the two
+  not-yet-converted call sites (`drop_signup`, `submit_prearranged`) were
+  updated to pass the existing `_default_club_id(db)` placeholder rather
+  than given a default value — matches the convention already used for
+  those two endpoints' still-unconverted `Signup`/`Pairing` writes. Chunk
+  4b needs to swap those two placeholder calls to `user.club_id` when it
+  converts the rest of those endpoints.
+
+  **Chunk 4b done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). `signups.py` is now **fully converted for this
+  phase**. The `submit_prearranged` ownership-check fix proven cross-club
+  in both directions (`player_a_id` and `player_b_id` independently
+  tested), zero rows created on rejection (diffed, not just status code).
+  `drop_signup`/`swap_signups` fully scoped, both trust-chain `db.get()`
+  cases (`opponent_signup`, `z_signup`/`w_signup`) reconfirmed safe.
+  `_get_all_byes` converted. Self-directed cleanup: removed the
+  now-unused `_default_club_id` import from `signups.py` entirely — no
+  placeholder calls remain in this file.
+  Staging restored byte-identical (same real signup/pairing row ids).
+
+  **Next chunk: `pairings_engine.py`** — same algorithm-safety caution as
+  its original `club_id`-add handoff (faithful port, additive changes
+  only). Its `generate()` function has no `user` parameter (called from
+  both an admin endpoint and the no-user scheduler script), so `club_id`
+  needs to be a threaded-through parameter here too, same pattern as
+  `_get_all_byes`/`_signup_count`. Also: `generate()` reads
+  `pairing_blocks` directly (`block_rows = session.exec(select(PairingBlock)).all()`,
+  around line 462) — **this was missed by chunk 1**, which only converted
+  `admin.py`'s `pairing_blocks` endpoints, not this read site. Needs
+  scoping here.
+
+  **Chunk 5 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). All 3 history helpers + `generate()` converted,
+  chunk 1's `pairing_blocks` read gap closed. Algorithm safety confirmed
+  by diff (only import/param/scoping changes). Cross-club proof: the
+  original 5-signup scenario reproduced identically for two clubs run
+  independently on the same week/system.
+  **New destructive bug found, not yet fixed (out of scope for chunk 5,
+  correctly deferred):** `admin.py::pairings_generate`'s
+  "delete existing pending pairings" query has no `club_id` filter — two
+  clubs generating for the same week+system would delete each other's
+  pending pairings. Same severity class as the `_recalculate_ratings()`
+  delete-all bug. **Needs fixing in the next admin.py chunk.**
+
+  **`admin.py` has much more remaining surface than originally scoped
+  for chunks 1/3** — those only touched its `pairing_blocks`/
+  `admin_roles`/league-result endpoints. Read the rest of the file ahead
+  of writing the next handoffs: found **5 more instances of the
+  missing-ownership-check bug class** (unchecked `db.get()` by
+  client-supplied id, no `club_id` verification) — `pairings_save`,
+  `pairings_delete` (both loop-and-`continue` on `week`/`system`
+  mismatch; need `club_id` added to that same check),
+  `admin_signup_patch`, `admin_signup_create` (unchecked `Player`
+  lookup by `body.player_id`), `admin_signup_delete`. Splitting into two
+  more chunks: **chunk 6 = admin.py's pairings endpoints**
+  (`preview`/`generate`/`get`/`publish`/`save`/`delete`, leads with the
+  destructive delete-all-pending fix), **chunk 7 = admin.py's signups
+  endpoints** (`list`/`patch`/`create`/`delete`). Still unreviewed:
+  players admin endpoints, auto-pairings-settings, achievements,
+  grantable-users — will need at least one more chunk after 6/7.
+  **Remaining overall:** admin.py chunks 6/7(+more), then
+  `run_auto_pairings_check.py` (mostly stays on the placeholder, flagged
+  separately), `main.py`.
+
+  **Chunk 6 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). All 6 pairings endpoints converted, no deviations.
+  **Destructive delete-all-pending bug fixed and proven in both
+  directions** — two clubs generating on the identical week/system no
+  longer touch each other's pairings (confirmed via direct row read after
+  each side's `POST /admin/pairings/generate`). `pairings_save`/
+  `pairings_delete`'s ownership-check fixes also proven cross-club
+  (foreign-club ids silently skipped, `changed=0`/`deleted=0`, confirmed
+  the row itself was untouched). `pairings_post_discord` confirmed to
+  touch no club-owned table, left alone. `git diff` shows exactly
+  34/-33, all scoping/ownership-check changes, nothing else.
+  Self-correction: the handoff assumed `generate()`'s two admin.py call
+  sites still needed a `club_id=user.club_id` addition — turned out chunk
+  5 had already done this; confirmed via diff and left untouched rather
+  than guessing.
+  Staging restored to exact pre-run state.
+
+  **Next chunk: `admin.py`'s signups endpoints** (chunk 7) — 3 more
+  confirmed missing-ownership-check bugs, already identified ahead of
+  writing that handoff: `admin_signup_patch` (`db.get(Signup, signup_id)`
+  unchecked), `admin_signup_create` (`db.get(Player, body.player_id)`
+  unchecked), `admin_signup_delete` (`db.get(Signup, signup_id)`
+  unchecked). Plus `admin_signups_list`'s query and
+  `admin_signup_create`'s `Signup(...)` club_id source (currently the
+  placeholder) to convert.
+
+  **Chunk 7 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). All 3 ownership-check fixes landed and proven via
+  direct row read (not just status code) — cross-club PATCH/DELETE/POST
+  all 404, target row confirmed untouched each time. `admin_signups_list`
+  scoped, `admin_signup_create`'s duplicate-guard scoped and confirmed to
+  not false-positive against another club's identically-shaped signup,
+  and its `Signup(...)` creation switched off the placeholder. Staging
+  restored to exact pre-run state.
+
+  **Read the rest of `admin.py` (full endpoint list via grep) ahead of
+  the next handoff — found the last chunk of unconverted surface, chunk
+  8, covering everything else in this file:**
+  - `grantable_users` (`GET /admin/grantable-users`) — unscoped `User`
+    query.
+  - `admin_players` (`GET /admin/players`) — **two** unscoped `Player`
+    queries (the scope-provided branch and the super-admin-only branch).
+  - `patch_player` (`PATCH /admin/players/{id}`) — **another
+    missing-ownership-check bug**, unchecked `db.get(Player, player_id)`.
+  - `block_players` (`GET /admin/blocks/players`) — unscoped `Player`
+    query, missed by chunk 1 (that chunk only covered the
+    `pairing_blocks` CRUD endpoints, not this player-list helper for the
+    add-block form).
+  - `get_auto_pairings_settings`/`post_auto_pairings_settings` —
+    `admin.py`'s own private `_get_setting`/`_upsert_setting` (a separate
+    copy from `run_auto_pairings_check.py`'s, by original design) still
+    resolve `club_id` via the placeholder; both endpoints have `user` in
+    scope, so this file's copy can switch to `user.club_id`.
+  - `pairings_signup_list` (`GET /admin/pairings/signup-list`) — unscoped
+    `Signup` query.
+  - Confirmed needing no change: `admin_me` (only calls the
+    already-scoped `admin_scopes()`), `achievement_options`/
+    `achievement_post_discord` (no DB query on a club-owned table at
+    all).
+  **This is the last piece of `admin.py`.** After chunk 8:
+  `run_auto_pairings_check.py` (mostly stays on the placeholder, flagged
+  separately) and `main.py` remain.
+
+  **Chunk 8 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). **`admin.py` is now fully converted for this
+  phase** — every query against a club-owned table uses `scoped()`/
+  `user.club_id`, no `_default_club_id()` calls remain in the file
+  (import removed). `patch_player`'s ownership-check fix proven
+  cross-club via direct row read. Auto-pairings-settings verified with
+  two clubs independently setting different values for the identical
+  system — confirmed as genuinely separate `(club_id, key)` rows in
+  `club_settings`, not one clobbering the other.
+  `run_auto_pairings_check.py`'s own separate `_get_setting`/
+  `_upsert_setting` copy reconfirmed untouched.
+  Staging restored to exact pre-run state.
+
+  **`run_auto_pairings_check.py` reviewed ahead of its handoff — more to
+  do here than "just leave it on the placeholder."** This script has no
+  authenticated user (it's the hourly scheduler), so it can't get real
+  per-request club resolution — but it still has 3 of its own unscoped
+  queries that were never touched by any prior chunk: the "any signups
+  this week" check, the "delete existing pending pairings before
+  regenerating" step, and the `PublishState` gate lookup.
+  **The delete-pending-pairings query is the same destructive bug chunk
+  6 fixed in `admin.py::pairings_generate`** — this script has its own
+  independent copy of that exact logic, still unscoped. Chunk 9 scopes
+  all 3 using the existing placeholder (there's still only one club, and
+  this script's real fix — iterating per club via `club_systems` — stays
+  deferred, already flagged in the `publish_state` handoff), which at
+  least closes the immediate cross-club leak/destruction risk within
+  today's single-resolved-club model.
+
+  **Chunk 9 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). All 3 queries scoped, `club_id` resolved once and
+  reused at all 4 sites (the 3 queries + `generate()`'s existing param +
+  the `PublishState` creation). Destructive-delete fix proven with two
+  clubs running the identical week/system concurrently — each club's own
+  stray pending pairings deleted, neither touched the other's, and
+  pre-existing prearranged/published pairings correctly survived
+  (unrelated business logic, confirmed unaffected). One good catch: the
+  handoff's code snippet for the "any signups" query omitted the
+  `.where(Signup.system == system)` filter — Claude Code correctly kept
+  it rather than following the snippet literally, recognizing that
+  dropping it would've been an unrelated behavior regression, not a
+  scoping change. Staging restored to exact pre-run state.
+
+  **Chunk 10 (`main.py`) is the last file.** Reviewed in full ahead of
+  writing its handoff: 4 endpoints need conversion (`list_players`,
+  `get_player`, `league_rankings`, `signups_stats`), including **one more
+  missing-ownership-check bug** (`get_player`'s unchecked
+  `session.get(Player, player_id)`) and **a variable-shadowing gotcha** —
+  `get_player` has a local `user = session.exec(select(User)...)` that
+  reuses the same name as the dependency-injected `user`, so the
+  ownership check must happen (and `user.club_id` must be captured into
+  its own variable, if needed later) before that line clobbers it.
+  `list_systems` needs no change — `SystemConfig` is platform-level, not
+  club-owned, per the locked decisions. `get_pairings` (the public
+  pairings page) has no authenticated user at all and is explicitly
+  Phase 3's problem (subdomain-based club resolution) — stays untouched,
+  same deferral as `list_factions` from chunk 3.
+
+  **Chunk 10 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**). All 4 endpoints converted, ownership-check bug
+  fixed and proven cross-club. `league_rankings`/`get_player`'s rank
+  correctness specifically verified (not just visibility) — a second
+  club's higher-rated player confirmed not to shift Manchester's rank.
+  `discord_user` rename verified not to break anything. `list_systems`/
+  `get_pairings` reconfirmed correctly untouched.
+
+  ---
+
+  **MILESTONE: the scoped-query-helper phase's file sweep is complete.**
+  Every file named in the plan (`database.py`, `auth.py`, `league.py`,
+  `signups.py`, `pairings_engine.py`, `admin.py`, `main.py`,
+  `run_auto_pairings_check.py`) has been converted across chunks 1-10.
+  Along the way, found and fixed **9 missing-ownership-check bugs**
+  (`claim_player`, `submit_result`, admin league-result patch/delete ×2,
+  `submit_prearranged`, `pairings_save`/`pairings_delete` ×2,
+  `admin_signup_patch`/`create`/`delete` ×3, `patch_player`,
+  `get_player`) and **2 destructive cross-club-data bugs**
+  (`admin.py::pairings_generate`'s and
+  `run_auto_pairings_check.py`'s unscoped delete-existing-pending-pairings
+  queries). Every fix was verified with a genuine second temporary club,
+  not just single-club sanity checks.
+  Two remaining `_default_club_id()` placeholder calls are legitimate,
+  not gaps: `discord_callback`'s new-user branch (no club to resolve at
+  account creation — Phase 2's club-picker UX) and
+  `run_auto_pairings_check.py` (no authenticated caller — real per-club
+  iteration is a separate deferred redesign).
+
+  **One genuine gap found during chunk 10, not yet fixed:**
+  `admin.py::list_roles`'s `super_admins_rows` query
+  (`select(User).where(User.is_super_admin == True)`) is unscoped — a
+  Manchester caller sees every club's super-admins on `GET /admin/roles`.
+  Missed by chunk 1 (which only handled `list_roles`'s main
+  `AdminRole`+`User` join), and out of scope for the `main.py`-only
+  chunk 10. Small, contained fix — worth a quick chunk 11 rather than
+  leaving it open.
+
+  **Chunk 11 done** (2026-07-14, via Claude Code handoff, staging only,
+  **not committed**) — closes the gap. `super_admins_rows` now
+  `scoped(User, user.club_id)`. Proven cross-club (a genuine second
+  club's super-admin excluded, Manchester's own included); the main
+  `AdminRole`+`User` join reconfirmed unaffected. One good catch during
+  verification: the first attempt used an in-memory-only fake caller and
+  produced a false-positive failure, since `scoped()` hits the real DB —
+  fixed by persisting the caller row too. Staging restored exactly.
+
+  ---
+
+  **The scoped-query-helper phase is now fully complete — every known
+  gap closed, 11 chunks total.**
+
+  **Still carried forward, unchanged status:** the two
+  `_recalculate_ratings()` unfiltered-query correctness bugs
+  (must-fix-before-Phase-4), making the scheduler genuinely club-aware,
+  and Phase 3's public-page club resolution (`list_factions`,
+  `get_pairings`).
+
+  **Everything from this entire phase (10 tables + scoped-query-helper
+  chunks 1-11) remains uncommitted, staging-only**, per standing
+  instruction — worth deciding on a commit point.
 - [ ] Phase 2 — admin hierarchy
 - [ ] Phase 3 — per-club Discord + public page scoping
 - [ ] Phase 4 — second club onboarding

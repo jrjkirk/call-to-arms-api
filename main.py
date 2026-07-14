@@ -3,7 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
-from database import get_session
+from database import get_session, scoped
 from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from services import (
     compute_league_record,
@@ -91,14 +91,15 @@ def list_systems(session: Session = Depends(get_session)):
 
 
 @app.get("/players")
-def list_players(_: User = Depends(require_user), session: Session = Depends(get_session)):
+def list_players(user: User = Depends(require_user), session: Session = Depends(get_session)):
     players = session.exec(
-        select(Player).where(Player.active == True).order_by(Player.name)
+        scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
     ).all()
 
     signup_rows = session.exec(
         select(Signup.player_id, Signup.system)
         .where(Signup.player_id.isnot(None))
+        .where(Signup.club_id == user.club_id)
         .distinct()
     ).all()
 
@@ -122,13 +123,13 @@ def _parse_week(week: str) -> datetime:
 
 
 @app.get("/players/{player_id}")
-def get_player(player_id: int, _: User = Depends(require_user), session: Session = Depends(get_session)):
+def get_player(player_id: int, user: User = Depends(require_user), session: Session = Depends(get_session)):
     player = session.get(Player, player_id)
-    if player is None:
+    if player is None or player.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player not found")
 
     rating_row = session.exec(
-        select(LeagueRating).where(LeagueRating.player_id == player_id)
+        scoped(LeagueRating, user.club_id).where(LeagueRating.player_id == player_id)
     ).first()
     results = fetch_player_results(session, player_id)
     record = compute_league_record(player_id, results)
@@ -137,7 +138,7 @@ def get_player(player_id: int, _: User = Depends(require_user), session: Session
     rank = None
     if rating_row is not None:
         higher = session.exec(
-            select(LeagueRating).where(LeagueRating.rating > rating_row.rating)
+            scoped(LeagueRating, user.club_id).where(LeagueRating.rating > rating_row.rating)
         ).all()
         rank = len(higher) + 1
 
@@ -157,10 +158,12 @@ def get_player(player_id: int, _: User = Depends(require_user), session: Session
     recent = results[:5]
 
     # Discord identity
-    user = session.exec(select(User).where(User.player_id == player_id)).first()
+    discord_user = session.exec(
+        scoped(User, user.club_id).where(User.player_id == player_id)
+    ).first()
     discord_info = (
-        {"discord_name": user.discord_name, "avatar_url": user.avatar_url}
-        if user else None
+        {"discord_name": discord_user.discord_name, "avatar_url": discord_user.avatar_url}
+        if discord_user else None
     )
 
     # Build lookup for TOW league results: (frozenset{p1_id, p2_id}, date) -> LeagueResult
@@ -195,7 +198,7 @@ def get_player(player_id: int, _: User = Depends(require_user), session: Session
             continue
 
         pairings = session.exec(
-            select(Pairing)
+            scoped(Pairing, user.club_id)
             .where(Pairing.system == system)
             .where(
                 or_(
@@ -218,7 +221,7 @@ def get_player(player_id: int, _: User = Depends(require_user), session: Session
         )
         missing = needed - set(signup_by_id.keys())
         if missing:
-            for s in session.exec(select(Signup).where(Signup.id.in_(missing))).all():
+            for s in session.exec(scoped(Signup, user.club_id).where(Signup.id.in_(missing))).all():
                 signup_by_id[s.id] = s
 
         games = []
@@ -283,11 +286,12 @@ def get_player(player_id: int, _: User = Depends(require_user), session: Session
 
 
 @app.get("/league/rankings")
-def league_rankings(_: User = Depends(require_user), session: Session = Depends(get_session)):
+def league_rankings(user: User = Depends(require_user), session: Session = Depends(get_session)):
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
         .where(Player.active == True)
+        .where(LeagueRating.club_id == user.club_id)
         .order_by(LeagueRating.rating.desc())
     )
     rows = session.exec(statement).all()
@@ -297,7 +301,7 @@ def league_rankings(_: User = Depends(require_user), session: Session = Depends(
     # and use their rating_before from that row as the comparison point.
     cutoff = datetime.utcnow().date() - timedelta(days=7)
     earliest_recent: dict[int, LeagueResult] = {}
-    for r in session.exec(select(LeagueResult)).all():
+    for r in session.exec(scoped(LeagueResult, user.club_id)).all():
         if not r.result_date:
             continue
         parsed = None
@@ -352,9 +356,9 @@ def league_rankings(_: User = Depends(require_user), session: Session = Depends(
 
 
 @app.get("/signups/stats")
-def signups_stats(system: str, week: str, _: User = Depends(require_user), session: Session = Depends(get_session)):
+def signups_stats(system: str, week: str, user: User = Depends(require_user), session: Session = Depends(get_session)):
     rows = session.exec(
-        select(Signup)
+        scoped(Signup, user.club_id)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .order_by(Signup.created_at.desc())

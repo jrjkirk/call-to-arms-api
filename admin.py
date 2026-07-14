@@ -23,7 +23,7 @@ from auth import (
     require_super_admin,
     require_user,
 )
-from database import _default_club_id
+from database import scoped
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -75,13 +75,14 @@ def admin_me(
 
 @router.get("/roles")
 def list_roles(
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """All current admin_roles rows joined to user info, plus super-admin list."""
     role_rows = db.exec(
         select(AdminRole, User)
         .join(User, User.id == AdminRole.user_id)
+        .where(AdminRole.club_id == user.club_id)
         .order_by(User.discord_name)
     ).all()
 
@@ -99,7 +100,7 @@ def list_roles(
         })
 
     super_admins_rows = db.exec(
-        select(User).where(User.is_super_admin == True).order_by(User.discord_name)
+        scoped(User, user.club_id).where(User.is_super_admin == True).order_by(User.discord_name)
     ).all()
     super_admins = []
     for sa in super_admins_rows:
@@ -118,12 +119,12 @@ def list_roles(
 
 @router.get("/grantable-users")
 def grantable_users(
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """Active users with a linked player — the candidate list for the appoint UI."""
     users = db.exec(
-        select(User).where(User.player_id.isnot(None))
+        scoped(User, user.club_id).where(User.player_id.isnot(None))
     ).all()
 
     result = []
@@ -148,7 +149,7 @@ class RoleBody(BaseModel):
 @router.post("/roles")
 def grant_role(
     body: RoleBody,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """Idempotent: insert (user_id, scope) if not already present."""
@@ -163,13 +164,13 @@ def grant_role(
         raise HTTPException(status_code=404, detail="User not found.")
 
     existing = db.exec(
-        select(AdminRole)
+        scoped(AdminRole, user.club_id)
         .where(AdminRole.user_id == body.user_id)
         .where(AdminRole.scope == body.scope)
     ).first()
 
     if existing is None:
-        db.add(AdminRole(user_id=body.user_id, scope=body.scope, club_id=_default_club_id(db)))
+        db.add(AdminRole(user_id=body.user_id, scope=body.scope, club_id=user.club_id))
         db.commit()
 
     return {"ok": True}
@@ -179,12 +180,12 @@ def grant_role(
 def remove_role(
     user_id: int,
     scope: str,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """Delete the (user_id, scope) row if present."""
     row = db.exec(
-        select(AdminRole)
+        scoped(AdminRole, user.club_id)
         .where(AdminRole.user_id == user_id)
         .where(AdminRole.scope == scope)
     ).first()
@@ -215,14 +216,14 @@ def admin_players(
         if scope not in admin_scopes(user, db):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
         players = db.exec(
-            select(Player).where(Player.active == True).order_by(Player.name)
+            scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
         ).all()
         return [{"id": p.id, "name": p.name, "active": p.active} for p in players]
 
     # No scope — super-admin only, full player list for the edit-player panel.
     if not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Super-admin access required.")
-    players = db.exec(select(Player).order_by(Player.name)).all()
+    players = db.exec(scoped(Player, user.club_id).order_by(Player.name)).all()
     return [
         {
             "id": p.id,
@@ -246,11 +247,11 @@ class PatchPlayerBody(BaseModel):
 def patch_player(
     player_id: int,
     body: PatchPlayerBody,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     player = db.get(Player, player_id)
-    if not player:
+    if not player or player.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player not found.")
 
     if body.name is not None:
@@ -286,23 +287,23 @@ def patch_player(
 
 @router.get("/blocks/players")
 def block_players(
-    _: User = Depends(_require_any_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """All active players — used to populate the add-block form dropdowns."""
     players = db.exec(
-        select(Player).where(Player.active == True).order_by(Player.name)
+        scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
     ).all()
     return [{"id": p.id, "name": p.name} for p in players]
 
 
 @router.get("/blocks")
 def list_blocks(
-    _: User = Depends(_require_any_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """All pairing blocks, enriched with player names, sorted A→B."""
-    block_rows = db.exec(select(PairingBlock)).all()
+    block_rows = db.exec(scoped(PairingBlock, user.club_id)).all()
 
     player_ids = {b.player_a_id for b in block_rows} | {b.player_b_id for b in block_rows}
     players_by_id: dict[int, Player] = {}
@@ -338,7 +339,7 @@ class BlockBody(BaseModel):
 @router.post("/blocks")
 def add_block(
     body: BlockBody,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """Insert a canonical (low, high) block. Idempotent; updates note if block exists."""
@@ -349,7 +350,7 @@ def add_block(
     note = (body.note or "").strip() or None
 
     existing = db.exec(
-        select(PairingBlock)
+        scoped(PairingBlock, user.club_id)
         .where(PairingBlock.player_a_id == low)
         .where(PairingBlock.player_b_id == high)
     ).first()
@@ -361,7 +362,7 @@ def add_block(
             db.commit()
         return {"ok": True, "created": False}
 
-    db.add(PairingBlock(player_a_id=low, player_b_id=high, note=note, club_id=_default_club_id(db)))
+    db.add(PairingBlock(player_a_id=low, player_b_id=high, note=note, club_id=user.club_id))
     db.commit()
     return {"ok": True, "created": True}
 
@@ -370,13 +371,13 @@ def add_block(
 def remove_block(
     player_a_id: int,
     player_b_id: int,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
     """Delete the canonical (low, high) block if it exists."""
     low, high = sorted([player_a_id, player_b_id])
     row = db.exec(
-        select(PairingBlock)
+        scoped(PairingBlock, user.club_id)
         .where(PairingBlock.player_a_id == low)
         .where(PairingBlock.player_b_id == high)
     ).first()
@@ -407,7 +408,7 @@ def admin_history(
 
     if scope == "League":
         rows = db.exec(
-            select(LeagueResult).order_by(LeagueResult.id.desc()).limit(100)
+            scoped(LeagueResult, user.club_id).order_by(LeagueResult.id.desc()).limit(100)
         ).all()
         return [
             {
@@ -575,14 +576,12 @@ def _slug(system: str) -> str:
     return system.replace(" ", "").replace("'", "")
 
 
-def _get_setting(db: Session, key: str, default: Optional[str] = None) -> Optional[str]:
-    club_id = _default_club_id(db)
+def _get_setting(db: Session, club_id: int, key: str, default: Optional[str] = None) -> Optional[str]:
     row = db.get(ClubSetting, (club_id, key))
     return row.value if row is not None else default
 
 
-def _upsert_setting(db: Session, key: str, value: str) -> None:
-    club_id = _default_club_id(db)
+def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
     row = db.get(ClubSetting, (club_id, key))
     if row is None:
         row = ClubSetting(club_id=club_id, key=key, value=value)
@@ -613,12 +612,12 @@ def get_auto_pairings_settings(
 ):
     _require_system_scope(system, user, db)
     slug = _slug(system)
-    enabled_str = (_get_setting(db, f"auto_pairings_{slug}_enabled", "false") or "false").lower()
+    enabled_str = (_get_setting(db, user.club_id, f"auto_pairings_{slug}_enabled", "false") or "false").lower()
     return {
         "enabled": enabled_str == "true",
-        "day": _get_setting(db, f"auto_pairings_{slug}_day", "Tuesday") or "Tuesday",
-        "time": _get_setting(db, f"auto_pairings_{slug}_time", "20:00") or "20:00",
-        "last_week": _get_setting(db, f"auto_pairings_{slug}_last_week"),
+        "day": _get_setting(db, user.club_id, f"auto_pairings_{slug}_day", "Tuesday") or "Tuesday",
+        "time": _get_setting(db, user.club_id, f"auto_pairings_{slug}_time", "20:00") or "20:00",
+        "last_week": _get_setting(db, user.club_id, f"auto_pairings_{slug}_last_week"),
     }
 
 
@@ -634,9 +633,9 @@ def post_auto_pairings_settings(
     if not _TIME_RE.match(body.time):
         raise HTTPException(status_code=422, detail="time must match HH:MM (00-23 / 00-59)")
     slug = _slug(body.system)
-    _upsert_setting(db, f"auto_pairings_{slug}_enabled", "true" if body.enabled else "false")
-    _upsert_setting(db, f"auto_pairings_{slug}_day", body.day)
-    _upsert_setting(db, f"auto_pairings_{slug}_time", body.time)
+    _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_enabled", "true" if body.enabled else "false")
+    _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_day", body.day)
+    _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_time", body.time)
     db.commit()
     return {"ok": True}
 
@@ -688,7 +687,7 @@ def pairings_signup_list(
     _require_system_scope(system, user, db)
 
     all_signups = db.exec(
-        select(Signup)
+        scoped(Signup, user.club_id)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .order_by(Signup.created_at)
@@ -718,14 +717,14 @@ def pairings_preview(
     _require_system_scope(body.system, user, db)
 
     prearranged = db.exec(
-        select(Pairing)
+        scoped(Pairing, user.club_id)
         .where(Pairing.week == body.week)
         .where(Pairing.system == body.system)
         .where(Pairing.prearranged == True)
         .order_by(Pairing.id)
     ).all()
 
-    proposed_dicts = generate(db, body.week, body.system, persist=False)
+    proposed_dicts = generate(db, body.week, body.system, persist=False, club_id=user.club_id)
 
     all_rows = list(prearranged) + proposed_dicts
     signups_by_id = _collect_signups_for_rows(all_rows, db)
@@ -746,7 +745,7 @@ def pairings_generate(
     _require_system_scope(body.system, user, db)
 
     old = db.exec(
-        select(Pairing)
+        scoped(Pairing, user.club_id)
         .where(Pairing.week == body.week)
         .where(Pairing.system == body.system)
         .where(Pairing.status == "pending")
@@ -756,7 +755,7 @@ def pairings_generate(
         db.delete(p)
     # autoflush will sync deletes before generate queries
 
-    new_pairings = generate(db, body.week, body.system, persist=True)
+    new_pairings = generate(db, body.week, body.system, persist=True, club_id=user.club_id)
 
     signups_by_id = _collect_signups_for_rows(new_pairings, db)
     display = _pairing_rows_to_display(new_pairings, signups_by_id, body.system)
@@ -774,14 +773,14 @@ def pairings_get(
     _require_system_scope(system, user, db)
 
     rows = db.exec(
-        select(Pairing)
+        scoped(Pairing, user.club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == system)
         .order_by(Pairing.id)
     ).all()
 
     gate = db.exec(
-        select(PublishState)
+        scoped(PublishState, user.club_id)
         .where(PublishState.week == week)
         .where(PublishState.system == system)
     ).first()
@@ -802,7 +801,7 @@ def pairings_publish(
     _require_system_scope(body.system, user, db)
 
     gate = db.exec(
-        select(PublishState)
+        scoped(PublishState, user.club_id)
         .where(PublishState.week == body.week)
         .where(PublishState.system == body.system)
     ).first()
@@ -812,7 +811,7 @@ def pairings_publish(
             week=body.week,
             system=body.system,
             published=body.published,
-            club_id=_default_club_id(db),
+            club_id=user.club_id,
         )
     else:
         gate.published = body.published
@@ -835,7 +834,7 @@ def pairings_save(
         p = db.get(Pairing, row.id)
         if p is None:
             continue
-        if p.week != body.week or p.system != body.system:
+        if p.week != body.week or p.system != body.system or p.club_id != user.club_id:
             continue
 
         if row.a_signup_id is not None:
@@ -918,7 +917,7 @@ def pairings_delete(
         p = db.get(Pairing, pid)
         if p is None:
             continue
-        if p.week != body.week or p.system != body.system:
+        if p.week != body.week or p.system != body.system or p.club_id != user.club_id:
             continue
         db.delete(p)
         deleted += 1
@@ -1032,7 +1031,7 @@ def admin_signups_list(
     _require_system_scope(system, user, db)
 
     rows = db.exec(
-        select(Signup)
+        scoped(Signup, user.club_id)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .order_by(Signup.player_name)
@@ -1072,7 +1071,7 @@ def admin_signup_patch(
     Only fields present in the request body are updated; omitted fields are left unchanged.
     """
     su = db.get(Signup, signup_id)
-    if su is None:
+    if su is None or su.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Signup not found.")
 
     _require_system_scope(su.system, user, db)
@@ -1159,11 +1158,11 @@ def admin_signup_create(
     week = _validate_week(body.week)
 
     player = db.get(Player, body.player_id)
-    if player is None or not player.active:
+    if player is None or not player.active or player.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player not found.")
 
     existing = db.exec(
-        select(Signup)
+        scoped(Signup, user.club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
         .where(Signup.player_id == body.player_id)
@@ -1218,7 +1217,7 @@ def admin_signup_create(
         tnt_ok=False,
         scenario=scenario,
         can_demo=can_demo,
-        club_id=_default_club_id(db),
+        club_id=user.club_id,
     )
     db.add(su)
     db.commit()
@@ -1240,13 +1239,13 @@ def admin_signup_delete(
     corrections).
     """
     su = db.get(Signup, signup_id)
-    if su is None:
+    if su is None or su.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Signup not found.")
 
     _require_system_scope(su.system, user, db)
 
     prearranged = db.exec(
-        select(Pairing)
+        scoped(Pairing, user.club_id)
         .where(Pairing.week == su.week)
         .where(Pairing.system == su.system)
         .where(Pairing.prearranged == True)
@@ -1288,11 +1287,11 @@ def _league_result_row(r: LeagueResult) -> dict:
 
 @router.get("/league/results")
 def admin_league_results(
-    _: User = Depends(require_scope("League")),
+    user: User = Depends(require_scope("League")),
     db: Session = Depends(get_session),
 ):
     """All LeagueResult rows, newest first (display order; recalc internally is id-ascending)."""
-    rows = db.exec(select(LeagueResult).order_by(LeagueResult.id.desc())).all()
+    rows = db.exec(scoped(LeagueResult, user.club_id).order_by(LeagueResult.id.desc())).all()
     return [_league_result_row(r) for r in rows]
 
 
@@ -1318,26 +1317,26 @@ class AdminLeagueResultPatch(BaseModel):
 def admin_league_result_patch(
     result_id: int,
     body: AdminLeagueResultPatch,
-    _: User = Depends(require_scope("League")),
+    user: User = Depends(require_scope("League")),
     db: Session = Depends(get_session),
 ):
     """Partial update of a league result, followed by a full ratings replay."""
     row = db.get(LeagueResult, result_id)
-    if row is None:
+    if row is None or row.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="League result not found.")
 
     provided = body.model_fields_set
 
     if "player_1_id" in provided:
         p1 = db.get(Player, body.player_1_id)
-        if p1 is None or not p1.active:
+        if p1 is None or not p1.active or p1.club_id != user.club_id:
             raise HTTPException(status_code=404, detail="Player 1 not found or inactive.")
         row.player_1_id = p1.id
         row.player_1_name = p1.name
 
     if "player_2_id" in provided:
         p2 = db.get(Player, body.player_2_id)
-        if p2 is None or not p2.active:
+        if p2 is None or not p2.active or p2.club_id != user.club_id:
             raise HTTPException(status_code=404, detail="Player 2 not found or inactive.")
         row.player_2_id = p2.id
         row.player_2_name = p2.name
@@ -1384,12 +1383,12 @@ def admin_league_result_patch(
 @router.delete("/league/results/{result_id}")
 def admin_league_result_delete(
     result_id: int,
-    _: User = Depends(require_scope("League")),
+    user: User = Depends(require_scope("League")),
     db: Session = Depends(get_session),
 ):
     """Delete a league result and replay ratings from scratch."""
     row = db.get(LeagueResult, result_id)
-    if row is None:
+    if row is None or row.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="League result not found.")
 
     db.delete(row)
