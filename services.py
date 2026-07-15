@@ -10,6 +10,7 @@ from typing import Iterable, Optional
 import httpx
 from sqlmodel import Session, select, or_
 
+from database import resolve_webhook_url
 from models import LeagueResult, Signup, Player
 
 DISCORD_ACHIEVEMENT_WEBHOOK_URL = os.environ.get("DISCORD_ACHIEVEMENT_WEBHOOK_URL", "")
@@ -280,9 +281,9 @@ def _set_player_announced_achievements(player: Player, names: Iterable[str]) -> 
     player.announced_achievements = json.dumps(sorted(set(names)))
 
 
-def post_discord_achievement(player_name: str, achievement: str) -> None:
+def post_discord_achievement(player_name: str, achievement: str, club_id: int, db: Session) -> None:
     """Post an achievement unlock message to Discord. No-op if webhook unset."""
-    url = DISCORD_ACHIEVEMENT_WEBHOOK_URL
+    url = resolve_webhook_url(db, club_id, "achievement") or DISCORD_ACHIEVEMENT_WEBHOOK_URL
     if not url:
         return
     lines = [
@@ -307,11 +308,13 @@ def announce_new_achievements(db: Session, player_id: int) -> None:
     First call per player silently snapshots their current state — pre-existing
     players don't receive a retroactive flood of notifications.
     """
-    if not DISCORD_ACHIEVEMENT_WEBHOOK_URL:
-        return
     try:
         player = db.get(Player, player_id)
         if player is None:
+            return
+
+        webhook_url = resolve_webhook_url(db, player.club_id, "achievement") or DISCORD_ACHIEVEMENT_WEBHOOK_URL
+        if not webhook_url:
             return
 
         results = fetch_player_results(db, player_id)
@@ -342,6 +345,6 @@ def announce_new_achievements(db: Session, player_id: int) -> None:
         db.commit()
 
         for ach in sorted(new_unlocks):
-            post_discord_achievement(player.name, ach)
+            post_discord_achievement(player.name, ach, player.club_id, db)
     except Exception:
         pass

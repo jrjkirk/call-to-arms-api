@@ -1421,7 +1421,8 @@ def achievement_options(
 @router.post("/achievements/post-discord")
 def achievement_post_discord(
     body: AchievementPostBody,
-    _: User = Depends(require_super_admin),
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
 ):
     """Manually post an achievement unlock to Discord.
 
@@ -1433,7 +1434,7 @@ def achievement_post_discord(
             status_code=422,
             detail=f"Achievement must be one of: {sorted(LEAGUE_ANNOUNCED_ACHIEVEMENTS)}",
         )
-    post_discord_achievement(body.player_name, body.achievement)
+    post_discord_achievement(body.player_name, body.achievement, user.club_id, db)
     return {"ok": True}
 
 
