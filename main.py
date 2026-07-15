@@ -74,6 +74,7 @@ def list_systems(session: Session = Depends(get_session)):
     ).all()
     return [
         {
+            "id": r.id,
             "slug": r.slug,
             "name": r.name,
             "legacy_system_name": r.legacy_system_name,
