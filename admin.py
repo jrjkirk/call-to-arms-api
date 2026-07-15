@@ -439,7 +439,7 @@ def admin_history(
 
     # System scope: join pairings to signups for player names/factions
     pairings = db.exec(
-        select(Pairing)
+        scoped(Pairing, user.club_id)
         .where(Pairing.system == scope)
         .order_by(Pairing.id.desc())
         .limit(100)
