@@ -17,7 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import get_session, scoped
+from database import get_session, resolve_webhook_url, scoped
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting
 from auth import admin_scopes, require_user
 
@@ -143,9 +143,11 @@ def _signup_count(db: Session, system: str, week: str, club_id: int) -> int:
     return len(seen)
 
 
-def _post_webhook(system: str, content: str) -> None:
+def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     """Fire-and-forget Discord post. Never breaks the request on failure."""
-    url = _signup_webhook_for_system(system)
+    system_config = _get_system_config(db, system)
+    system_id = system_config.id if system_config else None
+    url = resolve_webhook_url(db, club_id, "signup", system_id) or _signup_webhook_for_system(system)
     if not url:
         return
     try:
@@ -159,7 +161,7 @@ def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], 
     vibe_label = vibe or "Unknown vibe"
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
-    _post_webhook(system, f"📝 **{player_name}** signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+    _post_webhook(db, club_id, system, f"📝 **{player_name}** signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
 
 
 def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int) -> None:
@@ -167,7 +169,7 @@ def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vi
     vibe_label = vibe or "Unknown vibe"
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
-    _post_webhook(system, f"❌ **{player_name}** dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+    _post_webhook(db, club_id, system, f"❌ **{player_name}** dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
 
 
 def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dict]:
@@ -435,7 +437,7 @@ def drop_signup(
             all_byes=all_byes,
             app_url=APP_PUBLIC_URL,
         )
-        _post_webhook(system, content)
+        _post_webhook(db, user.club_id, system, content)
 
         return {"ok": True, "dropped": True, "published": True}
 
@@ -606,7 +608,7 @@ def submit_prearranged(
             f"{detail_line}\n"
             f"📊 {phrase}: {count}"
         )
-        _post_webhook(body.system, content)
+        _post_webhook(db, user.club_id, body.system, content)
     except Exception:
         pass
 
@@ -763,7 +765,7 @@ def swap_signups(
         all_byes=all_byes,
         app_url=APP_PUBLIC_URL,
     )
-    _post_webhook(body.system, content)
+    _post_webhook(db, user.club_id, body.system, content)
 
     # 14. Return
     return {
