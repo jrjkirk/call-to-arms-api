@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
 from auth import require_user
-from database import get_session, scoped
+from database import get_session, resolve_webhook_url, scoped
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -108,8 +108,8 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
         ))
 
 
-def _post_league_webhook(row: LeagueResult) -> None:
-    url = DISCORD_LEAGUE_RESULT_WEBHOOK_URL
+def _post_league_webhook(db: Session, row: LeagueResult) -> None:
+    url = resolve_webhook_url(db, row.club_id, "league_result") or DISCORD_LEAGUE_RESULT_WEBHOOK_URL
     if not url:
         return
 
@@ -324,7 +324,7 @@ def submit_result(
     db.commit()  # single commit for insert + full recalc
     db.refresh(row)
 
-    _post_league_webhook(row)
+    _post_league_webhook(db, row)
     announce_new_achievements(db, row.player_1_id)
     announce_new_achievements(db, row.player_2_id)
 

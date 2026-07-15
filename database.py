@@ -17,6 +17,8 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
+from models import ClubWebhook
+
 T = TypeVar("T")
 
 load_dotenv()
@@ -73,6 +75,22 @@ def get_session():
     """FastAPI dependency: yields a database session that closes itself."""
     with Session(engine) as session:
         yield session
+
+
+def resolve_webhook_url(
+    db: Session, club_id: int, webhook_type: str, system_id: int | None = None
+) -> str | None:
+    """The sanctioned way to look up a club's configured Discord webhook URL.
+    Returns the matching ClubWebhook.url, or None if no row exists — callers
+    decide what fallback (if any) applies when this returns None."""
+    row = db.exec(
+        select(ClubWebhook).where(
+            ClubWebhook.club_id == club_id,
+            ClubWebhook.webhook_type == webhook_type,
+            ClubWebhook.system_id == system_id,
+        )
+    ).first()
+    return row.url if row else None
 
 
 def scoped(model: Type[T], club_id: int) -> Select:
