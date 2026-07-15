@@ -7,6 +7,7 @@ Permission model:
 """
 import os
 import re
+from datetime import date
 from typing import Any, Optional
 
 import httpx
@@ -32,7 +33,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, Club, ClubSetting, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, User
+from models import AdminRole, Club, ClubSetting, ClubSystem, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
 from signups import (
@@ -43,6 +44,7 @@ from signups import (
     TOW_VIBES,
     _validate_week,
 )
+from week_logic import _DAY_NAME_TO_INT
 
 GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "")
 GH_REPO = os.environ.get("GH_REPO", "jrjkirk/call-to-arms-api")
@@ -1470,3 +1472,87 @@ def create_club(
     db.commit()
     db.refresh(club)
     return club
+
+
+VALID_CADENCES: frozenset[str] = frozenset({"weekly", "fortnightly"})
+
+
+class ClubSystemBody(BaseModel):
+    system_id: int
+    enabled: bool
+    session_day: str
+    session_cadence: str
+    cadence_anchor: Optional[date] = None
+
+
+@router.post("/platform/clubs/{club_id}/systems")
+def upsert_club_system(
+    club_id: int,
+    body: ClubSystemBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Enable/configure a system for a club. Upserts on (club_id, system_id).
+
+    session_day/session_cadence/cadence_anchor are stored but NOT YET read
+    by week_logic.py's week_id_for_system() — that's still fully hardcoded
+    per system name. Same "stored but not yet load-bearing" status as
+    icon_folder was after Phase 0. Wiring week_logic.py to read these is a
+    separate, later task.
+    """
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    system = db.get(SystemConfig, body.system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    if body.session_day not in _DAY_NAME_TO_INT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_day must be one of: {sorted(_DAY_NAME_TO_INT)}",
+        )
+
+    if body.session_cadence not in VALID_CADENCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_cadence must be one of: {sorted(VALID_CADENCES)}",
+        )
+
+    if body.session_cadence == "fortnightly" and body.cadence_anchor is None:
+        raise HTTPException(
+            status_code=422,
+            detail="cadence_anchor is required when session_cadence is 'fortnightly'.",
+        )
+    if body.session_cadence == "weekly" and body.cadence_anchor is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="cadence_anchor must not be set when session_cadence is 'weekly'.",
+        )
+
+    existing = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id,
+            ClubSystem.system_id == body.system_id,
+        )
+    ).first()
+
+    fields = dict(
+        enabled=body.enabled,
+        session_day=body.session_day,
+        session_cadence=body.session_cadence,
+        cadence_anchor=body.cadence_anchor,
+    )
+    if existing:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        db.add(existing)
+        row = existing
+    else:
+        row = ClubSystem(club_id=club_id, system_id=body.system_id, **fields)
+        db.add(row)
+
+    db.commit()
+    db.refresh(row)
+    return row
