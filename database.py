@@ -113,6 +113,25 @@ def resolve_single_active_club_id(db: Session) -> int:
     return clubs[0].id
 
 
+def resolve_public_club_id(db: Session, club_slug: str | None) -> int:
+    """The sanctioned way for the three genuinely public, unauthenticated
+    endpoints (GET /pairings, GET /league/factions, GET /week-id) to
+    resolve a club_id. Explicit slug takes precedence; omitted slug falls
+    back to resolve_single_active_club_id unchanged, so every existing
+    caller (none of which pass a slug yet) keeps today's behavior exactly.
+    Raises ValueError for an unknown or inactive slug — deliberately the
+    same message for both, so a 404 built from it never leaks which case
+    applied (same obfuscation convention as admin.py's "not found or
+    inactive" checks)."""
+    if club_slug is None:
+        return resolve_single_active_club_id(db)
+
+    club = db.exec(select(Club).where(Club.slug == club_slug)).first()
+    if club is None or not club.active:
+        raise ValueError("Club not found.")
+    return club.id
+
+
 def scoped(model: Type[T], club_id: int) -> Select:
     """The only sanctioned way to query a club-owned table once the
     caller's club_id is known. Returns a SELECT pre-filtered to one club;

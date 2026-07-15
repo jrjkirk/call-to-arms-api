@@ -3,7 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
-from database import get_session, resolve_single_active_club_id, scoped
+from database import get_session, resolve_public_club_id, scoped
 from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date
 from services import (
@@ -419,15 +419,17 @@ def _public_vibe_display(a_vibe, b_vibe):
 
 
 @app.get("/week-id")
-def get_week_id(system: str, session: Session = Depends(get_session)):
+def get_week_id(system: str, club: str | None = None, session: Session = Depends(get_session)):
     """Public, unauthenticated — the backend-authoritative target session
     date for a system, replacing the frontend's independent duplicate of
-    this same date logic (weekIdForSystem() in +page.server.ts). Same
-    single-active-club stopgap as GET /pairings and GET /league/factions
-    — inherits that existing, already-understood limitation rather than
-    solving it here."""
+    this same date logic (weekIdForSystem() in +page.server.ts). Optional
+    `club` slug resolves a specific club explicitly (Phase 3/4); omitted,
+    it falls back to the single-active-club stopgap unchanged — same
+    pattern as GET /pairings and GET /league/factions."""
     try:
-        club_id = resolve_single_active_club_id(session)
+        club_id = resolve_public_club_id(session, club)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -454,14 +456,17 @@ def get_week_id(system: str, session: Session = Depends(get_session)):
 
 
 @app.get("/pairings")
-def get_pairings(system: str, week: str, session: Session = Depends(get_session)):
+def get_pairings(system: str, week: str, club: str | None = None, session: Session = Depends(get_session)):
     """Public, unauthenticated — no club_id from a session to scope by.
-    Fail-loud stopgap until subdomain-based club resolution exists (Phase
-    3/4): resolves the single active club explicitly, before any query
-    runs, so a second active club raises immediately instead of silently
-    mixing both clubs' pairings together."""
+    Optional `club` slug resolves a specific club explicitly (Phase 3/4:
+    the frontend will derive this from the browser's hostname). Omitted,
+    falls back to the fail-loud single-active-club stopgap unchanged: a
+    second active club raises immediately instead of silently mixing
+    both clubs' pairings together."""
     try:
-        club_id = resolve_single_active_club_id(session)
+        club_id = resolve_public_club_id(session, club)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
