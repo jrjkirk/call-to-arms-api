@@ -276,3 +276,32 @@ class ClubSystem(SQLModel, table=True):
     session_day: str  # e.g. "Wednesday", "Friday"
     session_cadence: str  # "weekly" | "fortnightly"
     cadence_anchor: Optional[date] = None  # only meaningful when fortnightly
+
+
+class ClubWebhook(SQLModel, table=True):
+    """Per-club Discord webhook URLs — Phase 3 step 1, see multitenancy-plan-v2.md.
+
+    Expand-only: seeded from the six existing call sites' env vars by
+    seed_club_webhooks.py, but nothing reads from this table yet — every
+    call site keeps reading its env var until a later slice switches it
+    over. No DB-level unique constraint on (club_id, webhook_type,
+    system_id): Postgres treats NULL as distinct per-row, which would
+    silently fail to enforce "one row" for the three club-level types
+    below where system_id is always NULL (the same trap app_settings had
+    before the club_settings split). Uniqueness is enforced purely by the
+    seed/write logic's check-then-upsert, same as ClubSystem.
+
+    webhook_type is one of: signup, pairings, call_to_arms (system_id
+    meaningful for these three) or league_result, league_rankings,
+    achievement (system_id always None — club-level, not per-system).
+    """
+    __tablename__ = "club_webhooks"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    webhook_type: str
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
+    url: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

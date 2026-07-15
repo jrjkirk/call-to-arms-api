@@ -47,6 +47,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "club_settings",  # auto-pairings scheduler settings, now per-club
                        # (split out of app_settings) — admin.py's
                        # auto-pairings-settings endpoints + the scheduler
+    "club_webhooks",  # Phase 3 step 1: seeded once by
+                       # seed_club_webhooks.py, then read-only until a
+                       # later Phase 3 step switches the six webhook call
+                       # sites over to reading from here
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
