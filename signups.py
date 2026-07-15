@@ -7,7 +7,8 @@ Semantics are a faithful port of the Streamlit app:
 - Dropping out also deletes any PREARRANGED pairing involving the dropper
   (the opponent's signup stays, so they get re-pooled next pairing run).
 - Discord webhooks fire on brand-new signups and on drops, per-system,
-  and silently no-op when the webhook URL env var isn't set.
+  and silently no-op when the club has no webhook configured for that
+  system (no cross-club fallback — see resolve_webhook_url).
 """
 import os
 from datetime import datetime
@@ -29,11 +30,6 @@ TOW_VIBES = {"Casual", "Competitive", "Escalation", "Intro", "Either"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
 
-# Per-system signup notification webhooks. Same env var names as the
-# original app, so the values can be copied straight across at cutover.
-DISCORD_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_SIGNUP_WEBHOOK_URL", "")
-DISCORD_HH_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_HH_SIGNUP_WEBHOOK_URL", "")
-DISCORD_KT_SIGNUP_WEBHOOK_URL = os.environ.get("DISCORD_KT_SIGNUP_WEBHOOK_URL", "")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 
 
@@ -109,16 +105,6 @@ def _validate_week(week: str) -> str:
     return week
 
 
-def _signup_webhook_for_system(system: str) -> str:
-    if system == "The Old World":
-        return DISCORD_SIGNUP_WEBHOOK_URL
-    if system == "The Horus Heresy":
-        return DISCORD_HH_SIGNUP_WEBHOOK_URL
-    if system == "Kill Team":
-        return DISCORD_KT_SIGNUP_WEBHOOK_URL
-    return ""
-
-
 def _signup_count_phrase_for_system(system: str) -> str:
     if system == "The Horus Heresy":
         return "HH session signups"
@@ -147,7 +133,7 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     """Fire-and-forget Discord post. Never breaks the request on failure."""
     system_config = _get_system_config(db, system)
     system_id = system_config.id if system_config else None
-    url = resolve_webhook_url(db, club_id, "signup", system_id) or _signup_webhook_for_system(system)
+    url = resolve_webhook_url(db, club_id, "signup", system_id)
     if not url:
         return
     try:

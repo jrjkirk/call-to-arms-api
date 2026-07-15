@@ -4,7 +4,6 @@ Functions here compute things from data. They don't know about FastAPI,
 requests, or responses — just take a session and inputs, return outputs.
 """
 import json
-import os
 from typing import Iterable, Optional
 
 import httpx
@@ -12,8 +11,6 @@ from sqlmodel import Session, select, or_
 
 from database import resolve_webhook_url
 from models import LeagueResult, Signup, Player
-
-DISCORD_ACHIEVEMENT_WEBHOOK_URL = os.environ.get("DISCORD_ACHIEVEMENT_WEBHOOK_URL", "")
 
 
 def compute_league_record(player_id: int, results: Iterable[LeagueResult]) -> dict:
@@ -283,7 +280,7 @@ def _set_player_announced_achievements(player: Player, names: Iterable[str]) -> 
 
 def post_discord_achievement(player_name: str, achievement: str, club_id: int, db: Session) -> None:
     """Post an achievement unlock message to Discord. No-op if webhook unset."""
-    url = resolve_webhook_url(db, club_id, "achievement") or DISCORD_ACHIEVEMENT_WEBHOOK_URL
+    url = resolve_webhook_url(db, club_id, "achievement")
     if not url:
         return
     lines = [
@@ -313,7 +310,7 @@ def announce_new_achievements(db: Session, player_id: int) -> None:
         if player is None:
             return
 
-        webhook_url = resolve_webhook_url(db, player.club_id, "achievement") or DISCORD_ACHIEVEMENT_WEBHOOK_URL
+        webhook_url = resolve_webhook_url(db, player.club_id, "achievement")
         if not webhook_url:
             return
 

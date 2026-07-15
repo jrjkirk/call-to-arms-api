@@ -4,7 +4,6 @@ Ratings are never updated incrementally. Every submission inserts a
 LeagueResult row and then runs a full recalculation that replays all
 results from scratch, ordered by id ascending.
 """
-import os
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
@@ -20,8 +19,6 @@ from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
 router = APIRouter(prefix="/league", tags=["league"])
-
-DISCORD_LEAGUE_RESULT_WEBHOOK_URL = os.environ.get("DISCORD_LEAGUE_RESULT_WEBHOOK_URL", "")
 
 VALID_RESULTS = {"Player 1 Victory", "Player 2 Victory", "Draw"}
 VALID_GAME_TYPES = {"Casual", "Competitive"}
@@ -109,7 +106,7 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
 
 
 def _post_league_webhook(db: Session, row: LeagueResult) -> None:
-    url = resolve_webhook_url(db, row.club_id, "league_result") or DISCORD_LEAGUE_RESULT_WEBHOOK_URL
+    url = resolve_webhook_url(db, row.club_id, "league_result")
     if not url:
         return
 

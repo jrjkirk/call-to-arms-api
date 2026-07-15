@@ -21,18 +21,6 @@ from models import ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
 from render_pairings_image import render_pairings_image
 
-# Fallback only, for a club with no club_webhooks row configured for
-# webhook_type="pairings" yet — post_pairings_image_for() resolves the
-# real per-club webhook via resolve_webhook_url() first. Keyed only by
-# system name, so a club relying on this fallback (rather than a real
-# club_webhooks row) would still collide with another club sharing the
-# same system.
-WEBHOOK_MAP = {
-    "The Old World": os.environ.get("DISCORD_TOW_PAIRINGS_WEBHOOK_URL", ""),
-    "The Horus Heresy": os.environ.get("DISCORD_HH_PAIRINGS_WEBHOOK_URL", ""),
-    "Kill Team": os.environ.get("DISCORD_KT_PAIRINGS_WEBHOOK_URL", ""),
-}
-
 
 def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -> bool:
     """Render pairings for (system, week, club_id) and post to Discord.
@@ -44,7 +32,7 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         select(SystemConfig).where(SystemConfig.legacy_system_name == system)
     ).first()
     system_id = system_config.id if system_config else None
-    webhook_url = resolve_webhook_url(db, club_id, "pairings", system_id) or WEBHOOK_MAP.get(system, "")
+    webhook_url = resolve_webhook_url(db, club_id, "pairings", system_id)
     if not webhook_url:
         print(f"No pairings webhook configured for {system!r}, skipping.")
         return False

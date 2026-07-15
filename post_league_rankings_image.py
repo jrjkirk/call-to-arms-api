@@ -6,7 +6,6 @@ DRY pattern as post_pairings_image.py importing from admin.py) so this always
 reflects the same rankings/W-D-L/most-played-faction data the live site shows.
 """
 import json
-import os
 
 import httpx
 from sqlmodel import Session
@@ -15,14 +14,12 @@ from database import engine, resolve_single_active_club_id, resolve_webhook_url
 from main import _compute_league_rankings
 from render_league_rankings_image import render_league_rankings_image
 
-DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL = os.environ.get("DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL", "")
-
 
 def main() -> None:
     with Session(engine) as db:
         club_id = resolve_single_active_club_id(db)
 
-        webhook_url = resolve_webhook_url(db, club_id, "league_rankings") or DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL
+        webhook_url = resolve_webhook_url(db, club_id, "league_rankings")
         if not webhook_url:
             print("No league-rankings webhook configured, skipping.")
             return
