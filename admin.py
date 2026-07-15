@@ -1597,6 +1597,7 @@ class ClubCreateBody(BaseModel):
     timezone: str = "Europe/London"
     contact_email: Optional[str] = None
     leagues_enabled: bool = True
+    active: bool = True
 
 
 @router.post("/platform/clubs")
@@ -1617,6 +1618,7 @@ def create_club(
         timezone=body.timezone,
         contact_email=body.contact_email,
         leagues_enabled=body.leagues_enabled,
+        active=body.active,
     )
     db.add(club)
     db.commit()
