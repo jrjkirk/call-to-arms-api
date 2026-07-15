@@ -456,13 +456,29 @@ def logout(response: Response):
 # Admin permission helpers
 # ---------------------------------------------------------------------------
 
-VALID_SCOPES: frozenset[str] = frozenset({"The Old World", "The Horus Heresy", "Kill Team", "League"})
+def valid_scopes(db: Session) -> set[str]:
+    """The global whitelist of scope names that exist at all: every active
+    SystemConfig catalogue row's legacy_system_name, plus "League" (which
+    stays its own separate, already-working toggle via Club.leagues_enabled
+    — not part of the SystemConfig catalogue, see club_runnable_scopes).
+
+    This is a global "is this even a real scope name anywhere" check, not
+    per-club authorization — a scope can pass this and still be unusable
+    for a specific club (see club_runnable_scopes). Replaces the old
+    hardcoded VALID_SCOPES frozenset, which went stale the moment the
+    system catalogue became editable via POST /admin/platform/systems."""
+    names = {
+        sc.legacy_system_name
+        for sc in db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
+    }
+    names.add("League")
+    return names
 
 
 def club_runnable_scopes(club_id: int, db: Session) -> set[str]:
     """The scopes a given club can actually administer: its enabled
     ClubSystem rows' legacy_system_name, plus "League" if the club has
-    leagues_enabled. Distinct from VALID_SCOPES (a global format/existence
+    leagues_enabled. Distinct from valid_scopes() (a global format/existence
     whitelist) — this is per-club authorization, used both for
     super-admins' implicit scope set (admin_scopes) and to validate
     POST /admin/roles grants."""
