@@ -17,7 +17,7 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
-from models import ClubWebhook
+from models import Club, ClubWebhook
 
 T = TypeVar("T")
 
@@ -91,6 +91,26 @@ def resolve_webhook_url(
         )
     ).first()
     return row.url if row else None
+
+
+def resolve_single_active_club_id(db: Session) -> int:
+    """Resolve the one active club, for callers with no other way to know
+    which club they're serving (no authenticated user, no subdomain
+    routing yet — see multitenancy-plan-v2.md's Phase 3/4). Raises rather
+    than guessing if that's ever not true, so a second active club fails
+    loudly instead of silently mixing clubs' data. Shared by
+    post_league_rankings_image.py and the two unscoped public endpoints
+    (GET /pairings, GET /league/factions); post_pairings_image.py's
+    _resolve_single_club_id is intentionally not unified with this one —
+    it also needs a specific system, not just "any active club"."""
+    clubs = db.exec(select(Club).where(Club.active == True)).all()
+    if len(clubs) != 1:
+        raise RuntimeError(
+            f"Cannot resolve a single active club — found {len(clubs)}, expected exactly 1. "
+            f"No club selector exists yet for this caller; needs a real design decision "
+            f"(e.g. subdomain-based resolution) once a second active club exists."
+        )
+    return clubs[0].id
 
 
 def scoped(model: Type[T], club_id: int) -> Select:

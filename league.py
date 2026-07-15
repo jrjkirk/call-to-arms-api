@@ -12,10 +12,10 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlmodel import Session, select, or_
+from sqlmodel import Session, or_
 
 from auth import require_user
-from database import get_session, resolve_webhook_url, scoped
+from database import get_session, resolve_single_active_club_id, resolve_webhook_url, scoped
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -155,7 +155,17 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
 
 @router.get("/factions")
 def list_factions(db: Session = Depends(get_session)):
-    rows = db.exec(select(LeagueResult)).all()
+    """Public, unauthenticated — no club_id from a session to scope by.
+    Fail-loud stopgap until subdomain-based club resolution exists (Phase
+    3/4): resolves the single active club explicitly rather than querying
+    globally, so a second active club raises immediately instead of
+    silently mixing both clubs' faction lists together."""
+    try:
+        club_id = resolve_single_active_club_id(db)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    rows = db.exec(scoped(LeagueResult, club_id)).all()
     factions: set[str] = set()
     for r in rows:
         if r.player_1_faction:

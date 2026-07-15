@@ -3,7 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
-from database import get_session, scoped
+from database import get_session, resolve_single_active_club_id, scoped
 from models import Club, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from services import (
     compute_league_record,
@@ -419,6 +419,16 @@ def _public_vibe_display(a_vibe, b_vibe):
 
 @app.get("/pairings")
 def get_pairings(system: str, week: str, session: Session = Depends(get_session)):
+    """Public, unauthenticated — no club_id from a session to scope by.
+    Fail-loud stopgap until subdomain-based club resolution exists (Phase
+    3/4): resolves the single active club explicitly, before any query
+    runs, so a second active club raises immediately instead of silently
+    mixing both clubs' pairings together."""
+    try:
+        club_id = resolve_single_active_club_id(session)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
     gate = session.exec(
         select(PublishState).where(
             (PublishState.week == week) & (PublishState.system == system)
@@ -429,7 +439,7 @@ def get_pairings(system: str, week: str, session: Session = Depends(get_session)
         return {"published": False, "system": system, "week": week, "matchups": []}
 
     prs = session.exec(
-        select(Pairing)
+        scoped(Pairing, club_id)
         .where((Pairing.week == week) & (Pairing.system == system))
         .order_by(Pairing.id)
     ).all()
