@@ -298,13 +298,12 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     }
 
 
-@app.get("/league/rankings")
-def league_rankings(user: User = Depends(require_user), session: Session = Depends(get_session)):
+def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
         .where(Player.active == True)
-        .where(LeagueRating.club_id == user.club_id)
+        .where(LeagueRating.club_id == club_id)
         .order_by(LeagueRating.rating.desc())
     )
     rows = session.exec(statement).all()
@@ -314,7 +313,7 @@ def league_rankings(user: User = Depends(require_user), session: Session = Depen
     # and use their rating_before from that row as the comparison point.
     cutoff = datetime.utcnow().date() - timedelta(days=7)
     earliest_recent: dict[int, LeagueResult] = {}
-    for r in session.exec(scoped(LeagueResult, user.club_id)).all():
+    for r in session.exec(scoped(LeagueResult, club_id)).all():
         if not r.result_date:
             continue
         parsed = None
@@ -366,6 +365,11 @@ def league_rankings(user: User = Depends(require_user), session: Session = Depen
         })
 
     return rankings
+
+
+@app.get("/league/rankings")
+def league_rankings(user: User = Depends(require_user), session: Session = Depends(get_session)):
+    return _compute_league_rankings(session, user.club_id)
 
 
 @app.get("/signups/stats")
