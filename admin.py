@@ -33,7 +33,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, Club, ClubSetting, ClubSystem, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
 from signups import (
@@ -1436,6 +1436,155 @@ def achievement_post_discord(
         )
     post_discord_achievement(body.player_name, body.achievement, user.club_id, db)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Club webhooks — self-service (club-wide, not per-system scope)
+# ---------------------------------------------------------------------------
+
+WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms")
+WEBHOOK_TYPES_CLUB_LEVEL: tuple[str, ...] = ("league_result", "achievement", "league_rankings")
+ALL_WEBHOOK_TYPES: frozenset[str] = frozenset(WEBHOOK_TYPES_PER_SYSTEM + WEBHOOK_TYPES_CLUB_LEVEL)
+
+
+def _mask_webhook_row(row: Optional[ClubWebhook]) -> dict:
+    """Never return the full URL — last 4 characters only, so an operator can
+    sanity-check "is this the webhook I think it is" without re-exposing the
+    secret. Encryption-at-rest is a separate, deferred hardening step; this
+    masking is the actual security control for this slice."""
+    if row is None or not row.url:
+        return {"configured": False}
+    return {"configured": True, "last_four": "..." + row.url[-4:]}
+
+
+@router.get("/webhooks")
+def list_club_webhooks(
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Full grid of the six webhook types for the caller's own club — every
+    (type, system) combination appears, whether or not a row exists yet, so
+    the UI can show what's configurable, not just what's set."""
+    systems = db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
+    existing = db.exec(
+        select(ClubWebhook).where(ClubWebhook.club_id == user.club_id)
+    ).all()
+    existing_by_key = {(r.webhook_type, r.system_id): r for r in existing}
+
+    grid = []
+    for webhook_type in WEBHOOK_TYPES_PER_SYSTEM:
+        for system in systems:
+            row = existing_by_key.get((webhook_type, system.id))
+            grid.append({
+                "webhook_type": webhook_type,
+                "system_id": system.id,
+                "system_name": system.name,
+                **_mask_webhook_row(row),
+            })
+    for webhook_type in WEBHOOK_TYPES_CLUB_LEVEL:
+        row = existing_by_key.get((webhook_type, None))
+        grid.append({
+            "webhook_type": webhook_type,
+            "system_id": None,
+            "system_name": None,
+            **_mask_webhook_row(row),
+        })
+    return grid
+
+
+class ClubWebhookBody(BaseModel):
+    webhook_type: str
+    system_id: Optional[int] = None
+    url: str
+
+
+@router.post("/webhooks")
+def upsert_club_webhook(
+    body: ClubWebhookBody,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Create/update the caller's own club's webhook for (webhook_type,
+    system_id). club_id always comes from user.club_id, never the body —
+    same non-negotiable rule as scoped() everywhere else in this codebase.
+    Never returns the raw url, even in this same response."""
+    if body.webhook_type not in ALL_WEBHOOK_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"webhook_type must be one of: {sorted(ALL_WEBHOOK_TYPES)}",
+        )
+
+    if body.webhook_type in WEBHOOK_TYPES_PER_SYSTEM:
+        if body.system_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"system_id is required for webhook_type={body.webhook_type!r}.",
+            )
+        system = db.get(SystemConfig, body.system_id)
+        if system is None:
+            raise HTTPException(status_code=404, detail="System not found.")
+    else:
+        if body.system_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"system_id must not be set for webhook_type={body.webhook_type!r}.",
+            )
+
+    if not body.url or not body.url.strip():
+        raise HTTPException(status_code=422, detail="url must not be empty.")
+
+    existing = db.exec(
+        select(ClubWebhook).where(
+            ClubWebhook.club_id == user.club_id,
+            ClubWebhook.webhook_type == body.webhook_type,
+            ClubWebhook.system_id == body.system_id,
+        )
+    ).first()
+
+    if existing:
+        existing.url = body.url
+        db.add(existing)
+        row = existing
+    else:
+        row = ClubWebhook(
+            club_id=user.club_id,
+            webhook_type=body.webhook_type,
+            system_id=body.system_id,
+            url=body.url,
+        )
+        db.add(row)
+
+    db.commit()
+    db.refresh(row)
+    return {
+        "webhook_type": row.webhook_type,
+        "system_id": row.system_id,
+        **_mask_webhook_row(row),
+    }
+
+
+@router.delete("/webhooks")
+def remove_club_webhook(
+    webhook_type: str,
+    system_id: Optional[int] = None,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Delete the caller's own club's webhook row if it exists. Idempotent."""
+    row = db.exec(
+        select(ClubWebhook).where(
+            ClubWebhook.club_id == user.club_id,
+            ClubWebhook.webhook_type == webhook_type,
+            ClubWebhook.system_id == system_id,
+        )
+    ).first()
+
+    if row is not None:
+        db.delete(row)
+        db.commit()
+        return {"ok": True, "removed": True}
+
+    return {"ok": True, "removed": False}
 
 
 # ---------------------------------------------------------------------------
