@@ -1588,6 +1588,78 @@ def remove_club_webhook(
 
 
 # ---------------------------------------------------------------------------
+# Club schedules — self-service (edit an already-enabled system's
+# schedule; enabling a *new* system for a club stays platform-admin only,
+# see POST /admin/platform/clubs/{club_id}/systems above)
+# ---------------------------------------------------------------------------
+
+@router.get("/club-systems")
+def list_club_systems(
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """List the caller's own club's ClubSystem rows, joined with
+    SystemConfig for display."""
+    rows = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == user.club_id)
+    ).all()
+    return [
+        {
+            "system_id": cs.system_id,
+            "system_name": sc.name,
+            "enabled": cs.enabled,
+            "session_day": cs.session_day,
+            "session_cadence": cs.session_cadence,
+            "cadence_anchor": cs.cadence_anchor,
+        }
+        for cs, sc in rows
+    ]
+
+
+class ClubSystemScheduleBody(BaseModel):
+    system_id: int
+    session_day: str
+    session_cadence: str
+    cadence_anchor: Optional[date] = None
+
+
+@router.post("/club-systems")
+def update_club_system_schedule(
+    body: ClubSystemScheduleBody,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Edit an already-enabled system's schedule for the caller's own
+    club. club_id always comes from user.club_id, never the request body
+    — same non-negotiable rule as scoped() everywhere else. Does not
+    enable a new system for a club that doesn't already have a row —
+    404 in that case; that stays a platform-admin action."""
+    existing = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == user.club_id,
+            ClubSystem.system_id == body.system_id,
+        )
+    ).first()
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This club has no existing schedule for that system.",
+        )
+
+    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
+
+    existing.session_day = body.session_day
+    existing.session_cadence = body.session_cadence
+    existing.cadence_anchor = body.cadence_anchor
+    db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+# ---------------------------------------------------------------------------
 # Platform admin — cross-club actions
 # ---------------------------------------------------------------------------
 
@@ -1629,6 +1701,44 @@ def create_club(
 VALID_CADENCES: frozenset[str] = frozenset({"weekly", "fortnightly"})
 
 
+def _validate_schedule_fields(session_day: str, session_cadence: str, cadence_anchor: Optional[date]) -> None:
+    """Shared by upsert_club_system (platform-admin, enabling a new
+    system for a club) and update_club_system_schedule (club
+    self-service, editing an already-enabled system's schedule) — same
+    fields, same rules, extracted once rather than duplicated."""
+    if session_day not in _DAY_NAME_TO_INT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_day must be one of: {sorted(_DAY_NAME_TO_INT)}",
+        )
+
+    if session_cadence not in VALID_CADENCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"session_cadence must be one of: {sorted(VALID_CADENCES)}",
+        )
+
+    if session_cadence == "fortnightly" and cadence_anchor is None:
+        raise HTTPException(
+            status_code=422,
+            detail="cadence_anchor is required when session_cadence is 'fortnightly'.",
+        )
+    if session_cadence == "weekly" and cadence_anchor is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="cadence_anchor must not be set when session_cadence is 'weekly'.",
+        )
+
+    if cadence_anchor is not None and _DAY_NAME_TO_INT[session_day] != cadence_anchor.weekday():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"cadence_anchor ({cadence_anchor.strftime('%A')}) must fall on "
+                f"session_day ({session_day})."
+            ),
+        )
+
+
 class ClubSystemBody(BaseModel):
     system_id: int
     enabled: bool
@@ -1646,11 +1756,12 @@ def upsert_club_system(
 ):
     """Enable/configure a system for a club. Upserts on (club_id, system_id).
 
-    session_day/session_cadence/cadence_anchor are stored but NOT YET read
-    by week_logic.py's week_id_for_system() — that's still fully hardcoded
-    per system name. Same "stored but not yet load-bearing" status as
-    icon_folder was after Phase 0. Wiring week_logic.py to read these is a
-    separate, later task.
+    session_day/session_cadence/cadence_anchor are read by
+    week_logic.py's next_session_date()/is_session_week() — load-bearing
+    since the club-schedules handoff, not just informational. A club's
+    own super-admin can edit an already-enabled system's schedule via
+    GET/POST /admin/club-systems; this endpoint remains the only way to
+    enable a *new* system for a club (platform-admin only).
     """
     club = db.get(Club, club_id)
     if club is None:
@@ -1660,28 +1771,7 @@ def upsert_club_system(
     if system is None:
         raise HTTPException(status_code=404, detail="System not found.")
 
-    if body.session_day not in _DAY_NAME_TO_INT:
-        raise HTTPException(
-            status_code=422,
-            detail=f"session_day must be one of: {sorted(_DAY_NAME_TO_INT)}",
-        )
-
-    if body.session_cadence not in VALID_CADENCES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"session_cadence must be one of: {sorted(VALID_CADENCES)}",
-        )
-
-    if body.session_cadence == "fortnightly" and body.cadence_anchor is None:
-        raise HTTPException(
-            status_code=422,
-            detail="cadence_anchor is required when session_cadence is 'fortnightly'.",
-        )
-    if body.session_cadence == "weekly" and body.cadence_anchor is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="cadence_anchor must not be set when session_cadence is 'weekly'.",
-        )
+    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
 
     existing = db.exec(
         select(ClubSystem).where(

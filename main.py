@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
 from database import get_session, resolve_single_active_club_id, scoped
-from models import Club, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from week_logic import next_session_date
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -415,6 +416,41 @@ def _public_vibe_display(a_vibe, b_vibe):
     if bv_l == "either" and av:
         return av
     return av or bv or None
+
+
+@app.get("/week-id")
+def get_week_id(system: str, session: Session = Depends(get_session)):
+    """Public, unauthenticated — the backend-authoritative target session
+    date for a system, replacing the frontend's independent duplicate of
+    this same date logic (weekIdForSystem() in +page.server.ts). Same
+    single-active-club stopgap as GET /pairings and GET /league/factions
+    — inherits that existing, already-understood limitation rather than
+    solving it here."""
+    try:
+        club_id = resolve_single_active_club_id(session)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    system_config = session.exec(
+        select(SystemConfig).where(SystemConfig.legacy_system_name == system)
+    ).first()
+    if system_config is None:
+        raise HTTPException(status_code=404, detail="Unknown system.")
+
+    club_system = session.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id,
+            ClubSystem.system_id == system_config.id,
+        )
+    ).first()
+    if club_system is None:
+        raise HTTPException(status_code=404, detail="This club does not run that system.")
+
+    target = next_session_date(
+        club_system.session_day, club_system.session_cadence,
+        club_system.cadence_anchor, date.today(),
+    )
+    return {"week_id": target.strftime("%d/%m/%Y")}
 
 
 @app.get("/pairings")

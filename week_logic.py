@@ -1,7 +1,12 @@
 """Week ID calculation and auto-pairings due-check logic.
 
-week_id_for_system — faithful Python port of weekIdForSystem() in the
-SvelteKit frontend (+page.server.ts). Must stay in sync with the frontend.
+next_session_date / is_session_week — generic replacements for the old
+per-system-name hardcoded date logic (_week_id_wed / _week_id_fri /
+week_id_for_system), driven by ClubSystem.session_day/session_cadence/
+cadence_anchor instead. This is now the single source of truth for
+"what's the next session date for this club's system" — the frontend's
+independent weekIdForSystem() duplicate is being retired in favour of
+calling GET /week-id (main.py), which calls next_session_date() here.
 
 _is_auto_pairings_due — port of the original Streamlit pairings.py
 due-check (lines 2871-2907): enabled gate, last-week dedup, day-of-week
@@ -9,8 +14,6 @@ match, and a 90-minute fire window starting at the configured time.
 """
 from datetime import date, datetime, timedelta
 from typing import Optional
-
-from run_hh_call_to_arms import hh_next_session_friday
 
 _DAY_NAME_TO_INT: dict[str, int] = {
     "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
@@ -22,32 +25,50 @@ def _fmt(d: date) -> str:
     return d.strftime("%d/%m/%Y")
 
 
-def _week_id_wed(today: date) -> str:
-    """Next Wednesday — or this Wednesday if today is Mon/Tue/Wed.
-    From Thursday onwards rolls to the following week's Wednesday."""
-    w = today.weekday()  # Mon=0 … Sun=6
-    if w >= 3:
-        # Thu/Fri/Sat/Sun: jump to next Monday then add 2
-        monday = today + timedelta(days=(7 - w))
-        return _fmt(monday + timedelta(days=2))
-    return _fmt(today + timedelta(days=(2 - w)))
+def _next_weekly(day_name: str, today: date) -> date:
+    """Next occurrence of day_name on or after today."""
+    target = _DAY_NAME_TO_INT[day_name]
+    ahead = (target - today.weekday()) % 7
+    return today + timedelta(days=ahead)
 
 
-def _week_id_fri(today: date) -> str:
-    """Next Friday on or after today."""
-    w = today.weekday()
-    ahead = (4 - w) % 7  # 0 if today is Friday
-    return _fmt(today + timedelta(days=ahead))
+def _next_fortnightly(day_name: str, cadence_anchor: date, today: date) -> date:
+    """Next occurrence on the anchor's 14-day cycle, on or after today.
+    Same algorithm as the old hh_next_session_friday (run_hh_call_to_arms.py,
+    still used independently by that script's own weekly-reminder post —
+    not touched here), generalized off day_name/anchor instead of a
+    hardcoded Friday + global constant."""
+    if today <= cadence_anchor:
+        return cadence_anchor
+    delta_days = (today - cadence_anchor).days
+    fortnights_passed = delta_days // 14
+    candidate = cadence_anchor + timedelta(days=fortnights_passed * 14)
+    if today > candidate:
+        candidate += timedelta(days=14)
+    return candidate
 
 
-def week_id_for_system(system: str, d: date) -> str:
-    """Return the canonical week-ID string (DD/MM/YYYY) for the upcoming
-    session of the given system, relative to date d."""
-    if system == "The Horus Heresy":
-        return _fmt(hh_next_session_friday(d))
-    if system == "Kill Team":
-        return _week_id_fri(d)
-    return _week_id_wed(d)
+def next_session_date(
+    session_day: str, session_cadence: str, cadence_anchor: Optional[date], today: date
+) -> date:
+    """The next session date for a club's system, given its ClubSystem
+    schedule fields."""
+    if session_cadence == "fortnightly":
+        assert cadence_anchor is not None
+        return _next_fortnightly(session_day, cadence_anchor, today)
+    return _next_weekly(session_day, today)
+
+
+def is_session_week(
+    session_cadence: str, cadence_anchor: Optional[date], next_session: date, today: date
+) -> bool:
+    """Generalizes the old is_hh_session_week — is a session happening
+    within the next 7 days (i.e. is this an "on" week for a fortnightly
+    club)? Always True for weekly."""
+    if session_cadence == "weekly":
+        return True
+    days_until = (next_session - today).days
+    return 0 <= days_until <= 6
 
 
 def _is_auto_pairings_due(

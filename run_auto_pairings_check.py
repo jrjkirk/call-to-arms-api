@@ -14,8 +14,7 @@ from database import engine, scoped
 from models import ClubSetting, ClubSystem, Pairing, PublishState, Signup, SystemConfig
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
-from run_hh_call_to_arms import is_hh_session_week
-from week_logic import _is_auto_pairings_due, week_id_for_system
+from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
 
 SYSTEMS = ["The Old World", "The Horus Heresy", "Kill Team"]
 
@@ -42,15 +41,12 @@ def main() -> None:
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     print(f"Auto-pairings check — {now_uk.strftime('%Y-%m-%d %H:%M %Z')}")
 
+    today = now_uk.date()
+
     with Session(engine) as db:
         for system in SYSTEMS:
             try:
                 slug = _slug(system)
-                target_week = week_id_for_system(system, now_uk.date())
-
-                if system == "The Horus Heresy" and not is_hh_session_week(now_uk.date()):
-                    print(f"[{system}] SKIP — not an HH session week")
-                    continue
 
                 system_config = db.exec(
                     select(SystemConfig).where(SystemConfig.legacy_system_name == system)
@@ -69,6 +65,22 @@ def main() -> None:
                 for club_system in club_systems:
                     club_id = club_system.club_id
                     try:
+                        target_week_date = next_session_date(
+                            club_system.session_day, club_system.session_cadence,
+                            club_system.cadence_anchor, today,
+                        )
+                        target_week = target_week_date.strftime("%d/%m/%Y")
+
+                        if not is_session_week(
+                            club_system.session_cadence, club_system.cadence_anchor,
+                            target_week_date, today,
+                        ):
+                            print(
+                                f"[{system} club={club_id}] SKIP — not a session week "
+                                f"(cadence={club_system.session_cadence})"
+                            )
+                            continue
+
                         settings = {
                             "enabled": (
                                 _get_setting(db, club_id, f"auto_pairings_{slug}_enabled", "false") or "false"
