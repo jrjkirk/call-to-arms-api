@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
 from database import get_session, scoped
-from models import Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from models import Club, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -87,6 +87,19 @@ def list_systems(session: Session = Depends(get_session)):
             "allows_demo": r.allows_demo,
         }
         for r in rows
+    ]
+
+
+@app.get("/clubs")
+def list_clubs(session: Session = Depends(get_session)):
+    """Public read of active clubs, for the frontend's club-picker at
+    signup. No auth required — same tone/structure as GET /systems."""
+    rows = session.exec(
+        select(Club).where(Club.active == True)
+    ).all()
+    return [
+        {"id": c.id, "name": c.name, "slug": c.slug}
+        for c in rows
     ]
 
 

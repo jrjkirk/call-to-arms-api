@@ -28,8 +28,10 @@ it through a short-lived cookie so /discord/callback can send the user back
 to the right place. The regex restricts this to calltoarms.app (sub)domains
 only, so a spoofed Referer can't be used as an open redirect.
 """
+import base64
 import hmac
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -43,8 +45,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from database import get_session, _default_club_id, scoped
-from models import User, Player, AdminRole
+from database import get_session, scoped
+from models import Club, User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
@@ -91,6 +93,38 @@ def _verify_session_cookie(raw: str) -> Optional[int]:
         return int(body)
     except ValueError:
         return None
+
+
+def _make_pending_signup_cookie(discord_id: str, discord_name: str, avatar_url: Optional[str]) -> str:
+    """Same 'body.signature' shape as the session cookie, but the body is a
+    base64-encoded JSON payload carrying the Discord identity for a
+    brand-new user (see discord_callback's new-user branch) — enough to
+    create the real User row later in complete-signup without re-hitting
+    Discord's API."""
+    payload = json.dumps({
+        "discord_id": discord_id,
+        "discord_name": discord_name,
+        "avatar_url": avatar_url,
+    })
+    body = base64.urlsafe_b64encode(payload.encode()).decode()
+    return f"{body}.{_sign(body)}"
+
+
+def _verify_pending_signup_cookie(raw: Optional[str]) -> Optional[dict]:
+    """If the cookie is valid and untampered, return the decoded payload dict.
+    Otherwise None (missing, signature mismatch, or malformed body)."""
+    if not raw or "." not in raw:
+        return None
+    body, sig = raw.rsplit(".", 1)
+    if not hmac.compare_digest(sig, _sign(body)):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(body.encode()).decode())
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload.get("discord_id"):
+        return None
+    return payload
 
 
 def _safe_return_to(request: Request) -> str:
@@ -205,26 +239,34 @@ async def discord_callback(
     )
 
     existing = db.exec(select(User).where(User.discord_id == discord_id)).first()
-    if existing:
-        existing.discord_name = discord_name
-        existing.avatar_url = avatar_url
-        existing.last_login_at = datetime.utcnow()
-        db.add(existing)
-        user = existing
-    else:
-        user = User(
-            discord_id=discord_id,
-            discord_name=discord_name,
-            avatar_url=avatar_url,
-            player_id=None,
-            club_id=_default_club_id(db),
-        )
-        db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    cookie_value = _make_session_cookie(user.id)
     return_to = cta_oauth_return_to or FRONTEND_URL
+
+    if existing is None:
+        # Brand-new Discord identity — defer creating the User row until
+        # they pick a club (users.club_id is NOT NULL and never reopened;
+        # see complete-signup). Carry the identity in a short-lived signed
+        # cookie and send them to the frontend's club-picker.
+        response = RedirectResponse(f"{return_to}/join")
+        response.set_cookie(
+            "cta_pending_signup",
+            _make_pending_signup_cookie(discord_id, discord_name, avatar_url),
+            max_age=600,  # 10 minutes: enough to pick a club, short enough not to linger
+            httponly=True,
+            samesite="lax",
+            secure=True,
+        )
+        response.delete_cookie("cta_oauth_state")
+        response.delete_cookie("cta_oauth_return_to")
+        return response
+
+    existing.discord_name = discord_name
+    existing.avatar_url = avatar_url
+    existing.last_login_at = datetime.utcnow()
+    db.add(existing)
+    db.commit()
+    db.refresh(existing)
+
+    cookie_value = _make_session_cookie(existing.id)
     response = RedirectResponse(return_to)
     # SameSite=None + Secure: the ONLY combination browsers will attach to a
     # cross-site fetch() from the Vercel frontend. Lax silently never arrives.
@@ -258,6 +300,80 @@ def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_s
         candidates = db.exec(
             scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
         ).all()
+
+    return {
+        "authenticated": True,
+        "user": user,
+        "player": linked_player,
+        "claim_candidates": [
+            {"id": p.id, "name": p.name, "default_faction": p.default_faction}
+            for p in candidates
+        ],
+    }
+
+
+class CompleteSignupRequest(BaseModel):
+    club_id: int
+
+
+@router.post("/complete-signup")
+def complete_signup(
+    body: CompleteSignupRequest,
+    response: Response,
+    cta_pending_signup: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_session),
+):
+    """Step 3 for a brand-new Discord identity: the frontend's club-picker
+    submits the chosen club, and the deferred User row (see
+    discord_callback's new-user branch) is created for real here.
+
+    Race-safe: if a User row for this discord_id already exists by the
+    time this runs (double-submit, two tabs), don't create a duplicate —
+    just log into the existing row, same idempotent spirit as
+    admin.py's grant_role.
+    """
+    pending = _verify_pending_signup_cookie(cta_pending_signup)
+    if pending is None:
+        raise HTTPException(status_code=400, detail="No valid pending signup found. Please log in again.")
+
+    discord_id = pending["discord_id"]
+
+    club = db.get(Club, body.club_id)
+    if club is None or not club.active:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    user = db.exec(select(User).where(User.discord_id == discord_id)).first()
+    if user is None:
+        user = User(
+            discord_id=discord_id,
+            discord_name=pending["discord_name"],
+            avatar_url=pending.get("avatar_url"),
+            player_id=None,
+            club_id=club.id,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    linked_player = None
+    if user.player_id:
+        linked_player = db.get(Player, user.player_id)
+
+    candidates = []
+    if user.player_id is None:
+        candidates = db.exec(
+            scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
+        ).all()
+
+    response.set_cookie(
+        "cta_session",
+        _make_session_cookie(user.id),
+        max_age=60 * 60 * 24 * 30,  # 30 days
+        httponly=True,
+        samesite="lax",
+        secure=True,
+    )
+    response.delete_cookie("cta_pending_signup")
 
     return {
         "authenticated": True,
