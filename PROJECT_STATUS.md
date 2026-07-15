@@ -44,7 +44,7 @@ this repo (Cowork or otherwise) should follow this without being re-asked:
    "Next up" below for exactly where this stands right now. Commits only
    happen when Joel explicitly asks for them.
 
-_Last updated: 2026-07-15 (Phase 2 kickoff)_
+_Last updated: 2026-07-16 (club-at-signup shipped, `v78`)_
 
 ---
 
@@ -343,8 +343,676 @@ real super-admin set (currently empty on staging) unchanged throughout.
 All test rows cleaned up afterward. No deviations, nothing left
 unverified.
 
-**Not committed, not pushed, not deployed** — staging only, awaiting
-go-ahead.
+**Committed, pushed, deployed:** part of the `v78` batch below
+(commit `be14840`).
+
+---
+
+## Phase 2 — club-at-signup, backend half (SHIPPED, part of `v78`, 2026-07-16)
+
+Companion frontend slice below. **Design decision, confirmed with Joel in
+Cowork beforehand:** deferred user creation, not a nullable `club_id`
+window — `users.club_id` stays NOT NULL throughout, never reopened.
+
+**Added:**
+- `GET /clubs` (`main.py`) — public, mirrors `GET /systems` exactly,
+  active clubs only, `{id, name, slug}`.
+- `_make_pending_signup_cookie()` / `_verify_pending_signup_cookie()`
+  (`auth.py`) — reuse `_sign()`, base64-JSON body + signature, same shape
+  as the session cookie's signing.
+- `discord_callback`'s new-user branch now defers `User` creation: sets
+  `cta_pending_signup` (`max_age=600`, `httponly=True`, `samesite="lax"`,
+  `secure=True`) and redirects to `{return_to}/join` instead of creating
+  the row inline. Existing-user branch unchanged.
+- `POST /auth/complete-signup` — verifies the pending cookie, 404s on
+  missing/inactive `club_id`, race-safely re-checks for an existing
+  `User` row before creating (double-submit safe), sets the real session
+  cookie, clears the pending one, returns `GET /auth/me`'s shape.
+- `_default_club_id()` and its now-unused `Club` import removed from
+  `database.py` (zero remaining callers, confirmed via grep before
+  deleting).
+
+**Docstring vs. code call:** the module docstring claims `cta_session` is
+`SameSite=None`; the actual code (and both existing OAuth-transient
+cookies) use `samesite="lax"`. Followed the code, matched it exactly for
+the new cookie. **The docstring itself is stale and still uncorrected**
+— a real but harmless drift, worth a cleanup pass sometime.
+
+**Flagged as a conscious call, not an oversight:** the pending-signup
+cookie has no expiry embedded in its signed payload — relies solely on
+the browser-enforced 10-minute `max_age`, same as `cta_session` relies
+solely on its 30-day `max_age`. A captured cookie value replayed via curl
+(not a browser) past 10 minutes would still verify. Low severity (worst
+case: an account for that Discord identity gets created later than
+intended, no cross-account leak) — matches existing convention rather
+than a one-off fix. Joel accepted this as-is.
+
+**Verified:** everything in the handoff's list, plus real
+`discord_callback` new/existing-user branches exercised end-to-end via a
+mocked Discord API (not just a manually-built cookie): missing/tampered
+pending cookie → 400; inactive/nonexistent `club_id` → 404; double-submit
+race → second call logs into the same row, no duplicate; existing users'
+login path completely unaffected; `claim`/`create-profile` work correctly
+for the newly-created test user afterward. All test rows cleaned up. No
+deviations, nothing left unverified.
+
+**Committed, pushed, deployed:** part of the `v78` batch below (commit
+`fd8017f`).
+
+---
+
+## Phase 2 — club-at-signup, frontend half (SHIPPED, 2026-07-16)
+
+Repo: `call-to-arms-web`. Companion to the backend slice above.
+
+**Added:**
+- `src/routes/join/+page.svelte` (new) — fetches `GET /clubs` on mount,
+  renders active clubs reusing `/claim`'s existing list styling (no new
+  style invented). Submits `POST /auth/complete-signup` with
+  `credentials: 'include'`; success calls `window.__refreshAuth` then
+  `goto('/claim')`; 400 shows a distinct "signup session expired"
+  message + link back to Discord login (no auto-retry); other errors
+  show a generic retry-able message.
+- `src/routes/+layout.svelte` — auth-gate now also excludes `/join`
+  (confirmed via a repo-wide grep for `isAuthed`/`authenticated` that
+  this was the only place blocking a page from rendering entirely).
+
+**Verification — partial, deliberately, not a gap that was missed:**
+contract-level verification only (minted valid `cta_pending_signup`
+cookies against the real local backend, confirmed exact request/response
+shapes match what `/join`'s code sends/expects, including error cases).
+**Could not get a rendered screenshot** — Playwright's cached Chromium is
+missing system shared libs in the Claude Code environment, no
+passwordless `sudo` available to fix it (noted for later — worth a
+one-time system-level fix). **Full real end-to-end with a live Discord
+login was not attempted** — no way to complete that round trip from
+either session.
+
+**Shipped:** commit `5c16a52` on `main`, pushed. Deploys via Vercel's
+GitHub integration (no `vercel.json` in-repo — dashboard-managed,
+confirmed push-to-main auto-deploys). Live within ~20s of push. Confirmed
+`https://www.calltoarms.app/join` returns real SvelteKit HTML, not a 404.
+Frontend deployed *before* the backend batch below, deliberately — see
+that section for why the order matters.
+
+---
+
+## Phase 2 — `v78` ship (backend batch, 2026-07-16)
+
+Both remaining Phase 2 backend slices (delegate appointment,
+club-at-signup) shipped together, **after** the frontend above was
+confirmed live — required ordering: once the backend redirects new
+signups to `{frontend}/join`, that route has to already exist in
+production or a real new signup would 404.
+
+**Three commits, in order, on `main`:**
+- `be14840` — super-admin appointment endpoints (`admin.py`).
+- `fd8017f` — club-at-signup backend changes (`auth.py`, `main.py`,
+  `database.py`).
+- `8b6159b` — **unplanned, flagged to Joel before committing, approved
+  live in that session as a 3rd commit:** removed the 19 disposable
+  `verify_*.py` one-off proof scripts (per this file's own Housekeeping
+  section, already dead weight) and rewrote `PROJECT_STATUS.md`. **Real
+  consequence of this one:** that rewrite was based on Claude Code's own
+  local copy of this file, which had drifted behind Cowork's — it
+  predated the club-at-signup and delegate-appointment sections above.
+  Reconciled by hand in Cowork afterward (this edit). **Process
+  guardrail worth keeping in mind going forward:** paste the
+  latest Cowork-updated `PROJECT_STATUS.md` into the repo before a new
+  Claude Code session starts, not only after — otherwise a session's own
+  incidental edits to this file can silently regress it.
+
+**Deploy:** `fly deploy` → release **`v78`**, clean rolling deploy, no
+schema migration needed for either slice (`is_super_admin`/`clubs`
+already existed with their current shape; club-at-signup only touches
+application code). Post-deploy health check clean: `/systems`, `/clubs`,
+`/auth/me`, `/pairings` (with params), `/league/factions` → 200;
+`/players`, `/league/rankings` (no session) → 401. `fly logs` clean, no
+tracebacks.
+
+**Closed out, 2026-07-16:** Joel flipped `is_platform_admin=true` on his
+own production user row via direct SQL (Supabase SQL editor), and did a
+real end-to-end click-through in production with a throwaway Discord
+account — signed in fresh, landed on `/join`, saw Manchester in the club
+picker, selected it, landed on `/claim`, completed a profile, landed on
+`/` correctly logged in. **Confirmed working, live, for real.** Phase 2's
+shipped work (platform-admin kickoff, `club_systems` endpoint, delegate
+appointment, club-at-signup) is now fully proven in production, not just
+staging-verified.
+
+---
+
+## Phase 3 — club_webhooks table (staging only, 2026-07-16, not committed)
+
+First slice of Phase 3 (per-club Discord + public page scoping). Six real
+Discord webhook call sites confirmed in the actual code (not guessed),
+all currently keyed by system name or global, none by club:
+`signups.py` (per-system signup notifications), `post_pairings_image.py`
+(per-system pairings image — already had a comment flagging this exact
+gap), `run_call_to_arms.py`/`run_hh_call_to_arms.py`/`run_kt_call_to_arms.py`
+(per-system weekly reminder), `league.py` (league result, global),
+`post_league_rankings_image.py` (league rankings image, global),
+`services.py` (achievement announcements, global). Matches
+`multitenancy-plan-v2.md`'s Phase 3 `club_webhooks` design exactly.
+
+**Deliberately expand-only, same pattern as every phase's first step:**
+table created and seedable, but none of the six call sites read from it
+yet — they all still read their env vars exactly as before. Encryption-
+at-rest for the `url` column explicitly deferred to whenever a real
+write-endpoint exists (not yet, not this slice). Uniqueness gotcha
+avoided deliberately: no DB-level `UNIQUE(club_id, webhook_type,
+system_id)` constraint (Postgres treats `NULL` `system_id` as always
+distinct, which would silently fail to enforce "one row" for the three
+club-level types — the exact trap `app_settings` had before Phase 1's
+`club_settings` split) — follows `ClubSystem`'s existing precedent of no
+DB constraint, uniqueness enforced by the seed script's own
+check-then-upsert logic instead.
+
+**Added:**
+- `ClubWebhook` model (`models.py`) — `club_id`, `webhook_type`,
+  `system_id` (nullable), `url`, timestamps.
+- `"club_webhooks"` added to `WRITE_ALLOWED_TABLES` (`database.py`).
+- `seed_club_webhooks.py` — table creation + idempotent upsert-by-select
+  seed, `--verify-only` flag, `verify()` diffs against live env vars.
+
+**Verified on staging:** table created; all 12 of 12 expected webhook env
+vars were empty/unset on staging (expected — staging's `.env` doesn't
+carry real Discord secrets) — skipped by name only:
+`DISCORD_SIGNUP_WEBHOOK_URL`, `DISCORD_HH_SIGNUP_WEBHOOK_URL`,
+`DISCORD_KT_SIGNUP_WEBHOOK_URL`, `DISCORD_TOW_PAIRINGS_WEBHOOK_URL`,
+`DISCORD_HH_PAIRINGS_WEBHOOK_URL`, `DISCORD_KT_PAIRINGS_WEBHOOK_URL`,
+`DISCORD_CALL_TO_ARMS_WEBHOOK_URL`, `DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL`,
+`DISCORD_KT_CALL_TO_ARMS_WEBHOOK_URL`, `DISCORD_LEAGUE_RESULT_WEBHOOK_URL`,
+`DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL`, `DISCORD_ACHIEVEMENT_WEBHOOK_URL`.
+`--verify-only` round-tripped cleanly; re-running the seed was idempotent
+(0 seeded/12 skipped both times). To actually exercise the insert→update
+path (no real env var available to trigger it naturally), temporarily set
+one throwaway fake value in-process
+(`https://discord.com/api/webhooks/test/throwaway-1`, never a real
+secret), seeded, changed it, re-seeded, confirmed row count stayed at 1
+(update, not duplicate), then deleted the row — staging back to 0 real
+rows, no real webhook data ever created, printed, or persisted. Confirmed
+all six existing call sites untouched (`git diff --stat` empty on all of
+them). Security discipline held: no real webhook URL value printed or
+logged anywhere.
+
+**Committed and pushed:** `47c88ee` on `main` (three files:
+`models.py`, `database.py`, `seed_club_webhooks.py`). **No `fly deploy`
+performed** — not needed, since nothing reads from this table yet.
+
+**Seeded against production, 2026-07-16:** the production machine was
+found scale-to-zero stopped (clean, `exit_code=0`, Fly's normal
+low-traffic behavior, not a crash) — started via `fly machine start`,
+then `fly ssh console` worked on the first attempt (no fallback to asking
+Joel for secrets needed this time). The running container was still on
+the pre-commit image, so the three changed files were uploaded directly
+onto the live machine's `/app` via `fly ssh sftp put` and the script run
+there against production's real, already-present env vars — a one-off
+workaround, not a deploy. Since the app runs plain `uvicorn main:app`
+(no `--reload`), overwriting the files on disk didn't affect the
+already-running server process — confirmed via `GET /docs` → 200
+afterward. **These on-disk changes are superseded cleanly by the next
+real `fly deploy`**, which rebuilds fresh from the Docker image off
+`47c88ee` — no drift risk.
+
+**Real production results — 5 of 12 env vars were actually set:**
+seeded: signup webhooks for all 3 systems, plus club-level `achievement`
+and `league_result`. Skipped (empty/unset, names only):
+`DISCORD_TOW_PAIRINGS_WEBHOOK_URL`, `DISCORD_HH_PAIRINGS_WEBHOOK_URL`,
+`DISCORD_KT_PAIRINGS_WEBHOOK_URL`, `DISCORD_CALL_TO_ARMS_WEBHOOK_URL`,
+`DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL`, `DISCORD_KT_CALL_TO_ARMS_WEBHOOK_URL`,
+`DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL` — i.e. Manchester currently has no
+pairings-image, call-to-arms-reminder, or league-rankings-image webhooks
+configured at all in production, only signup notifications + achievement
++ league result. Worth knowing regardless of Phase 3's progress. Verified
+idempotent (re-ran seed, still 5/12, confirmed via direct DB query — 5
+rows, no duplicates); `--verify-only` clean both times. Six existing call
+sites confirmed untouched. No real webhook URL value ever printed,
+logged, or echoed anywhere — security discipline held throughout, and
+the SSH-direct path meant Joel was never even asked for a secret.
+
+---
+
+## Phase 3 — league-result webhook read path (SHIPPED, production `v79`, 2026-07-16)
+
+First "contract" step for Phase 3's `club_webhooks` table — proves the
+DB-first, env-var-fallback mechanism on the simplest of the six call
+sites before touching the other five (each of which has its own wrinkle:
+`post_discord_achievement()` has no `club_id` parameter yet,
+`post_league_rankings_image.py` isn't itself properly club-scoped, the
+three per-system types need a `SystemConfig` lookup on top).
+
+**Added:**
+- `resolve_webhook_url(db, club_id, webhook_type, system_id=None)`
+  (`database.py`, next to `scoped()`) — pure DB lookup, no env-var
+  knowledge, returns the matching `ClubWebhook.url` or `None`.
+- `league.py`'s `_post_league_webhook` now takes `db: Session`, resolves
+  via `resolve_webhook_url(db, row.club_id, "league_result") or
+  DISCORD_LEAGUE_RESULT_WEBHOOK_URL` (the `or` correctly falls through on
+  both `None` and empty string). Its one call site (`submit_result`) now
+  passes `db` through.
+
+**Verified on staging:** DB-sourced path (seeded a throwaway
+`ClubWebhook` row for Manchester, confirmed a constructed `LeagueResult`
++ monkeypatched `httpx.post` used the DB URL, not the env var);
+env-var-fallback path (deleted the row, confirmed correct fallback —
+staging's env var is empty, so this correctly no-ops, matching today's
+unmodified behavior); scoping check (a second throwaway club's
+`ClubWebhook` row was correctly ignored when resolving for Manchester's
+`club_id` — confirms the lookup is genuinely scoped by `row.club_id`,
+not "any row of this type"). Used a direct unit-level test of the two
+functions rather than the full `/league/results` endpoint, to avoid
+dragging in unrelated side effects (ratings recalc, achievement
+announcements) — exercises the same three logic paths. All test data
+cleaned up, staging back to exactly 1 club, 0 `club_webhooks` rows.
+
+**One deviation, a stronger check than asked for:** the handoff's
+scoping-check step suggested a "nonexistent `club_id`," but
+`club_webhooks.club_id` has a real FK constraint to `clubs` — a bogus id
+would error at the DB level rather than silently mismatch. Used a real
+second throwaway club instead, which is the more meaningful proof
+(genuine cross-club isolation, not just an FK-constraint side effect).
+
+**Committed, pushed, deployed:** `536a4f7` on `main`, Fly release
+**`v79`**. Health check clean: `fly logs` clean rolling deploy, no
+tracebacks; `/systems`, `/clubs`, `/auth/me`, `/pairings` (with params),
+`/league/factions` → 200; `/players`, `/league/rankings` (no session) →
+401. Change-specific check: read-only `resolve_webhook_url()` call
+directly against production via `fly ssh console` for Manchester's real
+`club_id` confirmed a non-empty URL resolves correctly post-deploy —
+presence only, value never printed. Other five webhook call sites
+untouched.
+
+---
+
+## Phase 3 — achievement webhook read path (SHIPPED, production `v80`, 2026-07-16)
+
+Second "contract" step, same pattern as the shipped league-result webhook
+(`v79`). This one needed real new plumbing, not just a lookup swap —
+`post_discord_achievement()` had no `club_id` parameter at all.
+
+**Added:**
+- `services.py`: `post_discord_achievement` now takes `club_id: int, db:
+  Session`, resolves `resolve_webhook_url(db, club_id, "achievement") or
+  DISCORD_ACHIEVEMENT_WEBHOOK_URL`. `announce_new_achievements`
+  restructured — the old bare `if not DISCORD_ACHIEVEMENT_WEBHOOK_URL:
+  return` guard at the top is gone; the check now happens after `player =
+  db.get(Player, player_id)`, using the resolved-or-fallback URL instead.
+  The internal call now passes `player.club_id, db`.
+- `admin.py`: `achievement_post_discord` gained a `db` dependency, its
+  discarded `_` param renamed to `user`, passes `user.club_id, db`
+  through (this endpoint takes a free-text `player_name`, not a
+  `player_id`, so the admin's own club is the correct source of
+  `club_id`, consistent with every other club-scoped admin endpoint).
+
+**Verified on staging:** DB-sourced path confirmed directly; **the
+early-exit restructure specifically verified** — with a `ClubWebhook` row
+present but the env var empty (the scenario a future env-var-less club
+would be in), confirmed the full achievement computation now runs and
+posts via the DB URL, proving the old bare-env-var guard is genuinely
+gone, not just moved. Also verified the reverse: with nothing configured
+anywhere, the new guard still short-circuits before even calling
+`compute_achievements` (spied, zero invocations) — preserving the
+original perf-guard for the common case while fixing the gap for the
+DB-only case. Cross-club scoping confirmed (second club's row ignored).
+`POST /admin/achievements/post-discord`'s existing behavior (401 with no
+auth) confirmed unchanged. All test data cleaned up.
+
+**Committed, pushed, deployed:** `0fa13d9` on `main`, Fly release
+**`v80`**. Health check clean (the only error-level log lines found were
+pre-existing SSH-session EOFs from earlier in the session, predating this
+deploy, unrelated). `/systems`, `/clubs`, `/auth/me`, `/pairings` (with
+params), `/league/factions` → 200; `/players`, `/league/rankings` (no
+session) → 401. Change-specific check: read-only production lookup for
+Manchester's `achievement` webhook confirmed non-empty, presence only.
+
+**Two of six webhook call sites now DB-first with env-var fallback:
+`league_result`, `achievement`. Four remain, untouched: `signup`,
+`pairings`, `call_to_arms`, `league_rankings`.**
+
+---
+
+## Phase 3 — signup webhook read path (SHIPPED, production `v81`, 2026-07-16)
+
+Third "contract" step, same pattern as the shipped league-result (`v79`)
+and achievement (`v80`) webhooks — first of the three per-system types,
+introducing a `system_id` dimension on top of the club lookup.
+
+**Changed (`signups.py`):** `_post_webhook` signature is now
+`_post_webhook(db, club_id, system, content)`. Resolves
+`system_config = _get_system_config(db, system)` (existing Phase 0
+helper, reused not reinvented) → `system_id`, then
+`resolve_webhook_url(db, club_id, "signup", system_id) or
+_signup_webhook_for_system(system)`. All 5 call sites updated: the two
+wrappers (`_post_discord_signup`, `_post_discord_drop`) forward
+`db, club_id`; the three direct calls (post-publish drop in
+`drop_signup`, `submit_prearranged`, `swap_signups`) pass
+`db, user.club_id` explicitly.
+
+**Verified on staging:** both wrapper functions confirmed using the
+DB-sourced URL directly; **system discrimination confirmed** — a
+`ClubWebhook` row seeded for one system (TOW) was correctly NOT used when
+resolving for a different system (KT), proving `system_id` genuinely
+discriminates rather than being ignored; cross-club scoping confirmed
+(second club's row ignored); fallback confirmed (row deleted → correct
+no-op, matching today). **Went beyond a unit-level check for one
+call site:** forged a valid session cookie and hit the real
+`POST /signups/prearranged` endpoint through `TestClient` end-to-end with
+a seeded DB webhook row — got 200, confirmed the actual Discord post used
+the DB-sourced URL through the genuine route handler, not just a direct
+function call. `drop_signup`'s post-publish path and `swap_signups`
+weren't exercised via their live routes (more setup/cleanup risk, need
+pre-existing published-pairings state) but their `_post_webhook(...)`
+call is identical in shape to what was proven elsewhere. All test data
+cleaned up — staging back to exactly 1 club, 0 `club_webhooks` rows, only
+the 2 pre-existing real players remaining.
+
+**Committed, pushed, deployed:** `85f9c69` on `main`, Fly release
+**`v81`**. Health check clean. Change-specific check: read-only
+production lookup for all 3 systems' `signup` webhooks (Manchester)
+confirmed non-empty — TOW, HH, KT all `True`, presence only.
+
+**Three of six webhook call sites now DB-first with env-var fallback:
+`league_result`, `achievement`, `signup`. Three remain: `pairings`,
+`call_to_arms`, `league_rankings`.**
+
+---
+
+## Phase 3 — pairings webhook read path (SHIPPED, production `v82`, 2026-07-16)
+
+Fourth "contract" step. **This one closes a real, previously-flagged bug**
+(not just another mechanical repeat): `post_pairings_image.py`'s
+`WEBHOOK_MAP` mixing pairings across clubs sharing a system — flagged in
+this project's own code comments since before this session started as a
+must-fix-before-Phase-4 gap.
+
+**Changed (`post_pairings_image.py`):** `post_pairings_image_for` now
+resolves `system_id` (same `SystemConfig.legacy_system_name` lookup shape
+`_resolve_single_club_id` already used) and checks
+`resolve_webhook_url(db, club_id, "pairings", system_id) or
+WEBHOOK_MAP.get(system, "")`. `WEBHOOK_MAP`'s comment rewritten — no
+longer describes an unsolved gap, now correctly documents it as the
+fallback for a club with no `club_webhooks` row. `_resolve_single_club_id`
+and the manual `workflow_dispatch` entry point (`main()`) untouched — a
+separate known gap (no club selector for that manual workflow), not this
+handoff's problem.
+
+**Verified on staging, including the scenario that matters most:**
+created a second throwaway club with its own real `ClubSystem` row for
+"The Old World" — genuinely sharing the system with Manchester — gave it
+its own distinct `pairings` webhook, called `post_pairings_image_for` for
+both clubs, and confirmed each posted to its own URL with zero crossover
+in either direction. **This is the exact bug fixed, confirmed directly,
+not just inferred.** Also verified: system discrimination (different
+system, no row, correctly falls through without leaking the other
+system's URL); fallback (row deleted → correct no-op matching today).
+`run_auto_pairings_check.py` confirmed unaffected by inspection — its
+call site already passes real per-club `club_id`, function signature
+unchanged. All test data cleaned up.
+
+**Worth knowing regardless of this ship:** production currently has zero
+`club_webhooks` rows for `pairings` — the earlier production seed found
+all three `DISCORD_*_PAIRINGS_WEBHOOK_URL` env vars empty (Manchester has
+never had pairings-image webhooks configured at all, consistent with what
+the seed step already surfaced). So this fix will be 100% fallback for
+Manchester once shipped — nothing to regress, but also not load-bearing
+yet. It only takes effect once a real `club_webhooks` row exists for
+`pairings` (Manchester's own, or a future second club's).
+
+**Committed, pushed, deployed:** `3018b3f` on `main`, Fly release
+**`v82`**. Health check clean. Change-specific check: production
+`resolve_webhook_url` for all 3 systems' `pairings` type correctly
+returned `None` (no row exists yet), no exceptions — fallback path
+exercised cleanly, not just theoretically safe. Manchester's actual
+pairings-webhook behavior unchanged (still 100% `WEBHOOK_MAP`/env-var
+sourced) until a real `club_webhooks` row exists for `pairings`.
+
+**Four of six webhook call sites now DB-first with env-var fallback:
+`league_result`, `achievement`, `signup`, `pairings`. Two remain:
+`call_to_arms`, `league_rankings`.**
+
+---
+
+## Phase 3 — league-rankings webhook read path + latent bug fix (SHIPPED, production `v83`, 2026-07-16)
+
+Last of the six webhook call sites for this round (the three
+`call_to_arms` scripts remain explicitly parked — reopening them was
+flagged as revisiting an earlier "leave as-is" decision, and Joel chose
+to skip them). This one required a real fix, not just a lookup swap:
+`post_league_rankings_image.py`'s `main()` called
+`league_rankings(_=None, session=db)`, but the actual function takes
+`user`, not `_` — a `TypeError` waiting to happen the moment
+`DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL` (or now, a `club_webhooks` row)
+was ever non-empty. It never had been in production, which is the only
+reason this was latent rather than already broken.
+
+**Changed:**
+- `main.py`: extracted `league_rankings`'s body into
+  `_compute_league_rankings(session, club_id) -> list[dict]`. The
+  `@app.get("/league/rankings")` endpoint is now a two-line wrapper
+  calling it with `user.club_id` — signature, decorator, and auth
+  completely untouched.
+- `post_league_rankings_image.py`: added
+  `_resolve_single_active_club_id(db)` (mirrors `post_pairings_image.py`'s
+  `_resolve_single_club_id` — raises loudly on anything but exactly 1
+  active club, rather than guessing). Replaced the broken call with
+  `_compute_league_rankings(db, club_id)`. Webhook lookup now
+  `resolve_webhook_url(db, club_id, "league_rankings") or
+  DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL`, still checked before rendering so
+  it short-circuits cheaply when nothing's configured.
+
+**Verified on staging:** live-endpoint equivalence proven directly —
+hit the real `GET /league/rankings` via `TestClient` with a forged
+session cookie, separately called `_compute_league_rankings` directly,
+results were exactly equal with real seeded throwaway league data —
+confirms the extraction is a pure refactor, zero behavior change. **The
+latent bug fix specifically verified**: seeded a `ClubWebhook` row so the
+previously-guaranteed-to-crash path actually executes — ran the real
+`main()` (only `httpx.post` mocked), no exception, correct DB-sourced
+post. Fallback confirmed (no exception, correct no-op with row removed).
+Club-resolution safety confirmed (raises on a second active club,
+resolves correctly again once removed). All test data cleaned up.
+
+**This closes out all six webhook call sites except the three
+`call_to_arms` scripts, which stay parked.**
+
+**Committed, pushed, deployed:** `df2dbeb` on `main`, Fly release
+**`v83`**. Health check clean. **Real authenticated request against
+production**, not just a read-only lookup: forged a session cookie for
+the `Testy Mctestface` test account (id 53, deliberately not a real
+player) and hit the actual live app + real DB via `fly ssh console` —
+`200`, 31 real ranking rows in the expected shape, confirming the
+extraction produces correct output against production's real league
+data. Webhook lookup for `league_rankings` confirmed `None` cleanly (no
+row yet, same as `pairings`), no exceptions.
+
+**Five of six planned webhook call sites now DB-first with env-var
+fallback: `league_result`, `achievement`, `signup`, `pairings`,
+`league_rankings`. The three `call_to_arms` scripts remain untouched per
+the standing decision — not part of this round.**
+
+---
+
+## Phase 3 — club_webhooks save/list/delete endpoints (SHIPPED, production `v84`, 2026-07-16)
+
+First self-service piece of Phase 3 — turns `club_webhooks` from
+"seeded once by a script" into something a club's own super-admin can
+manage directly. (One interrupted attempt at this handoff got as far as
+adding `ClubWebhook` to `admin.py`'s import line before a server error cut
+the session off mid-task — recovered cleanly in the next message, no lost
+work, no leftover half-state.)
+
+**Added (`admin.py`):**
+- `WEBHOOK_TYPES_PER_SYSTEM`, `WEBHOOK_TYPES_CLUB_LEVEL`,
+  `ALL_WEBHOOK_TYPES` constants; `_mask_webhook_row(row)` masking
+  primitive.
+- `GET /admin/webhooks` (`require_super_admin`) — full 12-row grid (3
+  per-system types × 3 systems + 3 club-level types) for `user.club_id`.
+  Configured rows: `{webhook_type, system_id, system_name, configured:
+  true, last_four}`. Unconfigured: `configured: false`, no `last_four`.
+  **The raw URL never appears anywhere in this response** — confirmed by
+  grepping the raw response text for the full test URLs, never present.
+- `POST /admin/webhooks` (`require_super_admin`) — validates
+  `webhook_type`/`system_id` combination (422 for a `system_id` on a
+  club-level type or a missing one on a per-system type, 404 for an
+  invalid `system_id`, matching the earlier `club_systems` endpoint's
+  precedent), upserts keyed on `(user.club_id, webhook_type, system_id)`,
+  returns the masked shape only.
+- `DELETE /admin/webhooks` (`require_super_admin`, query params) —
+  idempotent removal.
+
+**Verified on staging:** auth gating (403 for non-super-admin); empty
+state returns exactly 12 rows, all unconfigured, no `url` key anywhere;
+masked POST response confirmed for both a per-system and a club-level
+type; upsert-not-duplicate confirmed (row count stays 1 on re-POST);
+full validation matrix (422/404 cases); idempotent DELETE; **cross-club
+isolation confirmed** with two real distinct clubs each configuring their
+own `league_result` webhook — each club's `GET` showed only its own row,
+neither club's `DELETE` touched the other's. (One test-data mistake
+self-corrected along the way: the first isolation pass used URLs sharing
+a suffix, making their `last_four` values collide by coincidence — not a
+real leak, since the rows were already independently confirmed distinct
+by `club_id` and delete behavior; re-ran with distinct suffixes for an
+unambiguous result.) Confirmed no regression: all five already-shipped
+webhook read paths still resolve correctly during and after this
+endpoint's test data existed and was cleaned up. All test data removed
+afterward — staging back to exactly 1 club, 0 `club_webhooks` rows, 2
+pre-existing real users.
+
+**Committed, pushed, deployed:** `0540aab` on `main`, Fly release
+**`v84`**. Health check clean. Read-only production sanity check:
+`GET /admin/webhooks` as production's real super-admin (`Kirkboi`, user
+id 1) returned 200, the correct 12-row grid, no `url` key anywhere, 5 of
+12 configured matching exactly what was seeded earlier (signup ×3,
+`achievement`, `league_result`), the other 7 correctly unconfigured. No
+POST/DELETE performed against production — nothing written or removed.
+
+**This completes `club_webhooks` through to a working self-service API.**
+No frontend yet (next up), no encryption-at-rest (still deferred), the
+three `call_to_arms` scripts remain untouched.
+
+---
+
+## Phase 3 — Discord Webhooks admin panel, frontend (SHIPPED, 2026-07-16)
+
+Repo: `call-to-arms-web`. Frontend for the `club_webhooks` self-service
+API (`v84`).
+
+**Added:** a "Discord Webhooks" panel in `admin/+page.svelte`, top-level
+and super-admin-gated (same pattern as "Post Achievement to
+Discord"/"Manage Admins"), between "Edit Player Profile" and "Pairing
+Blocks". Three sub-sections for the per-system types (each listing 3
+systems) and three for the club-level types (single row each). Each row:
+status ("Configured (…1234)" / "Not configured"), URL input, Save
+(disabled empty), Remove (shown only when configured). The
+`call_to_arms` sub-heading carries an explicit note that saving there
+doesn't yet change real behavior (the three `run_*_call_to_arms.py`
+scripts are still deliberately unconverted). All existing CSS classes
+reused, nothing new added.
+
+**Verified at the contract level, not visually — same limitation as the
+club-at-signup frontend handoff, now hit twice:** Playwright/Chromium
+still won't launch in this environment (missing shared libs, no `sudo`).
+Confirmed the request/response contract directly instead: minted a real
+session for a throwaway staging super-admin, hit `GET`/`POST`/`DELETE
+/admin/webhooks` via `curl` using the exact shapes the Svelte code
+constructs — all matched (12-row `GET`, masked `POST` responses, correct
+`DELETE` behavior including omitting `system_id` for club-level types,
+422 validation errors with `detail`, 401 with no cookie). `npm run build`
+clean. All test data cleaned up.
+
+**Not verified: actual rendering in a real browser** (button states,
+layout, the caveat note's visual placement) — recommend a quick manual
+look once this ships, same spirit as the `/join` click-through
+recommendation earlier. This is the second time the Playwright/shared-libs
+gap has blocked visual verification in `call-to-arms-web` — worth
+actually fixing once (real `sudo`, install the missing libs) rather than
+hitting this a third time.
+
+**Committed, pushed, deployed:** `792094d` on `main`. No Vercel/GitHub
+CLI available to query deploy status directly, so verified indirectly
+but conclusively: `/admin` returns 200 with a fresh (`x-vercel-cache:
+MISS`, `age: 0`) response, and its content-hashed asset filenames match
+byte-for-byte a local `npm run build` of this exact commit — strong proof
+Vercel deployed this specific commit, not a stale cached one. Route
+healthy, correct title, no error boundary. **The super-admin-gated panel
+itself still hasn't been seen rendering by a human** — recommend Joel log
+in and take a look for real.
+
+---
+
+## Housekeeping — PROJECT_STATUS.md sync mystery solved + auth.py docstring fixed (staged, not committed, 2026-07-16)
+
+**The recurring "PROJECT_STATUS.md shows modified" mystery is resolved.**
+Root cause confirmed by diffing the working tree against `HEAD`: commit
+`8b6159b` (the unplanned cleanup commit from the `v78` ship) committed
+Claude Code's own stale local copy of this file, which predated the
+club-at-signup and delegate-appointment sections. Cowork manually
+reconciled the working-tree copy back to accurate immediately afterward
+— but that reconciliation itself was never committed, so every session
+since correctly left the file alone (per the ownership rule) and the gap
+just sat there, re-flagged repeatedly but never traced to root cause
+until now. **The working-tree copy is confirmed authoritative** — every
+commit hash, Fly release, and verification detail in it checks out
+against what actually happened through the Discord Webhooks admin panel
+ship (`792094d`). Resolution: commit it as-is, no further reconciliation
+needed.
+
+**`auth.py` docstring fixed**: removed the false "SameSite=None + Secure"
+claim (module docstring never matched the actual code, which has always
+used `samesite="lax"` for all four cookies in this file). Also found and
+removed an identical false claim as an inline comment directly above the
+`cta_session` `set_cookie` call in `discord_callback`'s existing-user
+branch — leaving that would have kept the same misinformation right next
+to the code. Confirmed via grep: no remaining `SameSite=None` claims
+anywhere in the file.
+
+**Staged, not committed** — awaiting go-ahead.
+
+---
+
+## Phase 3 — Discord Webhooks panel: real visual bug found and fixed (staged, not committed, 2026-07-16)
+
+Repo: `call-to-arms-web`. Follow-up to the panel shipped in `792094d`,
+which had only been contract-verified (Playwright didn't work in this
+environment yet). Now that it does (Joel's shared-libs fix confirmed
+working), this handoff got real screenshots for the first time — **and
+found a real bug that's been live in production since the panel
+shipped.**
+
+**Bug:** each webhook row rendered broken — three stacked lines instead
+of one (system name/status, then the URL input stretched to nearly full
+section width on its own line, then the Save/Remove buttons orphaned on
+a third line, floated to the far right). Still technically clickable,
+but did not "render sensibly" by any reasonable definition — this is
+exactly the class of thing contract-level verification structurally
+cannot catch.
+
+**Root cause:** a global rule in `app.css`
+(`.field-input, .field-select { width: 100%; ... }`) assumes
+`.field-input` is always wrapped in a `.field` div, which bounds its
+width via `min-width: 160px` in a flex layout. The new panel used
+`.field-input` as a bare flex child of `.block-row` instead, so it
+inherited `width: 100%` against the whole row.
+
+**Fix:** wrapped the input + Save + Remove buttons in a new
+`<span class="webhook-actions">` per row, added ~15 lines of CSS scoped
+to this component only (`.webhook-actions` flex container,
+`.webhook-actions .field-input` override with `flex: 1 1 240px;
+min-width: 180px`, a `.webhook-message` wrap tweak) — no changes to any
+shared/global class definitions.
+
+**Verified with real Playwright screenshots** (three states: normal,
+typed-input, just-saved) — confirmed every row is now a single line with
+correct button contrast (enabled Save turns gold, others stay dimmed),
+the `call_to_arms` caveat badge renders legibly inline, focus states
+work, and all six sub-sections appear in the correct order with correct
+labels. Driven via real clicks against a real (throwaway, staging)
+backend, not static rendering. All test data cleaned up.
+
+**Staged, not committed** — awaiting go-ahead. This is a real bug fix for
+something already live in production (`792094d`) — worth shipping
+promptly, not letting it sit.
 
 ---
 
@@ -374,26 +1042,25 @@ go-ahead.
   - `_recalculate_ratings()`'s cross-club isolation fix is committed
     (`d8f0ae2`, one of the three commits that triggered the GitHub
     Actions incident above — already resolved).
-- **Phase 2** (admin hierarchy) — **kickoff slice complete, committed
-  (`5f9450d`), migrated + deployed to production (`v76`), verified,
-  2026-07-15.** See "Phase 2 — admin hierarchy (in progress)" section
-  below for what this slice covered and what's still open in the phase.
-  **Phase 3** (per-club Discord + public page scoping), **Phase 4**
-  (second club onboarding) — not started.
+- **Phase 2** (admin hierarchy) — **platform-admin kickoff, `club_systems`
+  endpoint, delegate appointment, and club-at-signup (backend + frontend)
+  all shipped to production as of `v78`, 2026-07-16.** See the "Phase 2 —
+  ..." sections above for what each slice covered. **Confirmed working
+  live in production, 2026-07-16:** Joel flipped `is_platform_admin=true`
+  on his own account and did a real end-to-end click-through of the new
+  signup flow — both clean. Remaining, unscoped Phase 2 work: the
+  `VALID_SCOPES`-per-club decision,
+  and the `scoped()` "act as club X" platform-admin override. **Phase 3**
+  (per-club Discord + public page scoping), **Phase 4** (second club
+  onboarding) — not started.
 
 ## Next up
 
-Phase 2 (admin hierarchy) is well underway. Shipped to production so far:
-platform-admin kickoff (`5f9450d`, `v76`) and the `club_systems` endpoint
-(`15996ba`, `v77`). Staging-only, awaiting go-ahead: the delegate
-appointment endpoints (see section above) — verified end-to-end, just
-needs commit/push/deploy whenever you're ready.
+Everything shipped in `v78` is now confirmed working live in production
+(Joel did the SQL flip and the real click-through, both clean — see the
+`v78` ship section above). Phase 2's remaining open items (none
+scoped/confirmed yet):
 
-Remaining Phase 2 work, in no particular order, none scoped/confirmed yet:
-
-- Club-at-signup UX: replace the `_default_club_id(db)` placeholder in
-  `discord_callback`'s new-user branch (`auth.py`) with a real club-picker.
-  No frontend club-selection UI exists at all yet (`claim` page has none).
 - Decide whether `VALID_SCOPES` (currently a hardcoded 4-item list,
   duplicated in `auth.py` and the frontend's `admin/+page.svelte`) should
   become per-club (derived from that club's `club_systems`) before a real
@@ -437,6 +1104,17 @@ these fields, but must not imply they control real scheduling yet.
 - The `add_club_id_to_*.py` scripts, `create_club_settings_table.py`, and
   `seed_clubs.py` must be **kept** — they're the actual migration scripts
   the production migration (above) will run.
+- **Playwright now works in `call-to-arms-web`'s environment, 2026-07-16.**
+  The missing-shared-libs blocker that forced contract-level-only
+  verification on the last two frontend handoffs (club-at-signup,
+  Discord Webhooks admin panel) is fixed — Joel ran
+  `sudo env "PATH=$PATH" npx --yes playwright@latest install-deps
+  chromium` once, confirmed with a real screenshot capture
+  (`npx --yes playwright@latest screenshot ...`). Chromium's binary was
+  already cached from an earlier attempt; only the system libraries were
+  ever actually missing. **Future frontend handoffs in this repo should
+  use real Playwright screenshots for visual verification, not fall back
+  to contract-level-only checks** — the excuse no longer applies.
 
 ---
 

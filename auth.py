@@ -12,11 +12,10 @@ Flow:
 Sessions are stateless: the cookie value is `{user_id}.{hmac-signature}`.
 We trust the cookie iff the signature verifies with our SESSION_SECRET.
 
-COOKIE NOTE: cta_session is SameSite=None + Secure, NOT Lax. The frontend
-(vercel.app) and backend (fly.dev) are different sites, and browsers refuse
-to attach Lax cookies to cross-site fetch() calls — only None travels.
-The short-lived cta_oauth_state cookie stays Lax because it's only needed
-during top-level redirects, where Lax is sent and is the safer choice.
+COOKIE NOTE: cta_session, cta_oauth_state, cta_oauth_return_to, and
+cta_pending_signup all currently use samesite="lax" + secure=True.
+Chrome/Firefox treat http://localhost as trustworthy, so secure=True
+still works for local dev.
 
 SUBDOMAIN NOTE: login can be initiated from any club subdomain
 (e.g. test1.calltoarms.app, manchester.calltoarms.app), not just the root
@@ -268,10 +267,6 @@ async def discord_callback(
 
     cookie_value = _make_session_cookie(existing.id)
     response = RedirectResponse(return_to)
-    # SameSite=None + Secure: the ONLY combination browsers will attach to a
-    # cross-site fetch() from the Vercel frontend. Lax silently never arrives.
-    # Chrome/Firefox treat http://localhost as trustworthy, so secure=True
-    # still works for local dev.
     response.set_cookie(
         "cta_session",
         cookie_value,
