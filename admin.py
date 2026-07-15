@@ -73,6 +73,7 @@ def admin_me(
     scopes = admin_scopes(user, db)
     return {
         "is_super_admin": user.is_super_admin if user else False,
+        "is_platform_admin": user.is_platform_admin if user else False,
         "scopes": sorted(scopes),
     }
 
@@ -1671,6 +1672,38 @@ def update_club_system_schedule(
 # Platform admin — cross-club actions
 # ---------------------------------------------------------------------------
 
+@router.get("/platform/clubs")
+def list_platform_clubs(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """All clubs, active and inactive both — unlike the public GET /clubs
+    (active-only, the /join club-picker's source, untouched by this).
+    Platform-admin only: this is the management-table source for the
+    platform admin panel."""
+    clubs = db.exec(select(Club).order_by(Club.name)).all()
+    result = []
+    for c in clubs:
+        enabled_system_count = len(db.exec(
+            scoped(ClubSystem, c.id).where(ClubSystem.enabled == True)
+        ).all())
+        has_super_admin = db.exec(
+            scoped(User, c.id).where(User.is_super_admin == True)
+        ).first() is not None
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "slug": c.slug,
+            "active": c.active,
+            "leagues_enabled": c.leagues_enabled,
+            "timezone": c.timezone,
+            "contact_email": c.contact_email,
+            "enabled_system_count": enabled_system_count,
+            "has_super_admin": has_super_admin,
+        })
+    return result
+
+
 class ClubCreateBody(BaseModel):
     name: str
     slug: str
@@ -1808,6 +1841,37 @@ def upsert_club_system(
     return row
 
 
+@router.get("/platform/clubs/{club_id}/systems")
+def list_platform_club_systems(
+    club_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """That specific club's ClubSystem rows joined to SystemConfig —
+    platform-admin view of any club, same join shape the self-service
+    GET /admin/club-systems already uses for the caller's own club."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    rows = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club_id)
+    ).all()
+    return [
+        {
+            "system_id": cs.system_id,
+            "system_name": sc.name,
+            "enabled": cs.enabled,
+            "session_day": cs.session_day,
+            "session_cadence": cs.session_cadence,
+            "cadence_anchor": cs.cadence_anchor,
+        }
+        for cs, sc in rows
+    ]
+
+
 class AppointSuperAdminBody(BaseModel):
     user_id: int
 
@@ -1852,6 +1916,68 @@ def appoint_club_super_admin(
     return _platform_user_row(target)
 
 
+@router.get("/platform/clubs/{club_id}/super-admins")
+def list_platform_club_super_admins(
+    club_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """That club's current super-admins — platform-admin view of any
+    club, mirrors the super_admins half of the self-service
+    GET /admin/roles (which is scoped to the caller's own club only)."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    rows = db.exec(
+        scoped(User, club_id).where(User.is_super_admin == True).order_by(User.discord_name)
+    ).all()
+    result = []
+    for sa in rows:
+        player_name = None
+        if sa.player_id:
+            p = db.get(Player, sa.player_id)
+            player_name = p.name if p else None
+        result.append({
+            "user_id": sa.id,
+            "discord_name": sa.discord_name,
+            "player_name": player_name,
+        })
+    return result
+
+
+@router.get("/platform/clubs/{club_id}/grantable-users")
+def list_platform_club_grantable_users(
+    club_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """That club's active users with a linked player — platform-admin
+    view of any club, the appoint-super-admin picker source. Mirrors the
+    self-service GET /admin/grantable-users' exact logic, just not
+    restricted to the caller's own club."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    users = db.exec(
+        scoped(User, club_id).where(User.player_id.isnot(None))
+    ).all()
+
+    result = []
+    for u in users:
+        p = db.get(Player, u.player_id)
+        if p and p.active:
+            result.append({
+                "id": u.id,
+                "discord_name": u.discord_name,
+                "player_name": p.name,
+            })
+
+    result.sort(key=lambda x: x["player_name"].lower())
+    return result
+
+
 @router.delete("/platform/clubs/{club_id}/super-admins/{user_id}")
 def remove_club_super_admin(
     club_id: int,
@@ -1875,3 +2001,31 @@ def remove_club_super_admin(
         db.commit()
 
     return {"ok": True, "removed": removed}
+
+
+class ClubActiveBody(BaseModel):
+    active: bool
+
+
+@router.post("/platform/clubs/{club_id}/active")
+def set_club_active(
+    club_id: int,
+    body: ClubActiveBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Set a club's active flag directly. Idempotent — calling with the
+    current value is a no-op write, still returns 200 with current
+    state. Replaces the by-SQL-only pattern previously used for
+    Yorkshire's own activation."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    if club.active != body.active:
+        club.active = body.active
+        db.add(club)
+        db.commit()
+        db.refresh(club)
+
+    return {"id": club.id, "slug": club.slug, "active": club.active}
