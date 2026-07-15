@@ -17,7 +17,7 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
-from models import Club, ClubWebhook
+from models import Club, ClubWebhook, User
 
 T = TypeVar("T")
 
@@ -130,6 +130,30 @@ def resolve_public_club_id(db: Session, club_slug: str | None) -> int:
     if club is None or not club.active:
         raise ValueError("Club not found.")
     return club.id
+
+
+def resolve_request_club_id(db: Session, user: User | None, club_slug: str | None) -> int:
+    """Resolve which club a request to the otherwise-public pairings pages
+    (GET /pairings, GET /week-id, GET /league/factions) should be scoped to.
+
+    If the request carries a valid authenticated session, that user's own
+    club (user.club_id) is authoritative and the slug/hostname `club` param
+    is ignored entirely. This closes the cross-club leak where a logged-in
+    user browsing via the bare/default hostname (which the frontend maps to
+    a hardcoded "manchester" slug) would otherwise be served another club's
+    published data — e.g. a Yorkshire super admin seeing Manchester's Old
+    World pairings, a system Yorkshire doesn't even run.
+
+    Only genuinely anonymous requests (no session) fall back to slug-based
+    resolve_public_club_id, preserving the anonymous shared-link behavior
+    those public pages were deliberately built to support (an unauthenticated
+    visitor following a link to a specific club's still-published pairings).
+    Raises the same ValueError/RuntimeError as resolve_public_club_id in the
+    anonymous path, so existing 404/500 handling at the call sites is
+    unchanged."""
+    if user is not None:
+        return user.club_id
+    return resolve_public_club_id(db, club_slug)
 
 
 def scoped(model: Type[T], club_id: int) -> Select:

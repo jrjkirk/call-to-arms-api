@@ -1,9 +1,10 @@
 from datetime import date, datetime, timedelta
+from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
-from database import get_session, resolve_public_club_id, scoped
+from database import get_session, resolve_request_club_id, scoped
 from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date
 from services import (
@@ -18,7 +19,7 @@ from services import (
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
-from auth import router as auth_router, require_user
+from auth import router as auth_router, require_user, current_user
 from signups import router as signups_router
 from league import router as league_router
 from admin import router as admin_router
@@ -439,15 +440,20 @@ def _public_vibe_display(a_vibe, b_vibe):
 
 
 @app.get("/week-id")
-def get_week_id(system: str, club: str | None = None, session: Session = Depends(get_session)):
-    """Public, unauthenticated — the backend-authoritative target session
-    date for a system, replacing the frontend's independent duplicate of
-    this same date logic (weekIdForSystem() in +page.server.ts). Optional
-    `club` slug resolves a specific club explicitly (Phase 3/4); omitted,
-    it falls back to the single-active-club stopgap unchanged — same
-    pattern as GET /pairings and GET /league/factions."""
+def get_week_id(
+    system: str,
+    club: str | None = None,
+    user: Optional[User] = Depends(current_user),
+    session: Session = Depends(get_session),
+):
+    """Optional-auth — the backend-authoritative target session date for a
+    system, replacing the frontend's independent duplicate of this same date
+    logic (weekIdForSystem() in +page.server.ts). A logged-in caller is
+    always scoped to their own club (user.club_id); the `club` slug is used
+    only for genuinely anonymous requests — same pattern as GET /pairings and
+    GET /league/factions. See resolve_request_club_id."""
     try:
-        club_id = resolve_public_club_id(session, club)
+        club_id = resolve_request_club_id(session, user, club)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
@@ -476,15 +482,23 @@ def get_week_id(system: str, club: str | None = None, session: Session = Depends
 
 
 @app.get("/pairings")
-def get_pairings(system: str, week: str, club: str | None = None, session: Session = Depends(get_session)):
-    """Public, unauthenticated — no club_id from a session to scope by.
-    Optional `club` slug resolves a specific club explicitly (Phase 3/4:
-    the frontend will derive this from the browser's hostname). Omitted,
-    falls back to the fail-loud single-active-club stopgap unchanged: a
-    second active club raises immediately instead of silently mixing
-    both clubs' pairings together."""
+def get_pairings(
+    system: str,
+    week: str,
+    club: str | None = None,
+    user: Optional[User] = Depends(current_user),
+    session: Session = Depends(get_session),
+):
+    """Optional-auth. A logged-in caller is always scoped to their own club
+    (user.club_id) and the `club` slug is ignored — this closes the leak
+    where a Yorkshire user browsing the bare/default hostname (mapped to the
+    hardcoded "manchester" slug on the frontend) was served Manchester's
+    pairings. Only genuinely anonymous requests use the `club` slug (the
+    anonymous shared-link case); with no slug an anonymous request falls
+    back to the fail-loud single-active-club stopgap. See
+    resolve_request_club_id."""
     try:
-        club_id = resolve_public_club_id(session, club)
+        club_id = resolve_request_club_id(session, user, club)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:

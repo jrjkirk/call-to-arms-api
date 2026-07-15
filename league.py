@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, or_
 
-from auth import require_user
-from database import get_session, resolve_public_club_id, resolve_webhook_url, scoped
+from auth import require_user, current_user
+from database import get_session, resolve_request_club_id, resolve_webhook_url, scoped
 from models import LeagueRating, LeagueResult, Player, User
 from services import announce_new_achievements
 
@@ -151,14 +151,20 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
 
 
 @router.get("/factions")
-def list_factions(club: str | None = None, db: Session = Depends(get_session)):
-    """Public, unauthenticated — no club_id from a session to scope by.
-    Optional `club` slug resolves a specific club explicitly (Phase 3/4).
-    Omitted, falls back to the fail-loud single-active-club stopgap
-    unchanged: a second active club raises immediately instead of
-    silently mixing both clubs' faction lists together."""
+def list_factions(
+    club: str | None = None,
+    user: Optional[User] = Depends(current_user),
+    db: Session = Depends(get_session),
+):
+    """Optional-auth. A logged-in caller is always scoped to their own club
+    (user.club_id) and the `club` slug is ignored — this closes the leak
+    where a logged-in user on the bare/default hostname (mapped to the
+    hardcoded "manchester" slug) was served Manchester's faction list. Only
+    genuinely anonymous requests use the `club` slug; with no slug an
+    anonymous request falls back to the fail-loud single-active-club
+    stopgap. See resolve_request_club_id."""
     try:
-        club_id = resolve_public_club_id(db, club)
+        club_id = resolve_request_club_id(db, user, club)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
