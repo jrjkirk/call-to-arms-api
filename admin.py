@@ -16,7 +16,6 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from auth import (
-    VALID_SCOPES,
     admin_scopes,
     club_runnable_scopes,
     current_user,
@@ -25,6 +24,7 @@ from auth import (
     require_scope,
     require_super_admin,
     require_user,
+    valid_scopes,
 )
 from database import scoped
 from league import (
@@ -43,6 +43,7 @@ from signups import (
     SCENARIO_OPTIONS,
     SYSTEMS,
     TOW_VIBES,
+    _require_system_enabled,
     _validate_week,
 )
 from week_logic import _DAY_NAME_TO_INT
@@ -158,10 +159,11 @@ def grant_role(
     db: Session = Depends(get_session),
 ):
     """Idempotent: insert (user_id, scope) if not already present."""
-    if body.scope not in VALID_SCOPES:
+    scopes = valid_scopes(db)
+    if body.scope not in scopes:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid scope. Must be one of: {sorted(VALID_SCOPES)}",
+            detail=f"Invalid scope. Must be one of: {sorted(scopes)}",
         )
 
     runnable = club_runnable_scopes(user.club_id, db)
@@ -223,7 +225,7 @@ def admin_players(
                     fields so the edit-player panel can pre-fill forms.
     """
     if scope is not None:
-        if scope not in VALID_SCOPES:
+        if scope not in valid_scopes(db):
             raise HTTPException(status_code=422, detail="Invalid scope.")
         if scope not in admin_scopes(user, db):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
@@ -413,7 +415,7 @@ def admin_history(
     db: Session = Depends(get_session),
 ):
     """Recent game history for a scope. 403 unless caller holds that scope."""
-    if scope not in VALID_SCOPES:
+    if scope not in valid_scopes(db):
         raise HTTPException(status_code=422, detail="Invalid scope.")
     if scope not in admin_scopes(user, db):
         raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
@@ -603,7 +605,7 @@ def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
 
 
 def _require_system_scope(system: str, user: User, db: Session) -> None:
-    if system not in VALID_SCOPES:
+    if system not in valid_scopes(db):
         raise HTTPException(status_code=422, detail="Invalid scope.")
     if system not in admin_scopes(user, db):
         raise HTTPException(status_code=403, detail=f"Admin access for '{system}' required.")
@@ -755,6 +757,7 @@ def pairings_generate(
 ):
     """Delete existing pending (non-prearranged) pairings, then generate and persist new ones."""
     _require_system_scope(body.system, user, db)
+    _require_system_enabled(db, user.club_id, body.system)
 
     old = db.exec(
         scoped(Pairing, user.club_id)
@@ -1167,6 +1170,7 @@ def admin_signup_create(
         raise HTTPException(status_code=422, detail="Unknown system.")
 
     _require_system_scope(body.system, user, db)
+    _require_system_enabled(db, user.club_id, body.system)
     week = _validate_week(body.week)
 
     player = db.get(Player, body.player_id)
@@ -1597,9 +1601,10 @@ def remove_club_webhook(
 
 
 # ---------------------------------------------------------------------------
-# Club schedules — self-service (edit an already-enabled system's
-# schedule; enabling a *new* system for a club stays platform-admin only,
-# see POST /admin/platform/clubs/{club_id}/systems above)
+# Club schedules — self-service (a club's own super-admin can enable,
+# disable, or reschedule any active catalogue system for their own club;
+# see POST /admin/platform/clubs/{club_id}/systems above for the
+# platform-admin equivalent, used for cross-club management)
 # ---------------------------------------------------------------------------
 
 @router.get("/club-systems")
@@ -1629,6 +1634,7 @@ def list_club_systems(
 
 class ClubSystemScheduleBody(BaseModel):
     system_id: int
+    enabled: bool
     session_day: str
     session_cadence: str
     cadence_anchor: Optional[date] = None
@@ -1640,32 +1646,200 @@ def update_club_system_schedule(
     user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
-    """Edit an already-enabled system's schedule for the caller's own
-    club. club_id always comes from user.club_id, never the request body
-    — same non-negotiable rule as scoped() everywhere else. Does not
-    enable a new system for a club that doesn't already have a row —
-    404 in that case; that stays a platform-admin action."""
+    """Enable/disable/reschedule a catalogue system for the caller's own
+    club. Genuine upsert — no longer requires a platform admin to have
+    enabled the system for this club first; any club's own super-admin can
+    self-service enable or disable any catalogue system. club_id always
+    comes from user.club_id, never the request body — same non-negotiable
+    rule as scoped() everywhere else. Same shape/validation as the
+    platform-admin equivalent, POST /admin/platform/clubs/{club_id}/systems."""
+    system = db.get(SystemConfig, body.system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    if body.enabled and not system.active:
+        raise HTTPException(
+            status_code=422, detail="This system is not active in the catalogue and cannot be enabled."
+        )
+
+    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
+
     existing = db.exec(
         select(ClubSystem).where(
             ClubSystem.club_id == user.club_id,
             ClubSystem.system_id == body.system_id,
         )
     ).first()
-    if existing is None:
+
+    fields = dict(
+        enabled=body.enabled,
+        session_day=body.session_day,
+        session_cadence=body.session_cadence,
+        cadence_anchor=body.cadence_anchor,
+    )
+    if existing:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        db.add(existing)
+        row = existing
+    else:
+        row = ClubSystem(club_id=user.club_id, system_id=body.system_id, **fields)
+        db.add(row)
+
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Platform admin — system catalogue CRUD
+#
+# Only the platform admin configures what systems exist in the catalogue
+# (SystemConfig). Any club's own super-admin can self-service enable/disable
+# a catalogue system for their own club — see POST /admin/club-systems below.
+# No delete endpoint: a system with real historical signups/pairings/league
+# results (string-matched via legacy_system_name, not FK-enforced) could
+# never be safely deleted. `active=False` is the platform-wide kill switch
+# instead — enforced in POST /admin/club-systems (self-service) and
+# POST /admin/platform/clubs/{club_id}/systems (platform-admin) below.
+# ---------------------------------------------------------------------------
+
+class SystemConfigCreateBody(BaseModel):
+    name: str
+    slug: str
+    legacy_system_name: str
+    uses_points: bool = False
+    default_points: Optional[int] = None
+    max_points: Optional[int] = None
+    vibe_options: list[str] = []
+    default_vibe: Optional[str] = None
+    uses_scenarios: bool = False
+    scenario_options: Optional[list[str]] = None
+    default_scenario: Optional[str] = None
+    allows_demo: bool = False
+    has_intro_prepass: bool = False
+    recent_weeks: int = 3
+    extended_weeks: int = 6
+    escalation_priority: bool = False
+    faction_list: Optional[list[str]] = None
+    icon_folder: Optional[str] = None
+    active: bool = True
+
+
+class SystemConfigEditBody(BaseModel):
+    """Same shape as SystemConfigCreateBody minus slug — slug is immutable
+    after creation, since it's used as a stable identifier elsewhere."""
+    name: str
+    legacy_system_name: str
+    uses_points: bool = False
+    default_points: Optional[int] = None
+    max_points: Optional[int] = None
+    vibe_options: list[str] = []
+    default_vibe: Optional[str] = None
+    uses_scenarios: bool = False
+    scenario_options: Optional[list[str]] = None
+    default_scenario: Optional[str] = None
+    allows_demo: bool = False
+    has_intro_prepass: bool = False
+    recent_weeks: int = 3
+    extended_weeks: int = 6
+    escalation_priority: bool = False
+    faction_list: Optional[list[str]] = None
+    icon_folder: Optional[str] = None
+    active: bool = True
+
+
+def _validate_system_config_fields(
+    vibe_options: list[str],
+    default_vibe: Optional[str],
+    uses_scenarios: bool,
+    scenario_options: Optional[list[str]],
+    default_scenario: Optional[str],
+) -> None:
+    if default_vibe not in (vibe_options or []):
         raise HTTPException(
-            status_code=404,
-            detail="This club has no existing schedule for that system.",
+            status_code=422, detail="default_vibe must be one of vibe_options."
+        )
+    if uses_scenarios and default_scenario not in (scenario_options or []):
+        raise HTTPException(
+            status_code=422,
+            detail="default_scenario must be one of scenario_options when uses_scenarios is true.",
         )
 
-    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
 
-    existing.session_day = body.session_day
-    existing.session_cadence = body.session_cadence
-    existing.cadence_anchor = body.cadence_anchor
-    db.add(existing)
+@router.get("/platform/systems")
+def list_platform_systems(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """All SystemConfig rows, full fields — the catalogue-management table
+    source for the platform admin panel."""
+    return db.exec(select(SystemConfig).order_by(SystemConfig.name)).all()
+
+
+@router.post("/platform/systems")
+def create_platform_system(
+    body: SystemConfigCreateBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Create a new catalogue system. Replaces seed_systems_config.py as the
+    only way this table has ever been touched."""
+    if db.exec(select(SystemConfig).where(SystemConfig.slug == body.slug)).first():
+        raise HTTPException(status_code=409, detail="A system with this slug already exists.")
+    if db.exec(
+        select(SystemConfig).where(SystemConfig.legacy_system_name == body.legacy_system_name)
+    ).first():
+        raise HTTPException(
+            status_code=409, detail="A system with this legacy_system_name already exists."
+        )
+
+    _validate_system_config_fields(
+        body.vibe_options, body.default_vibe, body.uses_scenarios,
+        body.scenario_options, body.default_scenario,
+    )
+
+    system = SystemConfig(**body.model_dump())
+    db.add(system)
     db.commit()
-    db.refresh(existing)
-    return existing
+    db.refresh(system)
+    return system
+
+
+@router.post("/platform/systems/{system_id}")
+def edit_platform_system(
+    system_id: int,
+    body: SystemConfigEditBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Full-replace edit of a catalogue system. slug is not accepted here —
+    it is immutable after creation."""
+    system = db.get(SystemConfig, system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    existing = db.exec(
+        select(SystemConfig)
+        .where(SystemConfig.legacy_system_name == body.legacy_system_name)
+        .where(SystemConfig.id != system_id)
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409, detail="A system with this legacy_system_name already exists."
+        )
+
+    _validate_system_config_fields(
+        body.vibe_options, body.default_vibe, body.uses_scenarios,
+        body.scenario_options, body.default_scenario,
+    )
+
+    for k, v in body.model_dump().items():
+        setattr(system, k, v)
+    db.add(system)
+    db.commit()
+    db.refresh(system)
+    return system
 
 
 # ---------------------------------------------------------------------------
@@ -1811,6 +1985,11 @@ def upsert_club_system(
     system = db.get(SystemConfig, body.system_id)
     if system is None:
         raise HTTPException(status_code=404, detail="System not found.")
+
+    if body.enabled and not system.active:
+        raise HTTPException(
+            status_code=422, detail="This system is not active in the catalogue and cannot be enabled."
+        )
 
     _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
 

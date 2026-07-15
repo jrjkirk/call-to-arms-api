@@ -72,24 +72,43 @@ def list_systems(session: Session = Depends(get_session)):
     rows = session.exec(
         select(SystemConfig).where(SystemConfig.active == True)
     ).all()
-    return [
-        {
-            "id": r.id,
-            "slug": r.slug,
-            "name": r.name,
-            "legacy_system_name": r.legacy_system_name,
-            "uses_points": r.uses_points,
-            "default_points": r.default_points,
-            "max_points": r.max_points,
-            "vibe_options": r.vibe_options,
-            "default_vibe": r.default_vibe,
-            "uses_scenarios": r.uses_scenarios,
-            "scenario_options": r.scenario_options,
-            "default_scenario": r.default_scenario,
-            "allows_demo": r.allows_demo,
-        }
-        for r in rows
-    ]
+    return [_system_dict(r) for r in rows]
+
+
+def _system_dict(r: SystemConfig) -> dict:
+    return {
+        "id": r.id,
+        "slug": r.slug,
+        "name": r.name,
+        "legacy_system_name": r.legacy_system_name,
+        "uses_points": r.uses_points,
+        "default_points": r.default_points,
+        "max_points": r.max_points,
+        "vibe_options": r.vibe_options,
+        "default_vibe": r.default_vibe,
+        "uses_scenarios": r.uses_scenarios,
+        "scenario_options": r.scenario_options,
+        "default_scenario": r.default_scenario,
+        "allows_demo": r.allows_demo,
+    }
+
+
+@app.get("/systems/mine")
+def list_my_systems(user: User = Depends(require_user), session: Session = Depends(get_session)):
+    """Authenticated, club-scoped: the caller's own club's currently-enabled
+    systems, in the same shape as GET /systems so the frontend can swap
+    between the two feeds without special-casing. Unlike GET /systems
+    (the full global catalogue, always public and unfiltered — used to
+    populate "which system to enable" pickers, and must stay that way),
+    this reflects each club's own self-service enable/disable choices."""
+    rows = session.exec(
+        select(SystemConfig)
+        .join(ClubSystem, ClubSystem.system_id == SystemConfig.id)
+        .where(ClubSystem.club_id == user.club_id)
+        .where(ClubSystem.enabled == True)
+        .where(SystemConfig.active == True)
+    ).all()
+    return [_system_dict(r) for r in rows]
 
 
 @app.get("/clubs")

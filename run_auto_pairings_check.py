@@ -56,7 +56,9 @@ def main() -> None:
                     continue
 
                 club_systems = db.exec(
-                    select(ClubSystem).where(ClubSystem.system_id == system_config.id)
+                    select(ClubSystem)
+                    .where(ClubSystem.system_id == system_config.id)
+                    .where(ClubSystem.enabled == True)
                 ).all()
                 if not club_systems:
                     print(f"[{system}] SKIP — no club_systems rows for this system")

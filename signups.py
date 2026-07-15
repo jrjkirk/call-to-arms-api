@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import get_session, resolve_webhook_url, scoped
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting, ClubSystem
 from auth import admin_scopes, require_user
 
 router = APIRouter(prefix="/signups", tags=["signups"])
@@ -85,6 +85,23 @@ def _get_system_config(db: Session, legacy_system_name: str) -> Optional[SystemC
         .where(SystemConfig.legacy_system_name == legacy_system_name)
         .where(SystemConfig.active == True)
     ).first()
+
+
+def _require_system_enabled(db: Session, club_id: int, system: str) -> None:
+    """422 unless the caller's club has this system enabled — checked on
+    every signup-*creation* call site. Dropping an already-existing signup
+    is exempt (see drop_signup) so a player who signed up before a system
+    was disabled is never trapped."""
+    row = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(SystemConfig.legacy_system_name == system)
+        .where(ClubSystem.club_id == club_id)
+    ).first()
+    if row is None or not row[0].enabled:
+        raise HTTPException(
+            status_code=422, detail=f"{system} is not currently enabled for your club."
+        )
 
 
 def _require_linked_player(user: User, db: Session) -> Player:
@@ -256,6 +273,8 @@ def submit_signup(
     else:
         if body.system not in SYSTEMS:
             raise HTTPException(status_code=422, detail="Unknown system.")
+
+    _require_system_enabled(db, user.club_id, body.system)
 
     week = _validate_week(body.week)
 
@@ -478,6 +497,8 @@ def submit_prearranged(
     else:
         if body.system not in SYSTEMS:
             raise HTTPException(status_code=422, detail="Unknown system.")
+
+    _require_system_enabled(db, user.club_id, body.system)
 
     week = _validate_week(body.week)
 
