@@ -18,6 +18,7 @@ from sqlmodel import Session, select
 from auth import (
     VALID_SCOPES,
     admin_scopes,
+    club_runnable_scopes,
     current_user,
     get_session,
     require_platform_admin,
@@ -160,6 +161,13 @@ def grant_role(
         raise HTTPException(
             status_code=422,
             detail=f"Invalid scope. Must be one of: {sorted(VALID_SCOPES)}",
+        )
+
+    runnable = club_runnable_scopes(user.club_id, db)
+    if body.scope not in runnable:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Your club does not run {body.scope!r}. Must be one of: {sorted(runnable)}",
         )
 
     target = db.get(User, body.user_id)

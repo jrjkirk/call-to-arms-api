@@ -45,7 +45,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import get_session, scoped
-from models import Club, User, Player, AdminRole
+from models import Club, ClubSystem, SystemConfig, User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
@@ -459,16 +459,37 @@ def logout(response: Response):
 VALID_SCOPES: frozenset[str] = frozenset({"The Old World", "The Horus Heresy", "Kill Team", "League"})
 
 
+def club_runnable_scopes(club_id: int, db: Session) -> set[str]:
+    """The scopes a given club can actually administer: its enabled
+    ClubSystem rows' legacy_system_name, plus "League" if the club has
+    leagues_enabled. Distinct from VALID_SCOPES (a global format/existence
+    whitelist) — this is per-club authorization, used both for
+    super-admins' implicit scope set (admin_scopes) and to validate
+    POST /admin/roles grants."""
+    rows = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club_id, ClubSystem.enabled == True)
+    ).all()
+    scopes = {sc.legacy_system_name for _, sc in rows}
+    club = db.get(Club, club_id)
+    if club is not None and club.leagues_enabled:
+        scopes.add("League")
+    return scopes
+
+
 def admin_scopes(user: Optional[User], db: Session) -> set[str]:
     """Return the set of scopes the user can administer.
 
-    Super-admins get all four. Regular users get whatever admin_roles rows
-    they hold. Unauthenticated callers get the empty set.
+    Super-admins get whatever their own club actually runs (see
+    club_runnable_scopes) — not every scope that exists platform-wide.
+    Regular users get whatever admin_roles rows they hold. Unauthenticated
+    callers get the empty set.
     """
     if user is None:
         return set()
     if user.is_super_admin:
-        return set(VALID_SCOPES)
+        return club_runnable_scopes(user.club_id, db)
     rows = db.exec(scoped(AdminRole, user.club_id).where(AdminRole.user_id == user.id)).all()
     return {r.scope for r in rows}
 
