@@ -1556,3 +1556,72 @@ def upsert_club_system(
     db.commit()
     db.refresh(row)
     return row
+
+
+class AppointSuperAdminBody(BaseModel):
+    user_id: int
+
+
+def _platform_user_row(u: User) -> dict:
+    return {
+        "id": u.id,
+        "discord_name": u.discord_name,
+        "club_id": u.club_id,
+        "is_super_admin": u.is_super_admin,
+    }
+
+
+@router.post("/platform/clubs/{club_id}/super-admins")
+def appoint_club_super_admin(
+    club_id: int,
+    body: AppointSuperAdminBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Appoint a club's first super-admin.
+
+    Closes the bootstrap gap left by POST /admin/platform/clubs: a brand-new
+    club has no super-admin yet, and every existing /admin/roles endpoint
+    requires require_super_admin (club-scoped) to call it. Idempotent —
+    calling again on an already-appointed user is a no-op.
+    """
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    target = db.get(User, body.user_id)
+    if target is None or target.club_id != club_id:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if not target.is_super_admin:
+        target.is_super_admin = True
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+
+    return _platform_user_row(target)
+
+
+@router.delete("/platform/clubs/{club_id}/super-admins/{user_id}")
+def remove_club_super_admin(
+    club_id: int,
+    user_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Revoke a club's super-admin status. Idempotent."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    target = db.get(User, user_id)
+    if target is None or target.club_id != club_id:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    removed = target.is_super_admin
+    if removed:
+        target.is_super_admin = False
+        db.add(target)
+        db.commit()
+
+    return {"ok": True, "removed": removed}
