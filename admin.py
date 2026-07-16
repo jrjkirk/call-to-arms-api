@@ -2031,14 +2031,25 @@ def create_club(
     db: Session = Depends(get_session),
 ):
     """Create a new club. Platform-admin only — is_platform_admin is set by
-    SQL, never via this API, same pattern as is_super_admin."""
-    existing = db.exec(select(Club).where(Club.slug == body.slug)).first()
+    SQL, never via this API, same pattern as is_super_admin.
+
+    Slug is validated the same way update_club validates it (hostname-safe
+    format, lowercased) — previously this only checked uniqueness, not
+    format, even though the slug is the club's <slug>.calltoarms.app
+    subdomain identifier from the moment it's created."""
+    slug = body.slug.strip().lower()
+    if not _SLUG_RE.fullmatch(slug):
+        raise HTTPException(
+            status_code=422,
+            detail="Slug must be lowercase letters, digits, and hyphens, with no leading or trailing hyphen.",
+        )
+    existing = db.exec(select(Club).where(Club.slug == slug)).first()
     if existing:
         raise HTTPException(status_code=409, detail="A club with this slug already exists.")
 
     club = Club(
         name=body.name,
-        slug=body.slug,
+        slug=slug,
         timezone=body.timezone,
         contact_email=body.contact_email,
         leagues_enabled=body.leagues_enabled,
@@ -2383,8 +2394,7 @@ def update_club(
     The slug is the club's subdomain identifier (<slug>.calltoarms.app) and
     how the frontend resolves which club a visitor is on, so a slug change
     renames the club's public URL — it's validated for hostname-safe format
-    and global uniqueness. (create_club above does uniqueness but no format
-    check — a pre-existing gap, left as-is here rather than widening scope.)
+    and global uniqueness, same _SLUG_RE check create_club above now uses.
     Only clubs.slug stores this value; every other table references a club
     by club_id, so a slug change is a single-column update with no data
     cascade — the only impact is on external URLs/bookmarks."""
