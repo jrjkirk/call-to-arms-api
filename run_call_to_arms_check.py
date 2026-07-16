@@ -17,13 +17,10 @@ from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
+import call_to_arms_content as cta_content
 from database import engine, resolve_webhook_url
 from models import ClubSetting, ClubSystem, SystemConfig
 from week_logic import _is_call_to_arms_due, is_session_week, next_session_date
-
-from run_call_to_arms import pick_random_tow_scenario, post_tow_call_to_arms_with_image
-from run_hh_call_to_arms import post_hh_call_to_arms
-from run_kt_call_to_arms import post_kt_call_to_arms
 
 SYSTEMS = ["The Old World", "The Horus Heresy", "Kill Team"]
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
@@ -45,26 +42,6 @@ def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
     else:
         row.value = value
     db.add(row)
-
-
-def _post_for_system(system: str, session_date, webhook_url: str) -> None:
-    """Dispatch to the system-specific poster, routing to the resolved
-    per-club webhook. Message content is unchanged from the standalone
-    scripts."""
-    if system == "The Old World":
-        scenario = pick_random_tow_scenario()
-        if not scenario:
-            print(f"[{system}] no TOW scenarios configured, skipping post")
-            return
-        post_tow_call_to_arms_with_image(
-            scenario, session_date, webhook_url=webhook_url, app_url=APP_PUBLIC_URL
-        )
-    elif system == "The Horus Heresy":
-        post_hh_call_to_arms(webhook_url=webhook_url, app_url=APP_PUBLIC_URL)
-    elif system == "Kill Team":
-        post_kt_call_to_arms(webhook_url=webhook_url, app_url=APP_PUBLIC_URL)
-    else:
-        print(f"[{system}] no call-to-arms poster, skipping")
 
 
 def main() -> None:
@@ -137,7 +114,11 @@ def main() -> None:
                             )
                             continue
 
-                        _post_for_system(system, next_session, webhook_url)
+                        template = (
+                            _get_setting(db, club_id, f"call_to_arms_{slug}_template")
+                            or cta_content.default_template(system)
+                        )
+                        cta_content.post(webhook_url, template, system, next_session, APP_PUBLIC_URL)
                         _upsert_setting(db, club_id, f"call_to_arms_{slug}_last_week", target_week)
                         db.commit()
                         print(f"[{system} club={club_id}] DONE — posted call-to-arms for session {target_week}")

@@ -36,6 +36,7 @@ from league import (
 )
 from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 from services import player_titles, set_player_titles
+import call_to_arms_content as cta_content
 from pairings_engine import generate
 from systems import factions_for, icon_folder_for
 from signups import (
@@ -660,6 +661,7 @@ class CallToArmsSettingsBody(BaseModel):
     enabled: bool
     days_before: int
     time: str
+    template: Optional[str] = None
 
 
 @router.get("/call-to-arms-settings")
@@ -676,11 +678,16 @@ def get_call_to_arms_settings(
     slug = _slug(system)
     enabled_str = (_get_setting(db, user.club_id, f"call_to_arms_{slug}_enabled", "false") or "false").lower()
     days_before_str = _get_setting(db, user.club_id, f"call_to_arms_{slug}_days_before", "3") or "3"
+    template_override = _get_setting(db, user.club_id, f"call_to_arms_{slug}_template")
+    default_template = cta_content.default_template(system)
     return {
         "enabled": enabled_str == "true",
         "days_before": int(days_before_str),
         "time": _get_setting(db, user.club_id, f"call_to_arms_{slug}_time", "12:00") or "12:00",
         "last_week": _get_setting(db, user.club_id, f"call_to_arms_{slug}_last_week"),
+        "template": template_override if template_override else default_template,
+        "default_template": default_template,
+        "tokens": cta_content.available_tokens(system),
     }
 
 
@@ -699,6 +706,17 @@ def post_call_to_arms_settings(
     _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_enabled", "true" if body.enabled else "false")
     _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_days_before", str(body.days_before))
     _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_time", body.time)
+    if body.template is not None:
+        # Store an override only when it differs from the default; an empty
+        # or default-equal template clears the override so the club tracks
+        # the system default going forward.
+        key = f"call_to_arms_{slug}_template"
+        if body.template.strip() == "" or body.template == cta_content.default_template(body.system):
+            existing = db.get(ClubSetting, (user.club_id, key))
+            if existing is not None:
+                db.delete(existing)
+        else:
+            _upsert_setting(db, user.club_id, key, body.template)
     db.commit()
     return {"ok": True}
 

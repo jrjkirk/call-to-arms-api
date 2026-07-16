@@ -1,17 +1,18 @@
-"""Entry point for GitHub Actions: post the fortnightly Horus Heresy Call to Arms.
+"""Manual/fallback entry point: post The Horus Heresy Call to Arms to the
+DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL env webhook, for one-off runs via the
+"Weekly Horus Heresy Call to Arms (manual fallback)" workflow. Skips on
+off-weeks (HH is fortnightly, anchored on HH_SESSION_ANCHOR).
 
-Mirrors the original's run_scheduled_hh_call_to_arms() / post_hh_call_to_arms().
-Skips silently on off-weeks (HH runs fortnightly, anchored on HH_SESSION_ANCHOR —
-same anchor and fortnight math already ported to the frontend's weekIdForSystem).
-No database access needed.
+The scheduled, club-aware path is run_call_to_arms_check.py; message content
+lives in call_to_arms_content.py. HH_SESSION_ANCHOR is also imported by
+seed_clubs.py, so it stays defined here.
 """
 import os
 from datetime import date, timedelta
-import httpx
 
-DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL = os.environ.get("DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL", "")
-APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
+import call_to_arms_content as cta_content
 
+SYSTEM = "The Horus Heresy"
 HH_SESSION_ANCHOR = date(2026, 5, 8)
 
 
@@ -36,32 +37,10 @@ def is_hh_session_week(d: date | None = None) -> bool:
     return 0 <= days_until <= 6
 
 
-def post_hh_call_to_arms(webhook_url: str | None = None, app_url: str | None = None) -> None:
-    """webhook_url/app_url default to this module's env vars for the
-    __main__ manual-run path; the scheduler passes a resolved per-club
-    webhook instead."""
-    webhook = webhook_url or DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL
-    if not webhook:
-        print("No HH call-to-arms webhook, skipping.")
-        return
-
-    signup_url = app_url or APP_PUBLIC_URL or "https://your-app-url"
-    content = (
-        "⚔️ **The Horus Heresy — Call to Arms** ⚔️\n\n"
-        "*\"In the long shadow of the Emperor's wrath, brothers turn against brothers. "
-        "The galaxy burns, and the loyal and the lost alike must answer the call to war.\"*\n\n"
-        f"Friday's gathering approaches.  Sign up here: {signup_url}"
-    )
-
-    try:
-        httpx.post(webhook, json={"content": content}, timeout=10)
-        print("Posted HH Call to Arms.")
-    except Exception as e:
-        print(f"Failed to post HH Call to Arms: {e}")
-
-
 if __name__ == "__main__":
     if not is_hh_session_week(date.today()):
         print("Not an HH session week, skipping.")
     else:
-        post_hh_call_to_arms()
+        webhook = os.environ.get("DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL", "")
+        app_url = os.environ.get("APP_PUBLIC_URL", "")
+        cta_content.post(webhook, cta_content.default_template(SYSTEM), SYSTEM, hh_next_session_friday(), app_url)
