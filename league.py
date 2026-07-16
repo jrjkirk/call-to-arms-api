@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, or_
 
@@ -153,18 +153,20 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
 @router.get("/factions")
 def list_factions(
     club: str | None = None,
+    origin: str | None = Header(default=None),
     user: Optional[User] = Depends(current_user),
     db: Session = Depends(get_session),
 ):
     """Optional-auth. A logged-in caller is always scoped to their own club
-    (user.club_id) and the `club` slug is ignored — this closes the leak
-    where a logged-in user on the bare/default hostname (mapped to the
-    hardcoded "manchester" slug) was served Manchester's faction list. Only
-    genuinely anonymous requests use the `club` slug; with no slug an
-    anonymous request falls back to the fail-loud single-active-club
-    stopgap. See resolve_request_club_id."""
+    (user.club_id) and the `club`/Origin are ignored — this closes the leak
+    where a logged-in user on the bare/default hostname (which resolves to
+    "manchester") was served Manchester's faction list. Genuinely anonymous
+    requests resolve via an explicit `club` param first, then the request's
+    Origin header (subdomain-based resolution, no param needed for real
+    browser calls); with neither, an anonymous request falls back to the
+    fail-loud single-active-club stopgap. See resolve_request_club_id."""
     try:
-        club_id = resolve_request_club_id(db, user, club)
+        club_id = resolve_request_club_id(db, user, club, origin)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:

@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
@@ -473,17 +473,20 @@ def _public_vibe_display(a_vibe, b_vibe):
 def get_week_id(
     system: str,
     club: str | None = None,
+    origin: str | None = Header(default=None),
     user: Optional[User] = Depends(current_user),
     session: Session = Depends(get_session),
 ):
     """Optional-auth — the backend-authoritative target session date for a
     system, replacing the frontend's independent duplicate of this same date
     logic (weekIdForSystem() in +page.server.ts). A logged-in caller is
-    always scoped to their own club (user.club_id); the `club` slug is used
-    only for genuinely anonymous requests — same pattern as GET /pairings and
+    always scoped to their own club (user.club_id); for anonymous requests,
+    the `club` param (SvelteKit's SSR loader calls this way — no browser
+    Origin exists server-to-server) takes precedence, then the request's
+    Origin header (real browser calls) — same pattern as GET /pairings and
     GET /league/factions. See resolve_request_club_id."""
     try:
-        club_id = resolve_request_club_id(session, user, club)
+        club_id = resolve_request_club_id(session, user, club, origin)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
@@ -516,19 +519,21 @@ def get_pairings(
     system: str,
     week: str,
     club: str | None = None,
+    origin: str | None = Header(default=None),
     user: Optional[User] = Depends(current_user),
     session: Session = Depends(get_session),
 ):
     """Optional-auth. A logged-in caller is always scoped to their own club
-    (user.club_id) and the `club` slug is ignored — this closes the leak
-    where a Yorkshire user browsing the bare/default hostname (mapped to the
-    hardcoded "manchester" slug on the frontend) was served Manchester's
-    pairings. Only genuinely anonymous requests use the `club` slug (the
-    anonymous shared-link case); with no slug an anonymous request falls
+    (user.club_id) and the `club`/Origin are ignored — this closes the leak
+    where a Yorkshire user browsing the bare/default hostname (which resolves
+    to "manchester") was served Manchester's pairings. Genuinely anonymous
+    requests resolve via an explicit `club` param first (SSR loaders), then
+    the request's Origin header (real browser calls — subdomain-based
+    resolution, no param needed); with neither, an anonymous request falls
     back to the fail-loud single-active-club stopgap. See
     resolve_request_club_id."""
     try:
-        club_id = resolve_request_club_id(session, user, club)
+        club_id = resolve_request_club_id(session, user, club, origin)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
