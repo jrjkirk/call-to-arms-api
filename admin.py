@@ -2223,3 +2223,88 @@ def set_club_active(
         db.refresh(club)
 
     return {"id": club.id, "slug": club.slug, "active": club.active}
+
+
+# Hostname label: lowercase letters/digits/hyphens, no leading/trailing hyphen
+# (a club's slug is a subdomain label, <slug>.calltoarms.app).
+_SLUG_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")
+
+
+class ClubUpdateBody(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    timezone: Optional[str] = None
+    contact_email: Optional[str] = None
+    leagues_enabled: Optional[bool] = None
+
+
+@router.patch("/platform/clubs/{club_id}")
+def update_club(
+    club_id: int,
+    body: ClubUpdateBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Partial-update a club's editable details (name, slug, timezone,
+    contact email, leagues flag). Platform-admin only. Each field is only
+    touched when present in the body — same partial-update pattern as
+    PATCH /admin/players/{id}. Active state is handled separately by
+    POST .../active and is intentionally not editable here.
+
+    The slug is the club's subdomain identifier (<slug>.calltoarms.app) and
+    how the frontend resolves which club a visitor is on, so a slug change
+    renames the club's public URL — it's validated for hostname-safe format
+    and global uniqueness. (create_club above does uniqueness but no format
+    check — a pre-existing gap, left as-is here rather than widening scope.)
+    Only clubs.slug stores this value; every other table references a club
+    by club_id, so a slug change is a single-column update with no data
+    cascade — the only impact is on external URLs/bookmarks."""
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Name cannot be empty.")
+        club.name = name
+
+    if body.slug is not None:
+        slug = body.slug.strip().lower()
+        if not _SLUG_RE.fullmatch(slug):
+            raise HTTPException(
+                status_code=422,
+                detail="Slug must be lowercase letters, digits, and hyphens, with no leading or trailing hyphen.",
+            )
+        if slug != club.slug:
+            clash = db.exec(
+                select(Club).where(Club.slug == slug, Club.id != club_id)
+            ).first()
+            if clash:
+                raise HTTPException(status_code=409, detail="A club with this slug already exists.")
+            club.slug = slug
+
+    if body.timezone is not None:
+        tz = body.timezone.strip()
+        if not tz:
+            raise HTTPException(status_code=422, detail="Timezone cannot be empty.")
+        club.timezone = tz
+
+    if body.contact_email is not None:
+        club.contact_email = body.contact_email.strip() or None
+
+    if body.leagues_enabled is not None:
+        club.leagues_enabled = body.leagues_enabled
+
+    db.add(club)
+    db.commit()
+    db.refresh(club)
+    return {
+        "id": club.id,
+        "name": club.name,
+        "slug": club.slug,
+        "active": club.active,
+        "timezone": club.timezone,
+        "contact_email": club.contact_email,
+        "leagues_enabled": club.leagues_enabled,
+    }
