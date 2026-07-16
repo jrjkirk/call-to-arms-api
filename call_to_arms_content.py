@@ -144,8 +144,38 @@ def render(template: str, context: dict) -> str:
     return out
 
 
-def _post_to_discord(webhook_url: str, content: str, image_path: Optional[str]) -> None:
-    payload = {"content": content}
+IMAGE_MODES = ("default", "none", "custom")
+
+
+def parse_image_setting(value: Optional[str]) -> tuple[str, Optional[str]]:
+    """Stored club_settings value -> (mode, url). Unset -> the system default
+    (mission image for scenario systems, none otherwise); "none" -> no image;
+    anything else is a custom image URL."""
+    if not value:
+        return "default", None
+    if value == "none":
+        return "none", None
+    return "custom", value
+
+
+def image_setting_value(mode: str, url: Optional[str]) -> Optional[str]:
+    """(mode, url) -> the value to store, or None to clear (= track default)."""
+    if mode == "none":
+        return "none"
+    if mode == "custom" and url and url.strip():
+        return url.strip()
+    return None
+
+
+def _post_to_discord(
+    webhook_url: str,
+    content: str,
+    image_path: Optional[str] = None,
+    embed_image_url: Optional[str] = None,
+) -> None:
+    payload: dict = {"content": content}
+    if embed_image_url:
+        payload["embeds"] = [{"image": {"url": embed_image_url}}]
     if image_path:
         try:
             with open(image_path, "rb") as f:
@@ -167,14 +197,36 @@ def _post_to_discord(webhook_url: str, content: str, image_path: Optional[str]) 
         print(f"Failed to post call-to-arms: {e}")
 
 
-def post(webhook_url: str, template: str, system: str, session_date: date, signup_url: str) -> None:
+def post(
+    webhook_url: str,
+    template: str,
+    system: str,
+    session_date: date,
+    signup_url: str,
+    image_mode: str = "default",
+    image_url: Optional[str] = None,
+) -> None:
     """Assemble and post one call-to-arms message: build the dynamic context
-    (picking a mission + image for scenario systems), render `template`, and
-    post to `webhook_url`. `template` is the caller's resolved text (club
-    override or `default_template(system)`)."""
+    (picking a mission for scenario systems), render `template`, and post to
+    `webhook_url`. Image handling follows `image_mode`:
+      - "default": the system's built-in image (mission terrain for scenario
+        systems, none otherwise) — unchanged from before this control existed.
+      - "none": text only.
+      - "custom": attach `image_url` as a Discord embed image.
+    `template` is the caller's resolved text (club override or default)."""
     if not webhook_url:
         print(f"No call-to-arms webhook for {system}, skipping.")
         return
-    ctx, image_path = build_context(system, session_date, signup_url)
+    ctx, default_image_path = build_context(system, session_date, signup_url)
     content = render(template, ctx)
-    _post_to_discord(webhook_url, content, image_path)
+
+    image_path: Optional[str] = None
+    embed_image_url: Optional[str] = None
+    if image_mode == "none":
+        pass
+    elif image_mode == "custom" and image_url:
+        embed_image_url = image_url
+    else:  # "default"
+        image_path = default_image_path
+
+    _post_to_discord(webhook_url, content, image_path=image_path, embed_image_url=embed_image_url)

@@ -662,6 +662,8 @@ class CallToArmsSettingsBody(BaseModel):
     days_before: int
     time: str
     template: Optional[str] = None
+    image_mode: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 @router.get("/call-to-arms-settings")
@@ -680,6 +682,9 @@ def get_call_to_arms_settings(
     days_before_str = _get_setting(db, user.club_id, f"call_to_arms_{slug}_days_before", "3") or "3"
     template_override = _get_setting(db, user.club_id, f"call_to_arms_{slug}_template")
     default_template = cta_content.default_template(system)
+    image_mode, image_url = cta_content.parse_image_setting(
+        _get_setting(db, user.club_id, f"call_to_arms_{slug}_image")
+    )
     return {
         "enabled": enabled_str == "true",
         "days_before": int(days_before_str),
@@ -688,6 +693,9 @@ def get_call_to_arms_settings(
         "template": template_override if template_override else default_template,
         "default_template": default_template,
         "tokens": cta_content.available_tokens(system),
+        "image_mode": image_mode,
+        "image_url": image_url or "",
+        "supports_mission_image": system in cta_content.SCENARIO_DATA,
     }
 
 
@@ -717,6 +725,21 @@ def post_call_to_arms_settings(
                 db.delete(existing)
         else:
             _upsert_setting(db, user.club_id, key, body.template)
+    if body.image_mode is not None:
+        if body.image_mode not in cta_content.IMAGE_MODES:
+            raise HTTPException(status_code=422, detail=f"image_mode must be one of {list(cta_content.IMAGE_MODES)}")
+        if body.image_mode == "custom":
+            url = (body.image_url or "").strip()
+            if not (url.startswith("http://") or url.startswith("https://")):
+                raise HTTPException(status_code=422, detail="A custom image requires a valid http(s) URL.")
+        key = f"call_to_arms_{slug}_image"
+        stored = cta_content.image_setting_value(body.image_mode, body.image_url)
+        if stored is None:
+            existing = db.get(ClubSetting, (user.club_id, key))
+            if existing is not None:
+                db.delete(existing)
+        else:
+            _upsert_setting(db, user.club_id, key, stored)
     db.commit()
     return {"ok": True}
 

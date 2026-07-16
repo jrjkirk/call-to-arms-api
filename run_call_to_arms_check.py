@@ -118,7 +118,13 @@ def main() -> None:
                             _get_setting(db, club_id, f"call_to_arms_{slug}_template")
                             or cta_content.default_template(system)
                         )
-                        cta_content.post(webhook_url, template, system, next_session, APP_PUBLIC_URL)
+                        image_mode, image_url = cta_content.parse_image_setting(
+                            _get_setting(db, club_id, f"call_to_arms_{slug}_image")
+                        )
+                        cta_content.post(
+                            webhook_url, template, system, next_session, APP_PUBLIC_URL,
+                            image_mode=image_mode, image_url=image_url,
+                        )
                         _upsert_setting(db, club_id, f"call_to_arms_{slug}_last_week", target_week)
                         db.commit()
                         print(f"[{system} club={club_id}] DONE — posted call-to-arms for session {target_week}")
