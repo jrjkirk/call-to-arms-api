@@ -1,7 +1,7 @@
-name: Weekly Kill Team Call to Arms
+name: Weekly Kill Team Call to Arms (manual fallback)
+# Superseded by call-to-arms-check.yml (hourly, config-driven, per-club
+# webhook). Kept for manual/emergency posting only — no longer scheduled.
 on:
-  schedule:
-    - cron: "0 19 * * 2"  # 19:00 UTC Tuesdays
   workflow_dispatch:
 
 jobs:

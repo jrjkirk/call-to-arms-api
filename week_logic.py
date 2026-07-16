@@ -93,3 +93,33 @@ def _is_auto_pairings_due(
     fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
     fire_end = fire_start + timedelta(minutes=90)
     return fire_start <= now_uk < fire_end
+
+
+def _is_call_to_arms_due(
+    settings: dict,
+    now_uk: datetime,
+    target_week_id: str,
+    post_date: date,
+) -> bool:
+    """Return True if the call-to-arms post should fire right now.
+
+    Same shape as _is_auto_pairings_due (enabled gate, last-week dedup, a
+    90-minute fire window at the configured time), but scheduled relative to
+    the club's session day: `post_date` is the session date minus
+    `days_before`, so the caller decides *which* date to fire on and this
+    just gates on today matching it plus the time window.
+
+    settings keys: enabled (bool), time ("HH:MM"), last_week (str|None).
+    now_uk must be a timezone-aware datetime in Europe/London.
+    """
+    if not settings["enabled"]:
+        return False
+    last_week: Optional[str] = settings.get("last_week")
+    if last_week and last_week == target_week_id:
+        return False
+    if now_uk.date() != post_date:
+        return False
+    h, m = map(int, settings["time"].split(":"))
+    fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
+    fire_end = fire_start + timedelta(minutes=90)
+    return fire_start <= now_uk < fire_end

@@ -77,9 +77,9 @@ def next_wednesday(from_date: date | None = None) -> date:
     return from_date + timedelta(days=days_ahead)
 
 
-def build_tow_call_to_arms_message(scenario: dict, wednesday_date: date) -> str:
+def build_tow_call_to_arms_message(scenario: dict, wednesday_date: date, app_url: str | None = None) -> str:
     weds_str = wednesday_date.strftime("%d/%m/%Y")
-    app_url = APP_PUBLIC_URL or "https://your-app-url"
+    app_url = app_url or APP_PUBLIC_URL or "https://your-app-url"
     return CALL_TO_ARMS_TEMPLATE.format(
         scenario_name=scenario.get("name", "Unknown Scenario"),
         common_objectives=COMMON_OBJECTIVES_TOW,
@@ -89,15 +89,25 @@ def build_tow_call_to_arms_message(scenario: dict, wednesday_date: date) -> str:
     )
 
 
-def post_tow_call_to_arms_with_image(scenario: dict, wednesday_date: date | None = None) -> None:
-    if not DISCORD_CALL_TO_ARMS_WEBHOOK_URL:
-        print("DISCORD_CALL_TO_ARMS_WEBHOOK_URL not set, skipping.")
+def post_tow_call_to_arms_with_image(
+    scenario: dict,
+    wednesday_date: date | None = None,
+    webhook_url: str | None = None,
+    app_url: str | None = None,
+) -> None:
+    """Post the TOW call-to-arms. webhook_url/app_url default to this
+    module's env vars so the __main__ manual-run path still works, but the
+    scheduler (run_call_to_arms_check.py) passes a resolved per-club webhook
+    and the club's own session date instead."""
+    webhook = webhook_url or DISCORD_CALL_TO_ARMS_WEBHOOK_URL
+    if not webhook:
+        print("No TOW call-to-arms webhook, skipping.")
         return
 
     if wednesday_date is None:
         wednesday_date = next_wednesday()
 
-    content = build_tow_call_to_arms_message(scenario, wednesday_date)
+    content = build_tow_call_to_arms_message(scenario, wednesday_date, app_url)
     payload = {"content": content}
 
     terrain_path = scenario.get("terrain_path")
@@ -109,7 +119,7 @@ def post_tow_call_to_arms_with_image(scenario: dict, wednesday_date: date | None
                 with open(full_path, "rb") as f:
                     files = {"file": (os.path.basename(full_path), f, "image/png")}
                     httpx.post(
-                        DISCORD_CALL_TO_ARMS_WEBHOOK_URL,
+                        webhook,
                         data={"payload_json": json.dumps(payload)},
                         files=files,
                         timeout=10,
@@ -120,7 +130,7 @@ def post_tow_call_to_arms_with_image(scenario: dict, wednesday_date: date | None
                 print(f"Failed to post with terrain image, falling back to text: {e}")
 
     try:
-        httpx.post(DISCORD_CALL_TO_ARMS_WEBHOOK_URL, json=payload, timeout=10)
+        httpx.post(webhook, json=payload, timeout=10)
         print("Posted TOW Call to Arms (no terrain image).")
     except Exception as e:
         print(f"Failed to post TOW Call to Arms: {e}")

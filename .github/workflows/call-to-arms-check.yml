@@ -1,0 +1,27 @@
+name: Call to Arms Check
+
+# Hourly, club-aware, config-driven replacement for the three fixed-cron
+# call-to-arms workflows (call-to-arms.yml / hh-call-to-arms.yml /
+# kt-call-to-arms.yml, now workflow_dispatch-only). For each club/system it
+# reads that club's call-to-arms schedule settings and posts N days before
+# the session day, to the club's configured call_to_arms webhook. Posts
+# nothing unless a club has enabled it. No per-system webhook secrets — the
+# webhook is resolved from the club_webhooks table.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python run_call_to_arms_check.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}

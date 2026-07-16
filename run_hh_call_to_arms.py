@@ -36,12 +36,16 @@ def is_hh_session_week(d: date | None = None) -> bool:
     return 0 <= days_until <= 6
 
 
-def post_hh_call_to_arms() -> None:
-    if not DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL:
-        print("DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL not set, skipping.")
+def post_hh_call_to_arms(webhook_url: str | None = None, app_url: str | None = None) -> None:
+    """webhook_url/app_url default to this module's env vars for the
+    __main__ manual-run path; the scheduler passes a resolved per-club
+    webhook instead."""
+    webhook = webhook_url or DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL
+    if not webhook:
+        print("No HH call-to-arms webhook, skipping.")
         return
 
-    signup_url = APP_PUBLIC_URL or "https://your-app-url"
+    signup_url = app_url or APP_PUBLIC_URL or "https://your-app-url"
     content = (
         "⚔️ **The Horus Heresy — Call to Arms** ⚔️\n\n"
         "*\"In the long shadow of the Emperor's wrath, brothers turn against brothers. "
@@ -50,7 +54,7 @@ def post_hh_call_to_arms() -> None:
     )
 
     try:
-        httpx.post(DISCORD_HH_CALL_TO_ARMS_WEBHOOK_URL, json={"content": content}, timeout=10)
+        httpx.post(webhook, json={"content": content}, timeout=10)
         print("Posted HH Call to Arms.")
     except Exception as e:
         print(f"Failed to post HH Call to Arms: {e}")

@@ -1,7 +1,7 @@
-name: Weekly Horus Heresy Call to Arms
+name: Weekly Horus Heresy Call to Arms (manual fallback)
+# Superseded by call-to-arms-check.yml (hourly, config-driven, per-club
+# webhook). Kept for manual/emergency posting only — no longer scheduled.
 on:
-  schedule:
-    - cron: "0 19 * * 2"  # 19:00 UTC Tuesdays; script itself skips off-weeks
   workflow_dispatch:
 
 jobs:

@@ -655,6 +655,54 @@ def post_auto_pairings_settings(
     return {"ok": True}
 
 
+class CallToArmsSettingsBody(BaseModel):
+    system: str
+    enabled: bool
+    days_before: int
+    time: str
+
+
+@router.get("/call-to-arms-settings")
+def get_call_to_arms_settings(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Per-club, per-system call-to-arms schedule. Mirrors
+    get_auto_pairings_settings, but scheduled as N days before the club's
+    session day rather than on an absolute weekday, so it self-adjusts if
+    the club changes its ClubSystem.session_day."""
+    _require_system_scope(system, user, db)
+    slug = _slug(system)
+    enabled_str = (_get_setting(db, user.club_id, f"call_to_arms_{slug}_enabled", "false") or "false").lower()
+    days_before_str = _get_setting(db, user.club_id, f"call_to_arms_{slug}_days_before", "3") or "3"
+    return {
+        "enabled": enabled_str == "true",
+        "days_before": int(days_before_str),
+        "time": _get_setting(db, user.club_id, f"call_to_arms_{slug}_time", "12:00") or "12:00",
+        "last_week": _get_setting(db, user.club_id, f"call_to_arms_{slug}_last_week"),
+    }
+
+
+@router.post("/call-to-arms-settings")
+def post_call_to_arms_settings(
+    body: CallToArmsSettingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(body.system, user, db)
+    if not 0 <= body.days_before <= 14:
+        raise HTTPException(status_code=422, detail="days_before must be between 0 and 14")
+    if not _TIME_RE.match(body.time):
+        raise HTTPException(status_code=422, detail="time must match HH:MM (00-23 / 00-59)")
+    slug = _slug(body.system)
+    _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_enabled", "true" if body.enabled else "false")
+    _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_days_before", str(body.days_before))
+    _upsert_setting(db, user.club_id, f"call_to_arms_{slug}_time", body.time)
+    db.commit()
+    return {"ok": True}
+
+
 class PairingsWeekBody(BaseModel):
     system: str
     week: str
