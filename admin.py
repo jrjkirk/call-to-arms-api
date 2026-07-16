@@ -1803,7 +1803,6 @@ class SystemConfigCreateBody(BaseModel):
     has_intro_prepass: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
-    escalation_priority: bool = False
     # faction_list / icon_folder are NOT accepted here. A system's factions
     # and icon directory are rules that live in versioned code (systems/),
     # not editable catalogue data. Following the same convention as `slug`
@@ -1831,7 +1830,6 @@ class SystemConfigEditBody(BaseModel):
     has_intro_prepass: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
-    escalation_priority: bool = False
     active: bool = True
 
 

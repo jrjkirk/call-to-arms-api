@@ -233,11 +233,6 @@ class SystemConfig(SQLModel, table=True):
     recent_weeks: int = 3
     extended_weeks: int = 6
 
-    # TOW-only: _escalation_priority_penalty() and the candidate sort in
-    # pairings_engine.generate() give "Escalation"-vibe players sort/match
-    # priority. Not tied to uses_scenarios/uses_points.
-    escalation_priority: bool = False
-
     faction_list: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
     # Informational only for now — render_pairings_image.py currently

@@ -32,7 +32,7 @@ router = APIRouter(prefix="/signups", tags=["signups"])
 # the DB catalogue instead; see submit_signup.)
 SYSTEMS = set(SYSTEM_RULES)
 EXPERIENCE_OPTIONS = {"New", "Some", "Veteran"}
-TOW_VIBES = {"Casual", "Competitive", "Escalation", "Intro", "Either"}
+TOW_VIBES = {"Casual", "Competitive", "Intro", "Either"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
 

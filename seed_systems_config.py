@@ -30,7 +30,6 @@ from signups import SYSTEMS, TOW_VIBES, HH_VIBES, SCENARIO_OPTIONS
 #                        (signup_create/signup_swap, is_hh/is_kt branches)
 #   pairings_engine.py -> has_intro_prepass (system in (TOW, HH)),
 #                          recent/extended weeks (HH: 6/12, else 3/6),
-#                          escalation_priority (TOW only)
 #   render_pairings_image.py -> icon_folder search dirs (TOW/HH/KT) —
 #                          informational only; lookup still searches all
 #                          three folders regardless of system (see decision
@@ -55,7 +54,6 @@ SEED_ROWS = [
         has_intro_prepass=True,
         recent_weeks=3,
         extended_weeks=6,
-        escalation_priority=True,
         faction_list=None,  # frontend signupOptions.ts not in this repo pull
         icon_folder="TOW",
         active=True,
@@ -76,7 +74,6 @@ SEED_ROWS = [
         has_intro_prepass=True,
         recent_weeks=6,
         extended_weeks=12,
-        escalation_priority=False,
         faction_list=None,
         icon_folder="HH",
         active=True,
@@ -97,7 +94,6 @@ SEED_ROWS = [
         has_intro_prepass=False,
         recent_weeks=3,
         extended_weeks=6,
-        escalation_priority=False,
         faction_list=None,
         icon_folder="KT",
         active=True,

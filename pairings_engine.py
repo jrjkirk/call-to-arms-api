@@ -1,6 +1,6 @@
 """Pairing generation engine — faithful port of the original Streamlit matcher.
 
-10-tuple _pair_dist order: (last_opp_pen, block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
+9-tuple _pair_dist order: (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)
 Do NOT reorder or "optimise" — the tuple order encodes matchmaking priority.
 T&T / 3-way grouping intentionally removed (club never uses it).
 Odd numbers naturally produce a single BYE via the greedy fallback.
@@ -25,7 +25,7 @@ def _normalize_name(n: str) -> str:
 
 def build_match_preference(su: Signup) -> tuple:
     v = (su.vibe or "").strip().lower()
-    vibe_w = 0 if (v.startswith("casual") or v == "escalation") else 1
+    vibe_w = 0 if v.startswith("casual") else 1
 
     exp_map = {"new": 0, "some": 1, "veteran": 2, "experienced": 2}
     exp_w = 1
@@ -247,25 +247,6 @@ def _vibe_distance_override(a: MatcherSignup, b: MatcherSignup, base: int) -> in
     return 0 if av == bv else 1
 
 
-def _escalation_priority_penalty(
-    a: MatcherSignup, b: MatcherSignup, system: str, config: Optional[SystemConfig] = None
-) -> int:
-    if config is not None:
-        if not config.escalation_priority:
-            return 0
-    elif system != "The Old World":
-        return 0
-    av = (a.row.vibe or "").lower().strip()
-    bv = (b.row.vibe or "").lower().strip()
-    if av != "escalation":
-        return 0
-    if bv == "escalation":
-        return 0
-    if bv in ("casual", "either"):
-        return 1
-    return 2
-
-
 def _pair_dist(
     ms: MatcherSignup,
     other: MatcherSignup,
@@ -293,7 +274,6 @@ def _pair_dist(
         )
         else 0
     )
-    esc_p = _escalation_priority_penalty(ms, other, system, config)
     mir = _mirror_flag(ms, other)
 
     pair_key = tuple(sorted([ms.key, other.key]))
@@ -313,7 +293,7 @@ def _pair_dist(
     else:
         dp = 0 if system == "Kill Team" else abs(ms.preference[2] - other.preference[2])
 
-    return (last_opp_pen, block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)
+    return (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)
 
 
 # ---------------------------------------------------------------------------
@@ -435,16 +415,8 @@ def generate(
         candidates = [ms for ms in candidates if ms.key not in used_keys]
 
     # 4. Sort remaining candidates
-    if config is not None:
-        escalation_priority = config.escalation_priority
-    else:
-        escalation_priority = system == "The Old World"
-
     candidates.sort(
         key=lambda ms: (
-            (0 if (ms.row.vibe or "").lower() == "escalation" else 1)
-            if escalation_priority
-            else 0,
             0 if ms.row.standby_ok else 1,
             ms.preference,
             ms.key,

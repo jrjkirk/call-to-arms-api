@@ -107,7 +107,6 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
     accent_by_type = {
         ("The Old World", "intro"):       "#6eb46e",
         ("The Old World", "casual"):      "#c9a14a",
-        ("The Old World", "escalation"):  "#a06ec8",
         ("The Old World", "competitive"): "#d25050",
         ("The Horus Heresy", "intro"):    "#6eb46e",
         ("The Horus Heresy", "standard"): "#c9a14a",
