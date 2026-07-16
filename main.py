@@ -535,7 +535,7 @@ def get_pairings(
         raise HTTPException(status_code=500, detail=str(e))
 
     gate = session.exec(
-        select(PublishState).where(
+        scoped(PublishState, club_id).where(
             (PublishState.week == week) & (PublishState.system == system)
         )
     ).first()
