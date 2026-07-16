@@ -14,8 +14,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt matplotlib
-      - run: python run_auto_pairings_check.py
+      - run: python scripts/run_auto_pairings_check.py
         env:
+          PYTHONPATH: ${{ github.workspace }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}
           DISCORD_TOW_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_TOW_PAIRINGS_WEBHOOK_URL }}

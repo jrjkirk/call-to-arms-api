@@ -13,7 +13,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt matplotlib
-      - run: python post_league_rankings_image.py
+      - run: python scripts/post_league_rankings_image.py
         env:
+          PYTHONPATH: ${{ github.workspace }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL: ${{ secrets.DISCORD_LEAGUE_RANKINGS_WEBHOOK_URL }}

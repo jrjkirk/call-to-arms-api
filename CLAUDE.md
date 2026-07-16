@@ -30,6 +30,44 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |
 | `pairings_engine.py` | Pairing generation engine — faithful port of the original Streamlit matcher |
 
+## Directory layout
+
+The live app's own code (everything FastAPI imports at runtime) stays flat
+at repo root: `main.py`, `admin.py`, `auth.py`, `league.py`, `signups.py`,
+`services.py`, `database.py`, `models.py`, `week_logic.py`,
+`call_to_arms_content.py`, `pairings_engine.py`, plus the `systems/`,
+`icons/`, `missions/` asset/rule directories. None of these import
+anything from the three subdirectories below — the live app is completely
+unaffected by what's in them.
+
+Standalone scripts (never imported by the live app) are grouped by purpose:
+- `migrations/` — one-off, already-run schema migration scripts
+  (`add_club_id_to_*.py`, `create_club_settings_table.py`,
+  `add_is_platform_admin_to_users.py`). Kept as historical record, not a
+  live migration tool — see `models.py`'s docstring.
+- `seed/` — one-off/idempotent data-seeding scripts (`seed_clubs.py`,
+  `seed_club_webhooks.py`, `seed_systems_config.py`).
+- `scripts/` — scheduled GitHub Actions entry points and the render helpers
+  they use (`run_auto_pairings_check.py`, `run_call_to_arms_check.py`,
+  `post_pairings_image.py`, `post_league_rankings_image.py`,
+  `render_pairings_image.py`, `render_league_rankings_image.py`). All four
+  GitHub Actions workflows that invoke these already set
+  `PYTHONPATH: ${{ github.workspace }}` so the scripts' `from database
+  import ...`-style repo-root imports resolve correctly despite living one
+  directory down.
+
+**Running any of these by hand:** since they import repo-root modules
+(`database`, `models`, etc.), always set `PYTHONPATH` to the repo root
+first, e.g. from `~/projects/call-to-arms-api`:
+```bash
+PYTHONPATH=. python migrations/add_club_id_to_users.py
+PYTHONPATH=. python seed/seed_clubs.py --verify-only
+PYTHONPATH=. python scripts/post_pairings_image.py
+```
+Running with a bare `python migrations/foo.py` (no `PYTHONPATH`) will fail
+with `ModuleNotFoundError: No module named 'database'` — Python only adds
+the *script's own* directory to `sys.path`, not the repo root.
+
 ## Auth patterns
 
 ```python

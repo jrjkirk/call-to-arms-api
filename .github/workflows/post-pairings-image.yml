@@ -23,8 +23,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt matplotlib
-      - run: python post_pairings_image.py
+      - run: python scripts/post_pairings_image.py
         env:
+          PYTHONPATH: ${{ github.workspace }}
           SYSTEM: ${{ inputs.system }}
           WEEK: ${{ inputs.week }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

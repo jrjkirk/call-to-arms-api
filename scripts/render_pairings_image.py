@@ -49,8 +49,10 @@ def _icon_png_path(faction_name: str | None) -> str | None:
     if not faction_name:
         return None
     slug = _faction_slug(faction_name)
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    icons_root = os.path.join(base_dir, "icons")
+    # This file lives one directory below the repo root (scripts/); icons/ is
+    # a repo-root asset, not a sibling of this file, so go up one level.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    icons_root = os.path.join(repo_root, "icons")
     search_dirs = [
         icons_root,
         os.path.join(icons_root, "TOW"),

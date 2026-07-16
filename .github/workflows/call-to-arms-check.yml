@@ -21,7 +21,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: python run_call_to_arms_check.py
+      - run: python scripts/run_call_to_arms_check.py
         env:
+          PYTHONPATH: ${{ github.workspace }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}
