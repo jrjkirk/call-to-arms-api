@@ -296,6 +296,8 @@ def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_s
             scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
         ).all()
 
+    club = db.get(Club, user.club_id)
+
     return {
         "authenticated": True,
         "user": user,
@@ -304,6 +306,9 @@ def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_s
             {"id": p.id, "name": p.name, "default_faction": p.default_faction}
             for p in candidates
         ],
+        # Lets the frontend gate league-only UI (nav tab, etc.) on the
+        # caller's own club instead of a hardcoded club id.
+        "leagues_enabled": club.leagues_enabled if club else False,
     }
 
 

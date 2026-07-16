@@ -42,10 +42,10 @@ from systems import factions_for, icon_folder_for
 from signups import (
     CANONICAL_VIBES,
     EXPERIENCE_OPTIONS,
-    HH_VIBES,
     SCENARIO_OPTIONS,
     SYSTEMS,
-    TOW_VIBES,
+    _effective_vibe_config,
+    _get_system_config,
     _require_system_enabled,
     _validate_week,
 )
@@ -325,7 +325,7 @@ def list_blocks(
     player_ids = {b.player_a_id for b in block_rows} | {b.player_b_id for b in block_rows}
     players_by_id: dict[int, Player] = {}
     if player_ids:
-        rows = db.exec(select(Player).where(Player.id.in_(player_ids))).all()
+        rows = db.exec(scoped(Player, user.club_id).where(Player.id.in_(player_ids))).all()
         players_by_id = {p.id: p for p in rows}
 
     def _name(pid: int) -> str:
@@ -453,7 +453,7 @@ def admin_history(
     }
     signups_by_id: dict[int, Signup] = {}
     if signup_ids:
-        signup_rows = db.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+        signup_rows = db.exec(scoped(Signup, user.club_id).where(Signup.id.in_(signup_ids))).all()
         signups_by_id = {s.id: s for s in signup_rows}
 
     result = []
@@ -541,7 +541,7 @@ def _build_display_row(
     }
 
 
-def _collect_signups_for_rows(rows, db: Session) -> dict:
+def _collect_signups_for_rows(rows, db: Session, club_id: int) -> dict:
     ids: set[int] = set()
     for r in rows:
         if isinstance(r, Pairing):
@@ -555,7 +555,7 @@ def _collect_signups_for_rows(rows, db: Session) -> dict:
                 ids.add(r["b_signup_id"])
     if not ids:
         return {}
-    rows_q = db.exec(select(Signup).where(Signup.id.in_(ids))).all()
+    rows_q = db.exec(scoped(Signup, club_id).where(Signup.id.in_(ids))).all()
     return {s.id: s for s in rows_q}
 
 
@@ -832,7 +832,7 @@ def pairings_preview(
     proposed_dicts = generate(db, body.week, body.system, persist=False, club_id=user.club_id)
 
     all_rows = list(prearranged) + proposed_dicts
-    signups_by_id = _collect_signups_for_rows(all_rows, db)
+    signups_by_id = _collect_signups_for_rows(all_rows, db, user.club_id)
 
     display = _pairing_rows_to_display(prearranged, signups_by_id, body.system) + \
               _dicts_to_display(proposed_dicts, signups_by_id, body.system)
@@ -863,7 +863,7 @@ def pairings_generate(
 
     new_pairings = generate(db, body.week, body.system, persist=True, club_id=user.club_id)
 
-    signups_by_id = _collect_signups_for_rows(new_pairings, db)
+    signups_by_id = _collect_signups_for_rows(new_pairings, db, user.club_id)
     display = _pairing_rows_to_display(new_pairings, signups_by_id, body.system)
     return {"rows": display}
 
@@ -892,7 +892,7 @@ def pairings_get(
     ).first()
     published = gate.published if gate else False
 
-    signups_by_id = _collect_signups_for_rows(rows, db)
+    signups_by_id = _collect_signups_for_rows(rows, db, user.club_id)
     display = _pairing_rows_to_display(rows, signups_by_id, system)
     return {"rows": display, "published": published}
 
@@ -1092,37 +1092,39 @@ def _signup_row(su: Signup) -> dict:
     }
 
 
-def _system_config(system: str) -> dict:
-    """Per-system field visibility config for the admin signup editor."""
-    if system == "Kill Team":
-        return {
-            "show_points": False,
-            "default_points": None,
-            "show_scenario": False,
-            "show_standby": False,
-            "show_can_demo": False,
-            "vibe_options": ["Standard"],
-            "vibe_fixed": "Standard",
-        }
-    if system == "The Horus Heresy":
+def _system_config(db: Session, club_id: int, system: str) -> dict:
+    """Per-system field visibility config for the admin signup editor. Sourced
+    from the SystemConfig catalogue (+ the caller's own ClubSystem vibe
+    override, if any — same merge as the public signup form uses via
+    _effective_vibe_config) rather than hardcoded per-system-name literals,
+    so a club's own vibe customization is honored here too.
+
+    show_standby is the one field with no catalogue equivalent (it's True
+    only for The Old World today, which happens to coincide with
+    uses_scenarios — but that's not a designed relationship, so it's kept as
+    an explicit system-name check rather than derived from it)."""
+    config = _get_system_config(db, system)
+    if config is None:
+        # Unknown/uncatalogued system: same TOW-shaped fallback this function
+        # always returned for "any future system" before the catalogue existed.
         return {
             "show_points": True,
-            "default_points": 3000,
-            "show_scenario": False,
-            "show_standby": False,
+            "default_points": 2000,
+            "show_scenario": True,
+            "show_standby": True,
             "show_can_demo": True,
-            "vibe_options": sorted(HH_VIBES),
+            "vibe_options": ["Casual", "Competitive", "Either", "Intro"],
             "vibe_fixed": None,
         }
-    # The Old World (and any future system)
+    vibe_options, _default_vibe = _effective_vibe_config(db, club_id, config)
     return {
-        "show_points": True,
-        "default_points": 2000,
-        "show_scenario": True,
-        "show_standby": True,
-        "show_can_demo": True,
-        "vibe_options": sorted(TOW_VIBES),
-        "vibe_fixed": None,
+        "show_points": config.uses_points,
+        "default_points": config.default_points,
+        "show_scenario": config.uses_scenarios,
+        "show_standby": system == "The Old World",
+        "show_can_demo": config.allows_demo,
+        "vibe_options": vibe_options,
+        "vibe_fixed": vibe_options[0] if len(vibe_options) == 1 else None,
     }
 
 
@@ -1145,7 +1147,7 @@ def admin_signups_list(
 
     return {
         "signups": [_signup_row(su) for su in rows],
-        "config": _system_config(system),
+        "config": _system_config(db, user.club_id, system),
     }
 
 
@@ -1183,16 +1185,26 @@ def admin_signup_patch(
     _require_system_scope(su.system, user, db)
 
     provided = body.model_fields_set
-    is_kt = su.system == "Kill Team"
-    is_hh = su.system == "The Horus Heresy"
+    config = _get_system_config(db, su.system)
+    if config is not None:
+        uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
+        vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
+    else:
+        # Uncatalogued system (shouldn't happen for real data — same fallback
+        # shape _system_config uses for "any future system" not yet seeded).
+        is_kt = su.system == "Kill Team"
+        is_hh = su.system == "The Horus Heresy"
+        uses_points, uses_scenarios, allows_demo = not is_kt, not (is_kt or is_hh), not is_kt
+        vibe_options = ["Standard"] if is_kt else (["Intro", "Standard"] if is_hh else ["Casual", "Competitive", "Either", "Intro"])
+        default_vibe = "Standard" if (is_kt or is_hh) else "Casual"
 
     if "faction" in provided:
         f = body.faction
         su.faction = None if f in (None, "", "— None —") else f
 
     if "points" in provided:
-        if is_kt or body.points is None:
-            su.points = None if is_kt else None
+        if not uses_points or body.points is None:
+            su.points = None
         else:
             su.points = max(0, min(int(body.points), 10000))
 
@@ -1203,25 +1215,20 @@ def admin_signup_patch(
         su.experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
 
     if "vibe" in provided:
-        if is_kt:
-            su.vibe = "Standard"
-        elif is_hh:
-            su.vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
-        else:
-            su.vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
+        su.vibe = body.vibe if body.vibe in vibe_options else default_vibe
 
     if "standby_ok" in provided:
         su.standby_ok = bool(body.standby_ok) if body.standby_ok is not None else False
 
     if "scenario" in provided:
-        if is_kt or is_hh:
+        if not uses_scenarios:
             su.scenario = None
         else:
             s = body.scenario
             su.scenario = None if s in (None, "", "— None —") else s
 
     if "can_demo" in provided:
-        su.can_demo = False if is_kt else (bool(body.can_demo) if body.can_demo is not None else False)
+        su.can_demo = bool(body.can_demo) if (allows_demo and body.can_demo is not None) else False
 
     db.add(su)
     db.commit()
@@ -1280,8 +1287,20 @@ def admin_signup_create(
             detail="This player is already signed up for this week — edit their existing row instead.",
         )
 
-    is_kt = body.system == "Kill Team"
-    is_hh = body.system == "The Horus Heresy"
+    config = _get_system_config(db, body.system)
+    if config is not None:
+        uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
+        default_points, max_points = config.default_points, config.max_points
+        vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
+    else:
+        # Uncatalogued system (shouldn't happen for real data) — same
+        # fallback shape as admin_signup_patch/_system_config.
+        is_kt = body.system == "Kill Team"
+        is_hh = body.system == "The Horus Heresy"
+        uses_points, uses_scenarios, allows_demo = not is_kt, not (is_kt or is_hh), not is_kt
+        default_points, max_points = (3000 if is_hh else 2000), 10000
+        vibe_options = ["Standard"] if is_kt else (["Intro", "Standard"] if is_hh else ["Casual", "Competitive", "Either", "Intro"])
+        default_vibe = "Standard" if (is_kt or is_hh) else "Casual"
 
     faction = body.faction
     if faction in (None, "", "— None —"):
@@ -1290,25 +1309,18 @@ def admin_signup_create(
     experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
     eta = (body.eta or "").strip() or None
 
-    if is_kt:
-        vibe = "Standard"
-        points = None
-        scenario = None
-        can_demo = False
-        standby_ok = False
-    elif is_hh:
-        vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
-        points = max(0, min(int(body.points or 3000), 10000))
-        scenario = None
-        can_demo = bool(body.can_demo)
-        standby_ok = False
-    else:
-        vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
-        points = max(0, min(int(body.points or 2000), 10000))
+    vibe = body.vibe if body.vibe in vibe_options else default_vibe
+    points = None if not uses_points else max(0, min(int(body.points or default_points), max_points))
+    if uses_scenarios:
         s = body.scenario
         scenario = None if s in (None, "", "— None —") else s
-        can_demo = bool(body.can_demo)
-        standby_ok = bool(body.standby_ok)
+    else:
+        scenario = None
+    can_demo = bool(body.can_demo) if allows_demo else False
+    # standby_ok has no catalogue field (like show_standby in _system_config)
+    # — kept as an explicit check on today's only scenario-using system
+    # rather than assumed equal to uses_scenarios for a hypothetical future one.
+    standby_ok = bool(body.standby_ok) if body.system == "The Old World" else False
 
     su = Signup(
         week=week,

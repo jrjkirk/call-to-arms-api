@@ -29,19 +29,20 @@ def compute_league_record(player_id: int, results: Iterable[LeagueResult]) -> di
     return {"wins": wins, "losses": losses, "draws": draws, "total_games": wins + losses + draws}
 
 
-def fetch_player_results(session: Session, player_id: int) -> list[LeagueResult]:
+def fetch_player_results(session: Session, player_id: int, club_id: int) -> list[LeagueResult]:
     """Return all league results involving the given player, newest first."""
     stmt = (
         select(LeagueResult)
+        .where(LeagueResult.club_id == club_id)
         .where(or_(LeagueResult.player_1_id == player_id, LeagueResult.player_2_id == player_id))
         .order_by(LeagueResult.created_at.desc())
     )
     return session.exec(stmt).all()
 
 
-def fetch_player_signups(session: Session, player_id: int) -> list[Signup]:
+def fetch_player_signups(session: Session, player_id: int, club_id: int) -> list[Signup]:
     """Return ALL signups for a player across all weeks/systems."""
-    stmt = select(Signup).where(Signup.player_id == player_id)
+    stmt = select(Signup).where(Signup.club_id == club_id).where(Signup.player_id == player_id)
     return session.exec(stmt).all()
 
 
@@ -314,10 +315,10 @@ def announce_new_achievements(db: Session, player_id: int) -> None:
         if not webhook_url:
             return
 
-        results = fetch_player_results(db, player_id)
+        results = fetch_player_results(db, player_id, player.club_id)
         record = compute_league_record(player_id, results)
         elo_history = build_elo_history(player_id, results)
-        signups = fetch_player_signups(db, player_id)
+        signups = fetch_player_signups(db, player_id, player.club_id)
         fac_usage = faction_usage_per_system(signups)
         first_winner = first_league_winner_id(db)
 

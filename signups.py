@@ -228,7 +228,7 @@ def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dic
     if not bye_pairings:
         return []
     signup_ids = [p.a_signup_id for p in bye_pairings]
-    signups = db.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+    signups = db.exec(scoped(Signup, club_id).where(Signup.id.in_(signup_ids))).all()
     signups_by_id = {s.id: s for s in signups}
     result = []
     for p in bye_pairings:

@@ -21,7 +21,7 @@ from services import (
     ACHIEVEMENT_DESCRIPTIONS,
 )
 from auth import router as auth_router, require_user, current_user
-from signups import router as signups_router, CANONICAL_VIBES
+from signups import router as signups_router, CANONICAL_VIBES, _get_system_config
 from league import router as league_router
 from admin import router as admin_router
 
@@ -196,7 +196,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     rating_row = session.exec(
         scoped(LeagueRating, user.club_id).where(LeagueRating.player_id == player_id)
     ).first()
-    results = fetch_player_results(session, player_id)
+    results = fetch_player_results(session, player_id, user.club_id)
     record = compute_league_record(player_id, results)
     elo_history = build_elo_history(player_id, results)
 
@@ -207,7 +207,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
         ).all()
         rank = len(higher) + 1
 
-    signups = fetch_player_signups(session, player_id)
+    signups = fetch_player_signups(session, player_id, user.club_id)
     sign_counts = signup_counts_per_system(signups)
     fac_usage = faction_usage_per_system(signups)
 
@@ -395,7 +395,7 @@ def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
 
     rankings = []
     for rank, (rating, player) in enumerate(rows, start=1):
-        results = fetch_player_results(session, player.id)
+        results = fetch_player_results(session, player.id, club_id)
         record = compute_league_record(player.id, results)
 
         faction_counts: dict[str, int] = {}
@@ -552,8 +552,10 @@ def get_pairings(
     signup_ids = {p.a_signup_id for p in prs} | {p.b_signup_id for p in prs if p.b_signup_id}
     signups_by_id: dict[int, Signup] = {}
     if signup_ids:
-        rows = session.exec(select(Signup).where(Signup.id.in_(signup_ids))).all()
+        rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(signup_ids))).all()
         signups_by_id = {s.id: s for s in rows}
+
+    system_config = _get_system_config(session, system)
 
     matchups = []
     for p in prs:
@@ -565,7 +567,7 @@ def get_pairings(
             b.vibe if b else None,
         )
 
-        if system == "Kill Team":
+        if system_config is not None and not system_config.uses_points:
             points = None
         else:
             pts_vals = [v for v in (a.points if a else None, b.points if b else None) if isinstance(v, int)]

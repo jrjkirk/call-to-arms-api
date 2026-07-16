@@ -44,7 +44,7 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         .order_by(Pairing.id)
     ).all()
 
-    signups_by_id = _collect_signups_for_rows(rows, db)
+    signups_by_id = _collect_signups_for_rows(rows, db, club_id)
     display_rows = _pairing_rows_to_display(rows, signups_by_id, system)
 
     buf = render_pairings_image(display_rows, week, system)
