@@ -35,7 +35,7 @@ from league import (
     _recalculate_ratings,
 )
 from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
-from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
+from services import player_titles, set_player_titles
 from pairings_engine import generate
 from systems import factions_for, icon_folder_for
 from signups import (
@@ -1464,43 +1464,6 @@ def admin_league_result_delete(
 
 
 # ---------------------------------------------------------------------------
-# Achievement announcements — admin manual post + options list
-# ---------------------------------------------------------------------------
-
-class AchievementPostBody(BaseModel):
-    player_name: str
-    achievement: str
-
-
-@router.get("/achievements/options")
-def achievement_options(
-    _: User = Depends(require_super_admin),
-):
-    """Return the sorted list of achievements eligible for Discord announcement."""
-    return {"achievements": sorted(LEAGUE_ANNOUNCED_ACHIEVEMENTS)}
-
-
-@router.post("/achievements/post-discord")
-def achievement_post_discord(
-    body: AchievementPostBody,
-    user: User = Depends(require_super_admin),
-    db: Session = Depends(get_session),
-):
-    """Manually post an achievement unlock to Discord.
-
-    No DB writes or announced-set checks — this is a direct override for
-    admin corrections. Requires super-admin.
-    """
-    if body.achievement not in LEAGUE_ANNOUNCED_ACHIEVEMENTS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Achievement must be one of: {sorted(LEAGUE_ANNOUNCED_ACHIEVEMENTS)}",
-        )
-    post_discord_achievement(body.player_name, body.achievement, user.club_id, db)
-    return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
 # Club webhooks — self-service (club-wide, not per-system scope)
 # ---------------------------------------------------------------------------
 
@@ -1524,10 +1487,23 @@ def list_club_webhooks(
     user: User = Depends(require_super_admin),
     db: Session = Depends(get_session),
 ):
-    """Full grid of the six webhook types for the caller's own club — every
-    (type, system) combination appears, whether or not a row exists yet, so
-    the UI can show what's configurable, not just what's set."""
-    systems = db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
+    """Webhook grid for the caller's own club, scoped to what the club
+    actually runs: per-system webhooks appear only for the systems this club
+    has enabled (not the whole catalogue), and the club-level league/
+    achievement webhooks appear only when the club has leagues enabled. Each
+    listed (type, system) appears whether or not a row exists yet, so the UI
+    shows what's configurable, not just what's set."""
+    enabled_system_ids = {
+        cs.system_id
+        for cs in db.exec(scoped(ClubSystem, user.club_id).where(ClubSystem.enabled == True)).all()
+    }
+    systems = [
+        s for s in db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
+        if s.id in enabled_system_ids
+    ]
+    club = db.get(Club, user.club_id)
+    leagues_enabled = bool(club and club.leagues_enabled)
+
     existing = db.exec(
         select(ClubWebhook).where(ClubWebhook.club_id == user.club_id)
     ).all()
@@ -1543,14 +1519,15 @@ def list_club_webhooks(
                 "system_name": system.name,
                 **_mask_webhook_row(row),
             })
-    for webhook_type in WEBHOOK_TYPES_CLUB_LEVEL:
-        row = existing_by_key.get((webhook_type, None))
-        grid.append({
-            "webhook_type": webhook_type,
-            "system_id": None,
-            "system_name": None,
-            **_mask_webhook_row(row),
-        })
+    if leagues_enabled:
+        for webhook_type in WEBHOOK_TYPES_CLUB_LEVEL:
+            row = existing_by_key.get((webhook_type, None))
+            grid.append({
+                "webhook_type": webhook_type,
+                "system_id": None,
+                "system_name": None,
+                **_mask_webhook_row(row),
+            })
     return grid
 
 
@@ -1585,11 +1562,27 @@ def upsert_club_webhook(
         system = db.get(SystemConfig, body.system_id)
         if system is None:
             raise HTTPException(status_code=404, detail="System not found.")
+        enabled = db.exec(
+            scoped(ClubSystem, user.club_id)
+            .where(ClubSystem.system_id == body.system_id)
+            .where(ClubSystem.enabled == True)
+        ).first()
+        if enabled is None:
+            raise HTTPException(
+                status_code=422,
+                detail="This system is not enabled for your club.",
+            )
     else:
         if body.system_id is not None:
             raise HTTPException(
                 status_code=422,
                 detail=f"system_id must not be set for webhook_type={body.webhook_type!r}.",
+            )
+        club = db.get(Club, user.club_id)
+        if not (club and club.leagues_enabled):
+            raise HTTPException(
+                status_code=422,
+                detail="League and achievement webhooks require leagues to be enabled for your club.",
             )
 
     if not body.url or not body.url.strip():
