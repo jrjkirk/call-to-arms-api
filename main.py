@@ -7,6 +7,7 @@ from sqlmodel import Session, select, or_
 from database import get_session, resolve_request_club_id, scoped
 from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date
+from systems import factions_for, icon_folder_for
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -91,6 +92,12 @@ def _system_dict(r: SystemConfig) -> dict:
         "scenario_options": r.scenario_options,
         "default_scenario": r.default_scenario,
         "allows_demo": r.allows_demo,
+        # System *rules* — sourced from the hardcoded per-system modules in
+        # systems/, keyed by legacy_system_name, NOT from the (dead)
+        # SystemConfig.faction_list / icon_folder DB columns. None for any
+        # catalogue system without a hardcoded ruleset yet.
+        "faction_list": factions_for(r.legacy_system_name),
+        "icon_folder": icon_folder_for(r.legacy_system_name),
     }
 
 

@@ -37,6 +37,7 @@ from league import (
 from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 from services import LEAGUE_ANNOUNCED_ACHIEVEMENTS, player_titles, post_discord_achievement, set_player_titles
 from pairings_engine import generate
+from systems import factions_for, icon_folder_for
 from signups import (
     EXPERIENCE_OPTIONS,
     HH_VIBES,
@@ -1721,14 +1722,19 @@ class SystemConfigCreateBody(BaseModel):
     recent_weeks: int = 3
     extended_weeks: int = 6
     escalation_priority: bool = False
-    faction_list: Optional[list[str]] = None
-    icon_folder: Optional[str] = None
+    # faction_list / icon_folder are NOT accepted here. A system's factions
+    # and icon directory are rules that live in versioned code (systems/),
+    # not editable catalogue data. Following the same convention as `slug`
+    # immutability-on-edit, they're simply omitted from the request body so
+    # Pydantic silently ignores them if a client sends them.
     active: bool = True
 
 
 class SystemConfigEditBody(BaseModel):
     """Same shape as SystemConfigCreateBody minus slug — slug is immutable
-    after creation, since it's used as a stable identifier elsewhere."""
+    after creation, since it's used as a stable identifier elsewhere.
+    faction_list / icon_folder are likewise omitted: they are code-owned
+    rules (systems/), never editable, and silently ignored if sent."""
     name: str
     legacy_system_name: str
     uses_points: bool = False
@@ -1744,8 +1750,6 @@ class SystemConfigEditBody(BaseModel):
     recent_weeks: int = 3
     extended_weeks: int = 6
     escalation_priority: bool = False
-    faction_list: Optional[list[str]] = None
-    icon_folder: Optional[str] = None
     active: bool = True
 
 
@@ -1773,8 +1777,19 @@ def list_platform_systems(
     db: Session = Depends(get_session),
 ):
     """All SystemConfig rows, full fields — the catalogue-management table
-    source for the platform admin panel."""
-    return db.exec(select(SystemConfig).order_by(SystemConfig.name)).all()
+    source for the platform admin panel.
+
+    faction_list / icon_folder are overridden from the hardcoded per-system
+    modules (systems/), not read from the DB columns, so the panel shows the
+    real code-owned ruleset (and never presents it as editable data)."""
+    rows = db.exec(select(SystemConfig).order_by(SystemConfig.name)).all()
+    result = []
+    for r in rows:
+        row = r.model_dump()
+        row["faction_list"] = factions_for(r.legacy_system_name)
+        row["icon_folder"] = icon_folder_for(r.legacy_system_name)
+        result.append(row)
+    return result
 
 
 @router.post("/platform/systems")

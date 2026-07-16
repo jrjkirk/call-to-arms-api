@@ -21,10 +21,16 @@ from sqlmodel import Session, SQLModel, select
 from database import get_session, resolve_webhook_url, scoped
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting, ClubSystem
 from auth import admin_scopes, require_user
+from systems import SYSTEM_RULES
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
-SYSTEMS = {"The Old World", "The Horus Heresy", "Kill Team"}
+# Legacy (non-catalogue) system-name validation, used only when the
+# systems_from_catalogue flag is off. Sourced from the hardcoded per-system
+# rules registry rather than a separate duplicate list — same three
+# legacy_system_names as before. (The catalogue-on path validates against
+# the DB catalogue instead; see submit_signup.)
+SYSTEMS = set(SYSTEM_RULES)
 EXPERIENCE_OPTIONS = {"New", "Some", "Veteran"}
 TOW_VIBES = {"Casual", "Competitive", "Escalation", "Intro", "Either"}
 HH_VIBES = {"Standard", "Intro"}
