@@ -13,16 +13,21 @@ SQLModel's checkfirst), and seeding is an upsert keyed on `slug` for Club and
 
 The verification step reads back what's on staging and confirms it against
 the actual live scheduling logic (week_logic.py's weekday math and
-run_hh_call_to_arms.HH_SESSION_ANCHOR) rather than just trusting the literals
-typed into SEED_CLUB_SYSTEMS below.
+HH_SESSION_ANCHOR below) rather than just trusting the literals typed into
+SEED_CLUB_SYSTEMS below.
 """
 import sys
+from datetime import date
 
 from sqlmodel import Session, select
 
 from database import engine
 from models import Club, ClubSystem, SystemConfig
-from run_hh_call_to_arms import HH_SESSION_ANCHOR
+
+# Formerly imported from run_hh_call_to_arms.py (deleted along with the other
+# two per-system manual-fallback scripts — superseded by call-to-arms-check.yml,
+# see run_call_to_arms_check.py). This is the one remaining consumer.
+HH_SESSION_ANCHOR = date(2026, 5, 8)
 
 CLUB = dict(
     name="Manchester",
@@ -155,8 +160,8 @@ def verify(session: Session) -> list[str]:
                 )
 
     # Cross-check against the live source of truth, not just internally
-    # consistent literals: week_logic.py's weekday math and
-    # run_hh_call_to_arms.HH_SESSION_ANCHOR.
+    # consistent literals: week_logic.py's weekday math and this module's
+    # own HH_SESSION_ANCHOR.
     tow_row = next((r for r in SEED_CLUB_SYSTEMS if r["legacy_system_name"] == "The Old World"), None)
     if tow_row and tow_row["session_day"] != "Wednesday":
         problems.append(
@@ -179,8 +184,8 @@ def verify(session: Session) -> list[str]:
             problems.append(f"HH session_cadence={hh_row['session_cadence']!r} does not match fortnightly")
         if hh_row["cadence_anchor"] != HH_SESSION_ANCHOR:
             problems.append(
-                f"HH cadence_anchor={hh_row['cadence_anchor']!r} does not match live "
-                f"run_hh_call_to_arms.HH_SESSION_ANCHOR={HH_SESSION_ANCHOR!r}"
+                f"HH cadence_anchor={hh_row['cadence_anchor']!r} does not match "
+                f"HH_SESSION_ANCHOR={HH_SESSION_ANCHOR!r}"
             )
 
     return problems

@@ -34,10 +34,9 @@ def _next_weekly(day_name: str, today: date) -> date:
 
 def _next_fortnightly(day_name: str, cadence_anchor: date, today: date) -> date:
     """Next occurrence on the anchor's 14-day cycle, on or after today.
-    Same algorithm as the old hh_next_session_friday (run_hh_call_to_arms.py,
-    still used independently by that script's own weekly-reminder post —
-    not touched here), generalized off day_name/anchor instead of a
-    hardcoded Friday + global constant."""
+    Same algorithm as the old hh_next_session_friday (formerly in
+    run_hh_call_to_arms.py, deleted), generalized off day_name/anchor
+    instead of a hardcoded Friday + global constant."""
     if today <= cadence_anchor:
         return cadence_anchor
     delta_days = (today - cadence_anchor).days

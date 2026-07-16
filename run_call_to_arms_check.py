@@ -7,9 +7,12 @@ posts the system's call-to-arms message to that club's configured
 `call_to_arms` Discord webhook (from club_webhooks). One club/system
 failing does not stop the others.
 
-Replaces the three fixed-cron scripts (run_call_to_arms.py /
-run_hh_call_to_arms.py / run_kt_call_to_arms.py); those remain runnable by
-hand for manual/fallback posting but no longer post on a schedule.
+Replaces the three fixed-cron, single-club, non-club-aware scripts
+(run_call_to_arms.py / run_hh_call_to_arms.py / run_kt_call_to_arms.py,
+deleted) and their manual-fallback workflows. This workflow's own
+workflow_dispatch trigger is the manual/emergency posting path now — still
+club-aware, still resolved via club_webhooks, so it can't post to the
+wrong club's channel.
 """
 import os
 from datetime import datetime, timedelta
