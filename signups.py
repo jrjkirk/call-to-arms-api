@@ -36,6 +36,11 @@ TOW_VIBES = {"Casual", "Competitive", "Intro", "Either"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
 
+# Platform-level canonical vibe palette. Per-club vibe configuration
+# (ClubSystem.vibe_options) is chosen from this fixed set — "Intro" (drives
+# the pairing intro pre-pass) and "Standard" (baseline) are protected members.
+CANONICAL_VIBES = ["Casual", "Competitive", "Standard", "Intro", "Either"]
+
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 
 
@@ -91,6 +96,30 @@ def _get_system_config(db: Session, legacy_system_name: str) -> Optional[SystemC
         .where(SystemConfig.legacy_system_name == legacy_system_name)
         .where(SystemConfig.active == True)
     ).first()
+
+
+def _effective_vibe_config(db: Session, club_id: int, config: SystemConfig) -> tuple:
+    """The vibe options + default a signup should be validated against for
+    this club/system: the club's own ClubSystem.vibe_options override if set,
+    otherwise the platform catalogue default (config.vibe_options). Returns
+    (vibe_options, default_vibe). NULL/empty override → catalogue default, so
+    a club that hasn't customized its vibes behaves exactly as before."""
+    cs = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id,
+            ClubSystem.system_id == config.id,
+        )
+    ).first()
+    if cs is not None and cs.vibe_options:
+        options, default = cs.vibe_options, (cs.default_vibe or (cs.vibe_options[0] if cs.vibe_options else None))
+    else:
+        options, default = config.vibe_options, config.default_vibe
+    # Only canonical vibes — drops any stale/removed value (e.g. the retired
+    # "Escalation") that may still linger in catalogue data.
+    options = [v for v in (options or []) if v in CANONICAL_VIBES]
+    if default not in options:
+        default = options[0] if options else None
+    return options, default
 
 
 def _require_system_enabled(db: Session, club_id: int, system: str) -> None:
@@ -295,7 +324,8 @@ def submit_signup(
         # Catalogue-driven path (Phase 0 dual-run). See SystemConfig in
         # models.py for field meanings. Verified against the hardcoded
         # branch below for TOW/HH/KT — see seed_systems_config.py.
-        vibe = body.vibe if body.vibe in (config.vibe_options or []) else config.default_vibe
+        eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+        vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
         if config.uses_points:
             points = max(0, min(int(body.points or config.default_points), config.max_points))
         else:
@@ -547,7 +577,8 @@ def submit_prearranged(
         # pre-existing difference between the two endpoints (Kill Team
         # isn't points-based either way), preserved deliberately rather than
         # normalized, per user decision.
-        vibe = body.vibe if body.vibe in (config.vibe_options or []) else config.default_vibe
+        eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+        vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
         if config.uses_points:
             points = max(0, min(int(body.points or config.default_points), config.max_points))
         else:

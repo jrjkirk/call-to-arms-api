@@ -40,6 +40,7 @@ import call_to_arms_content as cta_content
 from pairings_engine import generate
 from systems import factions_for, icon_folder_for
 from signups import (
+    CANONICAL_VIBES,
     EXPERIENCE_OPTIONS,
     HH_VIBES,
     SCENARIO_OPTIONS,
@@ -1710,6 +1711,13 @@ def list_club_systems(
             "session_day": cs.session_day,
             "session_cadence": cs.session_cadence,
             "cadence_anchor": cs.cadence_anchor,
+            # Per-club vibe override (null = falls back to the catalogue
+            # default). The catalogue default is surfaced too so the edit
+            # form can pre-fill / show what "unset" resolves to.
+            "vibe_options": cs.vibe_options,
+            "default_vibe": cs.default_vibe,
+            "default_vibe_options": sc.vibe_options,
+            "default_default_vibe": sc.default_vibe,
         }
         for cs, sc in rows
     ]
@@ -1721,6 +1729,10 @@ class ClubSystemScheduleBody(BaseModel):
     session_day: str
     session_cadence: str
     cadence_anchor: Optional[date] = None
+    # Per-club vibe config. Omit (None) to leave unchanged; an empty list
+    # clears the override (falls back to the catalogue default).
+    vibe_options: Optional[list] = None
+    default_vibe: Optional[str] = None
 
 
 @router.post("/club-systems")
@@ -1747,6 +1759,23 @@ def update_club_system_schedule(
 
     _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
 
+    # Vibe config: omitted (None) leaves it unchanged; [] clears the override
+    # (falls back to the catalogue default); a list validates against the
+    # canonical palette and stores as this club's override.
+    vibe_fields: dict = {}
+    if body.vibe_options is not None:
+        invalid = [v for v in body.vibe_options if v not in CANONICAL_VIBES]
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid vibe(s): {invalid}. Must be from {CANONICAL_VIBES}.",
+            )
+        vibe_options = body.vibe_options or None
+        default_vibe = None
+        if vibe_options:
+            default_vibe = body.default_vibe if body.default_vibe in vibe_options else vibe_options[0]
+        vibe_fields = {"vibe_options": vibe_options, "default_vibe": default_vibe}
+
     existing = db.exec(
         select(ClubSystem).where(
             ClubSystem.club_id == user.club_id,
@@ -1759,6 +1788,7 @@ def update_club_system_schedule(
         session_day=body.session_day,
         session_cadence=body.session_cadence,
         cadence_anchor=body.cadence_anchor,
+        **vibe_fields,
     )
     if existing:
         for k, v in fields.items():
@@ -2141,6 +2171,13 @@ def list_platform_club_systems(
             "session_day": cs.session_day,
             "session_cadence": cs.session_cadence,
             "cadence_anchor": cs.cadence_anchor,
+            # Per-club vibe override (null = falls back to the catalogue
+            # default). The catalogue default is surfaced too so the edit
+            # form can pre-fill / show what "unset" resolves to.
+            "vibe_options": cs.vibe_options,
+            "default_vibe": cs.default_vibe,
+            "default_vibe_options": sc.vibe_options,
+            "default_default_vibe": sc.default_vibe,
         }
         for cs, sc in rows
     ]

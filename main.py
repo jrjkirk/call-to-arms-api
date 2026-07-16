@@ -21,7 +21,7 @@ from services import (
     ACHIEVEMENT_DESCRIPTIONS,
 )
 from auth import router as auth_router, require_user, current_user
-from signups import router as signups_router
+from signups import router as signups_router, CANONICAL_VIBES
 from league import router as league_router
 from admin import router as admin_router
 
@@ -59,12 +59,17 @@ def health():
 
 
 @app.get("/systems")
-def list_systems(session: Session = Depends(get_session)):
+def list_systems(club: Optional[str] = None, session: Session = Depends(get_session)):
     """Public read of the systems-as-data catalogue (Phase 0), for the
     frontend to fetch signup-form config (vibes/scenarios/points) instead of
     keeping its own hardcoded copies. No auth required — this is the same
     information that's currently only available as hardcoded frontend
     constants, not new access.
+
+    Optional ?club=<slug>: when given, each system's vibe options/default are
+    overridden by that club's ClubSystem config where it has set one, so the
+    signup form shows the club's own vibes. No club (or no override) → the
+    platform catalogue defaults, unchanged.
 
     Not gated by the systems_from_catalogue flag: that flag controls whether
     the backend's own signup/pairing computation uses the catalogue
@@ -74,10 +79,28 @@ def list_systems(session: Session = Depends(get_session)):
     rows = session.exec(
         select(SystemConfig).where(SystemConfig.active == True)
     ).all()
-    return [_system_dict(r) for r in rows]
+    overrides: dict = {}
+    if club:
+        club_row = session.exec(select(Club).where(Club.slug == club)).first()
+        if club_row is not None:
+            for cs in session.exec(
+                select(ClubSystem).where(ClubSystem.club_id == club_row.id)
+            ).all():
+                overrides[cs.system_id] = cs
+    return [_system_dict(r, overrides.get(r.id)) for r in rows]
 
 
-def _system_dict(r: SystemConfig) -> dict:
+def _system_dict(r: SystemConfig, club_system=None) -> dict:
+    vibe_options = r.vibe_options
+    default_vibe = r.default_vibe
+    if club_system is not None and club_system.vibe_options:
+        vibe_options = club_system.vibe_options
+        default_vibe = club_system.default_vibe or (vibe_options[0] if vibe_options else None)
+    # Only surface canonical vibes — drops any stale/removed value (e.g. the
+    # retired "Escalation") still lingering in catalogue data.
+    vibe_options = [v for v in (vibe_options or []) if v in CANONICAL_VIBES]
+    if default_vibe not in vibe_options:
+        default_vibe = vibe_options[0] if vibe_options else None
     return {
         "id": r.id,
         "slug": r.slug,
@@ -86,8 +109,8 @@ def _system_dict(r: SystemConfig) -> dict:
         "uses_points": r.uses_points,
         "default_points": r.default_points,
         "max_points": r.max_points,
-        "vibe_options": r.vibe_options,
-        "default_vibe": r.default_vibe,
+        "vibe_options": vibe_options,
+        "default_vibe": default_vibe,
         "uses_scenarios": r.uses_scenarios,
         "scenario_options": r.scenario_options,
         "default_scenario": r.default_scenario,
@@ -109,14 +132,14 @@ def list_my_systems(user: User = Depends(require_user), session: Session = Depen
     (the full global catalogue, always public and unfiltered — used to
     populate "which system to enable" pickers, and must stay that way),
     this reflects each club's own self-service enable/disable choices."""
-    rows = session.exec(
-        select(SystemConfig)
+    pairs = session.exec(
+        select(SystemConfig, ClubSystem)
         .join(ClubSystem, ClubSystem.system_id == SystemConfig.id)
         .where(ClubSystem.club_id == user.club_id)
         .where(ClubSystem.enabled == True)
         .where(SystemConfig.active == True)
     ).all()
-    return [_system_dict(r) for r in rows]
+    return [_system_dict(r, cs) for r, cs in pairs]
 
 
 @app.get("/clubs")

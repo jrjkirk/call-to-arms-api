@@ -272,6 +272,14 @@ class ClubSystem(SQLModel, table=True):
     session_cadence: str  # "weekly" | "fortnightly"
     cadence_anchor: Optional[date] = None  # only meaningful when fortnightly
 
+    # Per-club vibe configuration. NULL = fall back to this system's
+    # SystemConfig.vibe_options/default_vibe (platform default). Set by a
+    # club's own system admin via the club Edit-system form; chosen from the
+    # canonical vibe palette (signups.CANONICAL_VIBES) so special-meaning
+    # vibes can't be mistyped.
+    vibe_options: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    default_vibe: Optional[str] = None
+
 
 class ClubWebhook(SQLModel, table=True):
     """Per-club Discord webhook URLs — Phase 3 step 1, see multitenancy-plan-v2.md.
