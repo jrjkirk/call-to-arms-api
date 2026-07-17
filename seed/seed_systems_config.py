@@ -85,7 +85,11 @@ SEED_ROWS = [
         uses_points=False,
         default_points=None,
         max_points=None,
-        vibe_options=["Standard"],  # not user-selectable; always forced
+        # Standard + Intro. Read from the catalogue by all signup/admin
+        # surfaces (no per-surface hardcoding). Intro is a signup label only —
+        # KT has no intro pre-pass (has_intro_prepass=False), so the matcher is
+        # unaffected.
+        vibe_options=["Standard", "Intro"],
         default_vibe="Standard",
         uses_scenarios=False,
         scenario_options=None,
