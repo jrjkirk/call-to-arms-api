@@ -941,7 +941,7 @@ in and take a look for real.
 
 ---
 
-## Housekeeping — PROJECT_STATUS.md sync mystery solved + auth.py docstring fixed (staged, not committed, 2026-07-16)
+## Housekeeping — PROJECT_STATUS.md sync mystery solved + auth.py docstring fixed (COMMITTED, 2026-07-16)
 
 **The recurring "PROJECT_STATUS.md shows modified" mystery is resolved.**
 Root cause confirmed by diffing the working tree against `HEAD`: commit
@@ -967,11 +967,11 @@ branch — leaving that would have kept the same misinformation right next
 to the code. Confirmed via grep: no remaining `SameSite=None` claims
 anywhere in the file.
 
-**Staged, not committed** — awaiting go-ahead.
+**Committed, pushed:** `af2af1e` on `main`. Comment/documentation-only — no `fly deploy` performed, none needed.
 
 ---
 
-## Phase 3 — Discord Webhooks panel: real visual bug found and fixed (staged, not committed, 2026-07-16)
+## Phase 3 — Discord Webhooks panel: real visual bug found and fixed (SHIPPED, 2026-07-16)
 
 Repo: `call-to-arms-web`. Follow-up to the panel shipped in `792094d`,
 which had only been contract-verified (Playwright didn't work in this
@@ -1010,9 +1010,427 @@ work, and all six sub-sections appear in the correct order with correct
 labels. Driven via real clicks against a real (throwaway, staging)
 backend, not static rendering. All test data cleaned up.
 
-**Staged, not committed** — awaiting go-ahead. This is a real bug fix for
-something already live in production (`792094d`) — worth shipping
-promptly, not letting it sit.
+**Committed, pushed, deployed:** `1c61de1` on `main`. Deploy confirmed
+via the same content-hash technique as before (CSS hash changed from
+`3.CoRoTk4N.css` to `3.DwZi4O5x.css`, since the styles genuinely
+changed; polled production until it appeared, ~15-30s). **Verified with
+a real screenshot against actual live production** — a stronger check
+than the staging one, real data, zero writes (all `GET`s): every row
+across all six webhook types renders as a single clean line, Manchester's
+5 real configured webhooks show correctly masked (`...bUAc` etc.), the
+`call_to_arms` caveat badge renders inline and legibly, no full URL
+value appears anywhere in the screenshot.
+
+**Bonus finding along the way, resolves a lingering question for free:**
+the first screenshot attempt used the raw `vercel.app`/`fly.dev` hosts
+from this repo's `CLAUDE.md` and got `authenticated: false` — root cause,
+production's real frontend/backend are the custom domains
+`www.calltoarms.app` / `api.calltoarms.app`, which ARE same-site with
+each other (unlike the raw `vercel.app`/`fly.dev` hosts, which are
+genuinely cross-site). This is exactly why `samesite="lax"` — the
+setting the housekeeping docstring fix just documented — works correctly
+for real production users: the actual deployed domains are same-site,
+even though the raw platform hostnames aren't. Once pointed at the real
+custom domains, auth worked immediately.
+
+---
+
+## Public pages club-scoping stopgap (SHIPPED, production `v85`, 2026-07-16)
+
+Not Phase 3 webhook work — a defense-in-depth fix prompted by a real,
+non-speculative risk: the platform-admin `POST /admin/platform/clubs`
+endpoint is already live in production, so a second club could be
+created at any time, and `GET /pairings`/`GET /league/factions` (the two
+genuinely unscoped public pages) would immediately start silently mixing
+both clubs' data the moment that happens. **Not the real Phase 3 fix**
+(subdomain-based club resolution) — a narrower stopgap: resolve "the one
+active club" and scope to it, raising loudly instead of guessing the
+moment that assumption breaks.
+
+**Added/changed:**
+- `database.py`: `resolve_single_active_club_id(db)` — shared helper,
+  raises `RuntimeError` unless exactly one active `Club` exists.
+- `post_league_rankings_image.py`: removed its own local duplicate of
+  this logic, now imports the shared version.
+  `post_pairings_image.py`'s `_resolve_single_club_id` (system-specific,
+  genuinely different) left untouched.
+- `league.py`'s `list_factions`: resolves the club id first (wrapped,
+  `RuntimeError` → clean `HTTPException(500, ...)`, not a raw traceback),
+  `LeagueResult` query now `scoped(...)` instead of a bare global
+  `select`.
+- `main.py`'s `get_pairings`: same pattern, club resolution happens
+  before *any* query runs (including the `PublishState` gate check), so
+  the endpoint fails loudly before touching anything the moment a second
+  club exists, regardless of which individual queries carry an explicit
+  filter. `Pairing` query now `scoped(...)`. The subsequent `Signup`
+  lookup was reasoned through rather than trusted blindly: `Signup.id` is
+  a globally-unique auto-increment PK, so filtering by IDs already
+  derived from a club-scoped `Pairing` query is safe without an
+  additional explicit filter.
+
+**Flagged, not fixed — worth remembering for the real subdomain-based
+fix later:** the `PublishState` gate query in `get_pairings` itself
+remains unscoped by `club_id` — it's protected only because the
+club-resolution call now happens before it runs, not because it carries
+its own filter. Same status quo as before this handoff on that one query
+specifically; surfaced deliberately rather than silently left or silently
+patched.
+
+**Verified on staging:** no regression for Manchester (real prearranged
+game data via `GET /pairings`, real empty-factions result via
+`GET /league/factions`); **the actual point of the handoff proven
+directly** — a second throwaway active club made both endpoints
+immediately return a clean `500 HTTPException` (not a raw traceback),
+removing it restored normal `200` behavior instantly;
+`post_league_rankings_image.py` re-verified end-to-end through the now-
+shared helper. All test data cleaned up, staging back to exactly 1 club.
+
+**Committed, pushed, deployed:** `00e1d93` on `main`, Fly release
+**`v85`**. Health check clean. Real production data confirmed correct
+post-deploy: `GET /pairings` for a real, currently-published Manchester
+week returned correct real matchups (real player names/factions);
+`GET /league/factions` returned Manchester's real non-empty faction
+list. No second club created in production (deliberately, per
+instruction) — staging's direct proof stands as sufficient evidence of
+the fail-loud behavior.
+
+**Both public endpoints now fail loudly rather than silently mixing
+data, the moment a second active club exists — closing the gap the
+platform-admin create-club endpoint had already opened in production.**
+
+---
+
+## Admin dashboards — collapsible IA restructure, both surfaces (SHIPPED, 2026-07-16)
+
+Repo: `call-to-arms-web`. Pure UX/IA work, no backend involvement — the P2
+"make `/admin` feel like a proper dashboard" handoff, then the same
+treatment applied to `/platform-admin` (Joel's call after I flagged it had
+the identical flat-section problem).
+
+**What changed.** Both pages had accumulated many flat, top-level
+`<section class="admin-section">` blocks with no hierarchy. Regrouped each
+into collapsible dashboard cards, modeled on the existing `.submit-section`
+`<details>/<summary>` idiom already used on the homepage and league pages
+(bordered card, dark uppercase-accent toggle bar, rotating chevron) — no
+new visual language invented.
+- **`/admin` → 5 groups:** Weekly Pairings & Games *(open by default — the
+  daily-use hub: per-scope signups/pairings/auto-pairings/league
+  results)*, Players & Blocks, Systems & Schedule, Discord Integrations
+  (webhooks + post-achievement), Admins & Delegates.
+- **`/platform-admin` → 3 groups:** Club Management *(open — clubs table +
+  create-club)*, Game Systems, and the per-club **"Managing: {club}"**
+  panel *(dynamic title, opens when a club is selected, still gated on
+  `{#if selectedClub}`)*.
+
+**Layout/IA only — provably content-preserving.** For each file, a
+normalized multiset line-diff of `HEAD` vs. the change confirmed the *only*
+removals were the redundant single-member section headings (their text
+moved into the group summaries) and the old section comments; the only
+additions were `<details>`/`<summary>` wrappers + CSS. The per-section
+`{#if adminMe.is_super_admin}` gates on `/admin` were *consolidated* into
+one gate over the super-only groups (identical behavior — a non-super
+scope-admin still sees exactly Pairing Blocks + their scope cards). **Zero**
+`onclick`/`onchange`/`bind:`/`{#each}`/`fetch`/button/select lines changed
+in either file. `npm run build` clean for both.
+
+**Visually verified with real Playwright screenshots** — following the new
+"Playwright now works, use it" guidance in Housekeeping below, the first
+frontend handoff to actually do so. Both admin pages are auth-gated (and
+`/platform-admin` needs `is_platform_admin`), so I drove the real
+client-rendered pages against a fully route-stubbed backend: captured every
+group collapsed, each expanded individually, and — for `/platform-admin` —
+clicked a club's "Manage" to confirm the dynamic "Managing: {club}" group
+appears and renders the full per-club panel. All groups render, collapse/
+expand works, no page errors. (Chromium launches fine here now; the earlier
+handoffs' "won't launch" blocker is resolved.)
+
+**Not verified: end-to-end *actions* against the live backend** — the
+stubbed render proves layout + that every control is present and wired, but
+actually granting a scope / toggling a system / editing a webhook /
+creating a club against production needs Joel's authenticated session.
+Recommend a quick click-through on the deployed preview. The
+content-preservation diff + clean build are the substitute evidence that
+behavior is unchanged.
+
+**Committed, pushed (Vercel auto-deploys `main`, no Fly release — frontend
+only):** `/admin` = **`f71f0e5`**, `/platform-admin` = **`8affc5f`**, both
+on `main`. Each is a single self-contained commit, trivially revertable if
+anything reads wrong once seen with real data.
+
+---
+
+## Platform-admin club editing — `PATCH /admin/platform/clubs/{id}` + Manage-panel form (SHIPPED, production `v97`, 2026-07-16)
+
+Spans both repos. Lets a platform admin rename a club and edit its slug,
+timezone, contact email, and leagues flag from the platform-admin Manage
+panel — previously clubs could only be created and (de)activated, never
+edited.
+
+**Backend (`call-to-arms-api`, `b60b9c9`, Fly `v97`):** new
+`PATCH /admin/platform/clubs/{club_id}`, platform-admin-gated, partial
+update (each field only touched when present in the body — same pattern as
+`PATCH /admin/players/{id}`). Active state deliberately stays on the
+separate `.../active` endpoint. Slug is validated as a hostname-safe label
+(lowercased/trimmed, `[a-z0-9]` with internal hyphens, no leading/trailing
+hyphen) and for global uniqueness excluding self, because it's the club's
+`<slug>.calltoarms.app` subdomain identifier and how the frontend resolves
+which club a visitor is on. **Only `clubs.slug` stores the value; every
+other table references a club by `club_id`, so a slug change is a
+single-column update with no data cascade — the only real-world impact is
+external URLs/bookmarks.**
+
+**Backend gap flagged, not fixed:** `create_club` does slug *uniqueness*
+but no slug *format* validation — only this new PATCH does. Left as-is
+rather than widening scope; worth converging (share the `_SLUG_RE` check
+into create too) in a later pass.
+
+**Frontend (`call-to-arms-web`, `61ff925`, Vercel auto-deploy):** an "Edit
+details" sub-section in the Manage panel, pre-filled from the selected club
+on select; on save it re-syncs to the server-normalized values (e.g. a
+lowercased slug) and reloads the clubs list, so the "Managing: {name}"
+panel title and the clubs table update immediately. Inline gold warning
+whenever the slug field diverges from the club's current slug, naming the
+new `<slug>.calltoarms.app` and the old slug that will stop resolving.
+
+**Verified.** Backend: TestClient against staging — full + partial updates,
+slug clash → 409, invalid slug → 422, empty name → 422, email-clear-to-
+null, slug normalization, unknown club → 404; a throwaway temp club used
+throughout, Manchester left byte-untouched, temp club cleaned up.
+Production post-deploy: `/health` 200, `PATCH .../clubs/1` returns 401
+unauthenticated (exists + gated, not 404). Frontend: real Playwright drive
+against a mutable stub — pre-fill correct, slug warning shows on change,
+correct PATCH body sent
+(`{name,slug,timezone,contact_email,leagues_enabled}`), and both the panel
+title and clubs table refresh to the new name/slug after save, no page
+errors. **Not exercised: a real platform-admin edit against production**
+(needs Joel's session) — the staging TestClient proof + production gating
+check stand in.
+
+**Follow-up (`call-to-arms-web`, `1f2549c`, frontend-only):** dropped the
+Timezone field from both the Create Club and Edit details forms — it's
+always `Europe/London`, so the input was noise. The forms no longer send
+`timezone`; the backend `Club` model / `ClubCreateBody` still default it to
+`Europe/London`, and PATCH is partial-update so existing clubs' timezone is
+untouched. No backend change, no Fly release. `PlatformClub.timezone` kept
+in the TS type since the API still returns it. Re-verified with Playwright:
+both forms render without the field, edit flow still works, PATCH body no
+longer carries `timezone`, no page errors.
+
+---
+
+## Configurable, club-aware call-to-arms scheduling (SHIPPED, production `v98`, 2026-07-16)
+
+Spans both repos. Clubs can now configure **how and when** their weekly
+"Call to Arms" sign-up post fires, per system, instead of the three
+hardcoded fixed-cron scripts. Modeled directly on the auto-pairings
+feature. Both design choices were Joel's: **per-club webhook** (from the
+admin Webhooks panel, making the `call_to_arms` webhook type live — it was
+a documented no-op before) and **replace** the fixed crons.
+
+**Backend (`call-to-arms-api`, `c851500`, Fly `v98`):**
+- `GET`/`POST /admin/call-to-arms-settings` (system-scope-gated) — per-club,
+  per-system `{enabled, days_before (default 3), time (default 12:00)}` in
+  `club_settings`, mirroring the auto-pairings-settings endpoints.
+- `week_logic._is_call_to_arms_due` — enabled + last-week dedup + 90-min
+  fire window, but scheduled on `next_session_date − days_before` so it
+  tracks each club's `ClubSystem.session_day` rather than an absolute
+  weekday. "3 days before Wednesday" reproduces the old Sunday TOW post and
+  self-adjusts if a club changes its session day.
+- `run_call_to_arms_check.py` — new hourly scheduler (mirror of
+  `run_auto_pairings_check.py`): per enabled `club_system`, if due, posts to
+  that club's `call_to_arms` webhook resolved via `resolve_webhook_url`,
+  then records `last_week` for idempotency. Skips loudly (no post) if the
+  webhook isn't configured — DB-only, no env fallback, matching the
+  signups.py read-path convention.
+- The three posting scripts (`run_call_to_arms.py` / `_hh_` / `_kt_`)
+  refactored to take an explicit `webhook_url`/`app_url`, env-var defaults
+  preserved so their `__main__` manual path still works. Message content
+  unchanged.
+- Workflows: new `call-to-arms-check.yml` (hourly); the three fixed-cron
+  workflows converted to `workflow_dispatch`-only (manual fallback, no
+  longer scheduled).
+- Verified on staging (Discord posting stubbed): due-check edge cases,
+  per-system webhook routing, settings round-trip + validation
+  (days_before 0–14, HH:MM), and a full scheduler run — posts once to the
+  club's webhook, records `last_week`, idempotent on re-run. Production
+  post-deploy: `/health` 200, `GET /admin/call-to-arms-settings` 401
+  unauthenticated (exists + gated).
+
+**Frontend (`call-to-arms-web`, `7e1da17`, Vercel):** a "Call to Arms"
+sub-section in each system's scope card on `/admin`, next to Auto-Pairings
+(days-before / time / enabled + Save), backed by the new endpoints. Verified
+with Playwright: renders, pre-fills, saves the correct body, no page errors.
+
+**⚠ Required cutover action (nothing posts until this is done):** the old
+auto-crons are off, and the new mechanism only posts when a system is
+**enabled** in the new `/admin` Call to Arms config. So for each system that
+should keep posting: (1) confirm its `call_to_arms` webhook is set under
+Discord Integrations, (2) tick **Enabled**, set days-before/time, Save.
+Until then there are no scheduled call-to-arms posts (the three
+`*-call-to-arms` workflows remain runnable by hand as a fallback). Also
+**not yet exercised: a real post against production** — the staging
+scheduler proof stands in; recommend enabling one system and watching the
+next hourly run / using the manual workflow to confirm.
+
+---
+
+## Discord Integrations: club-scoped webhooks + cleanup (SHIPPED, production `v99`, 2026-07-16)
+
+Spans both repos. The admin Discord Integrations panel was showing every
+system and every webhook type to every club (e.g. Yorkshire saw TOW/HH/KT
+and league/achievement webhooks it doesn't run). Now it reflects what the
+club actually does.
+
+**Backend (`call-to-arms-api`, `bfa1b5e`, Fly `v99`):**
+- `GET /admin/webhooks` lists per-system webhooks only for the club's
+  **enabled** `club_systems` (not the whole catalogue), and the club-level
+  **league_result / league_rankings / achievement** webhooks only when the
+  club has `leagues_enabled`. `POST /admin/webhooks` gained matching
+  validation (reject a disabled system, or a league/achievement type when
+  leagues are off).
+- Removed the redundant manual achievement endpoints
+  (`GET /admin/achievements/options`, `POST /admin/achievements/post-discord`)
+  — achievements already auto-post on league-result submission via
+  `services.post_discord_achievement`, which (with `LEAGUE_ANNOUNCED_
+  ACHIEVEMENTS`) stays for that path; the admin.py import was trimmed.
+- Verified on staging: leagues-on club with mixed enabled systems shows
+  only its enabled systems + all three club-level types; leagues-off club
+  shows only its enabled systems and no club-level types; POST rejects
+  disabled-system and league-when-off, accepts league-when-on.
+
+**Frontend (`call-to-arms-web`, `3c570be`, Vercel):** both webhook `{#each}`
+loops filter to the types actually returned (no empty headings); relabeled
+for consistency — **Pairings image → Pairings post**, **Weekly reminder →
+Call to Arms post**, **League rankings image → League rankings post**
+(Signup notifications / League result / Achievement announcements
+unchanged); removed the stale call_to_arms "does not yet change behavior"
+badge (it drives real posting now); and removed the redundant **Post
+Achievement to Discord** section. Playwright-verified both club scenarios,
+no errors.
+
+**Depends on `leagues_enabled` being set correctly per club.** Manchester
+is `true`; **Yorkshire/Outpost must be `leagues_enabled = false`** for the
+league/achievement webhooks to disappear for them — set it via the
+platform-admin Edit-details form (the club-editing feature two entries up).
+This deliberately uses the `leagues_enabled` flag rather than a hardcoded
+Manchester id, so it stays multi-club-correct. (Note: the frontend league
+*nav tab* still uses a hardcoded `club_id === 1` check — a separate,
+pre-existing spot that could later move to the same flag.)
+
+---
+
+## Editable call-to-arms message templates (SHIPPED, production `v100`, 2026-07-16)
+
+Spans both repos. Clubs can now edit the call-to-arms **message text** per
+system, done carefully so the dynamic bits Joel flagged (TOW mission
+selection + terrain image, session date, signup URL) keep working.
+
+**Design — one module, two layers (`call_to_arms_content.py`, new):**
+- **Editable text:** per-system default templates, tokenized. Clubs override
+  per system (`club_settings` key `call_to_arms_<slug>_template`); an empty
+  or default-equal template clears the override so they track the default.
+- **Code functions (not editable):** `build_context()` picks the random TOW
+  mission + resolves its terrain image, and computes session date / signup
+  URL, injecting them via tokens — so editing surrounding text can't break
+  mission selection or the image. Tokens: `{session_date}`, `{signup_url}`
+  (all systems) and `{scenario_name}`, `{secondary_objectives}` (scenario
+  systems). `render()` uses plain replacement, so stray braces in edited
+  text never raise and unknown tokens pass through.
+
+**Backend (`call-to-arms-api`, `060c678`, Fly `v100`):** moved TOW mission
+data + all message text out of the three scripts into the module.
+`run_call_to_arms_check.py` resolves each club's template (override or
+default) and renders it. The three standalone scripts are now thin
+manual-fallback wrappers that delegate to the module (no duplicated text;
+`run_hh_call_to_arms.HH_SESSION_ANCHOR` kept for `seed_clubs.py`).
+`GET/POST /admin/call-to-arms-settings` carry `template` /
+`default_template` / `tokens`.
+
+**Frontend (`call-to-arms-web`, `60f8e8b`, Vercel):** the Call to Arms
+admin section gains a monospace message editor prefilled from the endpoint,
+the available tokens as chips, and a Reset-to-default button.
+
+**Key safety property, verified:** a default (unedited) template renders
+**byte-identical** to the pre-refactor scripts for all 19 TOW scenarios +
+HH + KT — so unedited clubs post exactly what they did before. Also
+verified: endpoint override/revert-on-default/revert-on-empty round-trip;
+the scheduler posts a club's *edited* template rendered; edited-template
+safety (unknown tokens left as-is); frontend prefill/chips/reset/save.
+
+**Follow-up — image/attachment control (SHIPPED, production `v101`,
+`09023b6` / `1e6cb2a`):** per-system image control alongside the template.
+Stored in `call_to_arms_<slug>_image`: unset = the built-in image (mission
+terrain for scenario systems, none otherwise — unchanged default); `"none"`
+= text only; a URL = a custom image attached as a Discord **embed** (chosen
+over file upload — no storage infra; the club hosts the image). `post()`
+takes `image_mode`/`image_url`; `parse_image_setting`/`image_setting_value`
+centralize the stored-value↔(mode,url) mapping; GET/POST carry
+`image_mode` / `image_url` / `supports_mission_image`. Admin UI: three
+radios (Mission terrain image / No image / Custom image URL) with the URL
+input shown only for custom. Verified: default still attaches the mission
+file, none posts text, custom posts an embed; endpoint round-trip +
+validation (custom needs http(s), bad mode 422, default clears). Mission
+image data stays code-defined; this controls *whether/which* image, not the
+mission pool.
+
+---
+
+## Systems/vibes overhaul + escalation removal (SHIPPED, production `v103`, 2026-07-16)
+
+Four related changes across both repos.
+
+**1. Escalation removed (defunct league).** Scrubbed from the backend:
+`SystemConfig.escalation_priority`, the `"Escalation"` TOW vibe,
+`_escalation_priority_penalty()` + its `esc_p` slot in the pairing tuple
+(now **9-tuple**), the escalation candidate-sort tiebreak, the `vibe_w`
+branch, the render colour, seed/body fields. Safe by construction — those
+were only non-zero for `"Escalation"`-vibe signups, so with that vibe gone
+they were constant. **Proven: `generate()` is BYTE-IDENTICAL before/after
+on a synthetic escalation-free signup set** (intro pre-pass + regular
+matching). Frontend: dropped it from vibe lists, the signup-form filter,
+the pairings accent, the platform-admin checkbox. The vestigial
+`systems.escalation_priority` DB column is left (unused). Stale catalogue
+data (`SystemConfig.vibe_options` still contained `"Escalation"`) scrubbed
+on staging + prod, and `_system_dict`/`_effective_vibe_config` now filter
+vibe options to the canonical palette so it can't leak from any remaining
+stale data. (Commits `8ba5efa` backend / `a32d60a` frontend.)
+
+**2. Platform-admin Game Systems is edit-only.** System creation removed
+from the UI (systems are created in code); the form shows only when a
+system is picked via its Edit button. (`22d9e60`.)
+
+**3. Vibe selection is a fixed palette, not free text.** Canonical vibes
+(`Casual/Competitive/Standard/Intro/Either`, with `Intro`/`Standard`
+protected) are `signups.CANONICAL_VIBES` (backend) and `CANONICAL_VIBES` in
+`systemsConfig.ts` (frontend). Platform-admin and club vibe editing both use
+checkboxes from this set, so special-meaning vibes can't be mistyped.
+
+**4. Per-club vibe config (`v103` / `a3ce1df` backend, `6cabb69` frontend).**
+`ClubSystem` gains nullable `vibe_options`/`default_vibe` (NULL = fall back
+to the catalogue default, so unset clubs are unchanged). `GET/POST
+/admin/club-systems` read/write them; `GET /systems?club=<slug>` and
+`/systems/mine` merge each club's override; `signups.py` validates a
+submitted vibe against the club's effective config. Club admin UI: the
+per-system schedule config is now behind an **Edit** button (+ "Add a
+system" picker), with a Vibes section — "use platform default" by default,
+or a custom canonical selection. The signup form passes `?club=` (from the
+hostname) so it shows the club's vibes.
+
+**Prod migration:** `club_systems.vibe_options`/`default_vibe` added
+(nullable) via `fly ssh` **before** the code deploy, so the new
+ClubSystem-querying code never hit missing columns. Verified end-to-end on
+staging (fallback == unchanged; override stored + reflected in
+`/systems?club=` and the list; invalid vibe → 422; empty clears;
+schedule-only edit leaves vibes untouched) and prod (`/health` 200,
+`/systems` has no Escalation, `/systems?club=manchester` works). Frontend
+Playwright-verified (edit-system form, vibe checkboxes, homepage
+`/systems?club=`).
+
+**Flagged, not changed:** the frontend league nav tab still uses a
+hardcoded `club_id === 1` check (noted last session too) — could move to
+`leagues_enabled`. And the Kill Team pairings-grid "Intro" exclusion in
+`admin/+page.svelte` is still preserved as-is (pre-existing, flagged in its
+comment).
 
 ---
 
@@ -1053,6 +1471,24 @@ promptly, not letting it sit.
   and the `scoped()` "act as club X" platform-admin override. **Phase 3**
   (per-club Discord + public page scoping), **Phase 4** (second club
   onboarding) — not started.
+- **Frontend admin surfaces (2026-07-16, shipped):** both `/admin` and
+  `/platform-admin` were restructured from flat section stacks into
+  collapsible dashboard groups (`f71f0e5`, `8affc5f`), and the
+  platform-admin Manage panel gained full club editing via
+  `PATCH /admin/platform/clubs/{id}` (`b60b9c9` / `61ff925`, Fly `v97`).
+  See the three "Admin dashboards …" / "Platform-admin club editing …"
+  sections just above.
+- **Call-to-arms scheduling (2026-07-16, shipped, `v98` / `7e1da17`):**
+  clubs configure enable + days-before + time per system on `/admin`; an
+  hourly check posts to their per-club webhook. **Pending Joel's cutover
+  action** — see the "Configurable, club-aware call-to-arms scheduling"
+  section above; nothing posts until each system is enabled in the new
+  config.
+- **Release-number drift:** this doc's blow-by-blow last recorded Fly
+  release `v85`, but production is now at **`v103`** (the systems/vibes-overhaul
+  deploy). Releases `v86`–`v96` happened outside what's captured here and
+  aren't reconstructed in this doc — treat the per-section version tags as
+  accurate for the work they describe, not as a gapless sequence.
 
 ## Next up
 
@@ -1067,6 +1503,10 @@ scoped/confirmed yet):
   second club with a different system mix exists.
 - The `scoped()` "act as club X" override for platform-admin support access
   — not built yet, no platform-admin UI depends on it yet either.
+- **Small, low-risk cleanup:** `create_club` validates slug uniqueness but
+  not slug *format*, whereas the new `PATCH /admin/platform/clubs/{id}`
+  does (`_SLUG_RE`). Converge them — a club created with a non-hostname-safe
+  slug can't be served on its subdomain. Extract the shared check.
 
 **Correction, 2026-07-15:** `run_auto_pairings_check.py` is already
 genuinely club-aware (confirmed by reading the actual code, not prior

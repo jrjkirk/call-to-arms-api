@@ -201,9 +201,13 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     elo_history = build_elo_history(player_id, results)
 
     rank = None
-    if rating_row is not None:
+    if rating_row is not None and player.active:
         higher = session.exec(
-            scoped(LeagueRating, user.club_id).where(LeagueRating.rating > rating_row.rating)
+            select(LeagueRating)
+            .join(Player, Player.id == LeagueRating.player_id)
+            .where(LeagueRating.club_id == user.club_id)
+            .where(Player.active == True)
+            .where(LeagueRating.rating > rating_row.rating)
         ).all()
         rank = len(higher) + 1
 
