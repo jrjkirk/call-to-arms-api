@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from fastapi import HTTPException
 from sqlmodel import Session
 
 from database import scoped
 from models import Pairing, PairingBlock, Signup, SystemConfig
-from signups import _get_system_config, _systems_from_catalogue_enabled
+from signups import _get_system_config
 
 
 def _normalize_name(n: str) -> str:
@@ -217,12 +218,9 @@ def _eta_bucket_diff(a: MatcherSignup, b: MatcherSignup) -> int:
 
 
 def _scenario_diff_tow(
-    a: MatcherSignup, b: MatcherSignup, system: str, config: Optional[SystemConfig] = None
+    a: MatcherSignup, b: MatcherSignup, system: str, config: SystemConfig
 ) -> int:
-    if config is not None:
-        if not config.uses_scenarios:
-            return 0
-    elif system != "The Old World":
+    if not config.uses_scenarios:
         return 0
     a_sc = (a.row.scenario or "").strip()
     b_sc = (b.row.scenario or "").strip()
@@ -255,7 +253,7 @@ def _pair_dist(
     seen_extended: set,
     blocks: set,
     last_opp_pairs: set,
-    config: Optional[SystemConfig] = None,
+    config: SystemConfig,
 ) -> tuple:
     a_pid = ms.row.player_id
     b_pid = other.row.player_id
@@ -288,10 +286,7 @@ def _pair_dist(
     de = abs(ms.preference[1] - other.preference[1])
     eta_b = _eta_bucket_diff(ms, other)
     scen_d = _scenario_diff_tow(ms, other, system, config)
-    if config is not None:
-        dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
-    else:
-        dp = 0 if system == "Kill Team" else abs(ms.preference[2] - other.preference[2])
+    dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
 
     return (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)
 
@@ -314,11 +309,13 @@ def generate(
     persist=True  → writes Pairing rows, commits, returns list[Pairing].
     persist=False → dry run, returns list[dict] with no DB writes.
     """
-    # Phase 0 dual-run: catalogue-driven behavior when the flag is on and a
-    # matching SystemConfig row exists; otherwise every hardcoded branch
-    # below is left completely untouched, gated on `config is None`.
-    catalogue_on = _systems_from_catalogue_enabled(session)
-    config: Optional[SystemConfig] = _get_system_config(session, system) if catalogue_on else None
+    # Catalogue-driven behavior. The SystemConfig row is the single source of
+    # truth for per-system rules (scenarios, points, intro pre-pass, history
+    # windows); every real system has a catalogue row, so a missing one is an
+    # error rather than a reason to fall back to hardcoded values.
+    config: SystemConfig = _get_system_config(session, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -356,11 +353,8 @@ def generate(
         for k, su in seen_names.items()
     ]
 
-    # 3. Intro pre-pass (TOW and HH only, never KT)
-    if config is not None:
-        has_intro_prepass = config.has_intro_prepass
-    else:
-        has_intro_prepass = system in ("The Old World", "The Horus Heresy")
+    # 3. Intro pre-pass (per-system, via the catalogue — TOW and HH today)
+    has_intro_prepass = config.has_intro_prepass
 
     intro_pairs: list = []
     if has_intro_prepass:
@@ -423,13 +417,8 @@ def generate(
         )
     )
 
-    # 5. Recent / extended play history
-    if config is not None:
-        recent_w, extended_w = config.recent_weeks, config.extended_weeks
-    elif system == "The Horus Heresy":
-        recent_w, extended_w = 6, 12
-    else:
-        recent_w, extended_w = 3, 6
+    # 5. Recent / extended play history (windows per-system, via the catalogue)
+    recent_w, extended_w = config.recent_weeks, config.extended_weeks
 
     seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
     seen_extended = previous_pairs_recent(session, system, week, extended_w, club_id)

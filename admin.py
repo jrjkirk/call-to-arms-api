@@ -42,8 +42,6 @@ from systems import factions_for, icon_folder_for
 from signups import (
     CANONICAL_VIBES,
     EXPERIENCE_OPTIONS,
-    SCENARIO_OPTIONS,
-    SYSTEMS,
     _effective_vibe_config,
     _get_system_config,
     _require_system_enabled,
@@ -1105,17 +1103,7 @@ def _system_config(db: Session, club_id: int, system: str) -> dict:
     an explicit system-name check rather than derived from it)."""
     config = _get_system_config(db, system)
     if config is None:
-        # Unknown/uncatalogued system: same TOW-shaped fallback this function
-        # always returned for "any future system" before the catalogue existed.
-        return {
-            "show_points": True,
-            "default_points": 2000,
-            "show_scenario": True,
-            "show_standby": True,
-            "show_can_demo": True,
-            "vibe_options": ["Casual", "Competitive", "Either", "Intro"],
-            "vibe_fixed": None,
-        }
+        raise HTTPException(status_code=422, detail="Unknown system.")
     vibe_options, _default_vibe = _effective_vibe_config(db, club_id, config)
     return {
         "show_points": config.uses_points,
@@ -1186,17 +1174,10 @@ def admin_signup_patch(
 
     provided = body.model_fields_set
     config = _get_system_config(db, su.system)
-    if config is not None:
-        uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
-        vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
-    else:
-        # Uncatalogued system (shouldn't happen for real data — same fallback
-        # shape _system_config uses for "any future system" not yet seeded).
-        is_kt = su.system == "Kill Team"
-        is_hh = su.system == "The Horus Heresy"
-        uses_points, uses_scenarios, allows_demo = not is_kt, not (is_kt or is_hh), not is_kt
-        vibe_options = ["Standard"] if is_kt else (["Intro", "Standard"] if is_hh else ["Casual", "Competitive", "Either", "Intro"])
-        default_vibe = "Standard" if (is_kt or is_hh) else "Casual"
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
+    vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
 
     if "faction" in provided:
         f = body.faction
@@ -1264,7 +1245,8 @@ def admin_signup_create(
     admin corrections).
     Per-system defaults and normalisation match the regular POST /signups exactly.
     """
-    if body.system not in SYSTEMS:
+    config = _get_system_config(db, body.system)
+    if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
 
     _require_system_scope(body.system, user, db)
@@ -1287,20 +1269,9 @@ def admin_signup_create(
             detail="This player is already signed up for this week — edit their existing row instead.",
         )
 
-    config = _get_system_config(db, body.system)
-    if config is not None:
-        uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
-        default_points, max_points = config.default_points, config.max_points
-        vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
-    else:
-        # Uncatalogued system (shouldn't happen for real data) — same
-        # fallback shape as admin_signup_patch/_system_config.
-        is_kt = body.system == "Kill Team"
-        is_hh = body.system == "The Horus Heresy"
-        uses_points, uses_scenarios, allows_demo = not is_kt, not (is_kt or is_hh), not is_kt
-        default_points, max_points = (3000 if is_hh else 2000), 10000
-        vibe_options = ["Standard"] if is_kt else (["Intro", "Standard"] if is_hh else ["Casual", "Competitive", "Either", "Intro"])
-        default_vibe = "Standard" if (is_kt or is_hh) else "Casual"
+    uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
+    default_points, max_points = config.default_points, config.max_points
+    vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
 
     faction = body.faction
     if faction in (None, "", "— None —"):

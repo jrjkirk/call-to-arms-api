@@ -19,19 +19,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import get_session, resolve_webhook_url, scoped
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, AppSetting, ClubSystem
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem
 from auth import admin_scopes, require_user
 from systems import SYSTEM_RULES
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
-# Legacy (non-catalogue) system-name validation, used only when the
-# systems_from_catalogue flag is off. Sourced from the hardcoded per-system
-# rules registry rather than a separate duplicate list — same three
-# legacy_system_names as before. (The catalogue-on path validates against
-# the DB catalogue instead; see submit_signup.)
-SYSTEMS = set(SYSTEM_RULES)
 EXPERIENCE_OPTIONS = {"New", "Some", "Veteran"}
+
+# Historical snapshot of the pre-catalogue hardcoded per-system values. The
+# live request path no longer uses these — the SystemConfig catalogue is the
+# source of truth (see submit_signup / pairings_engine). They remain only so
+# seed/seed_systems_config.py can cross-check that the original seed matched
+# these values; safe to delete once that historical script is retired.
+SYSTEMS = set(SYSTEM_RULES)
 TOW_VIBES = {"Casual", "Competitive", "Intro", "Either"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
@@ -77,14 +78,6 @@ class PrearrangedGameIn(SQLModel):
     eta: Optional[str] = None
     vibe: str = "Casual"
     points: Optional[int] = None
-
-
-def _systems_from_catalogue_enabled(db: Session) -> bool:
-    """Phase 0 dual-run flag. Single global on/off, per the plan doc — not
-    per-system. Off by default (missing row => False), so this is a no-op
-    until explicitly flipped in app_settings on staging."""
-    row = db.get(AppSetting, "systems_from_catalogue")
-    return (row.value if row is not None else "false").lower() == "true"
 
 
 def _get_system_config(db: Session, legacy_system_name: str) -> Optional[SystemConfig]:
@@ -299,15 +292,9 @@ def submit_signup(
 ):
     player = _require_linked_player(user, db)
 
-    catalogue_on = _systems_from_catalogue_enabled(db)
-    config = _get_system_config(db, body.system) if catalogue_on else None
-
-    if catalogue_on:
-        if config is None:
-            raise HTTPException(status_code=422, detail="Unknown system.")
-    else:
-        if body.system not in SYSTEMS:
-            raise HTTPException(status_code=422, detail="Unknown system.")
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
 
     _require_system_enabled(db, user.club_id, body.system)
 
@@ -320,44 +307,21 @@ def submit_signup(
 
     experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
 
-    if config is not None:
-        # Catalogue-driven path (Phase 0 dual-run). See SystemConfig in
-        # models.py for field meanings. Verified against the hardcoded
-        # branch below for TOW/HH/KT — see seed_systems_config.py.
-        eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
-        vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
-        if config.uses_points:
-            points = max(0, min(int(body.points or config.default_points), config.max_points))
-        else:
-            points = 0
-        if config.uses_scenarios:
-            scenario = (
-                body.scenario if body.scenario in (config.scenario_options or [])
-                else config.default_scenario
-            )
-        else:
-            scenario = None
-        can_demo = bool(body.can_demo) if config.allows_demo else False
+    # Catalogue-driven config. See SystemConfig in models.py for field meanings.
+    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+    vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
+    if config.uses_points:
+        points = max(0, min(int(body.points or config.default_points), config.max_points))
     else:
-        # Original hardcoded path — untouched, stays live while the flag is off.
-        is_hh = body.system == "The Horus Heresy"
-        is_kt = body.system == "Kill Team"
-
-        if is_kt:
-            vibe = "Standard"
-            points = 0
-            scenario = None
-            can_demo = False
-        elif is_hh:
-            vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
-            points = max(0, min(int(body.points or 3000), 10000))
-            scenario = None
-            can_demo = bool(body.can_demo)
-        else:
-            vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
-            points = max(0, min(int(body.points or 2000), 10000))
-            scenario = body.scenario if body.scenario in SCENARIO_OPTIONS else "Open Battle"
-            can_demo = bool(body.can_demo)
+        points = 0
+    if config.uses_scenarios:
+        scenario = (
+            body.scenario if body.scenario in (config.scenario_options or [])
+            else config.default_scenario
+        )
+    else:
+        scenario = None
+    can_demo = bool(body.can_demo) if config.allows_demo else False
 
     eta = (body.eta or "").strip() or None
 
@@ -524,15 +488,9 @@ def submit_prearranged(
     db: Session = Depends(get_session),
 ):
     # 1. System and week
-    catalogue_on = _systems_from_catalogue_enabled(db)
-    config = _get_system_config(db, body.system) if catalogue_on else None
-
-    if catalogue_on:
-        if config is None:
-            raise HTTPException(status_code=422, detail="Unknown system.")
-    else:
-        if body.system not in SYSTEMS:
-            raise HTTPException(status_code=422, detail="Unknown system.")
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
 
     _require_system_enabled(db, user.club_id, body.system)
 
@@ -570,33 +528,16 @@ def submit_prearranged(
             detail=f"Already signed up: {', '.join(names)}. They must drop first before being part of a pre-arranged game.",
         )
 
-    # Normalise per system
-    if config is not None:
-        # Catalogue-driven path (Phase 0 dual-run). Note this endpoint's
-        # "no points" sentinel is None, not 0 like submit_signup — that's a
-        # pre-existing difference between the two endpoints (Kill Team
-        # isn't points-based either way), preserved deliberately rather than
-        # normalized, per user decision.
-        eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
-        vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
-        if config.uses_points:
-            points = max(0, min(int(body.points or config.default_points), config.max_points))
-        else:
-            points = None
+    # Normalise per system (catalogue-driven). Note this endpoint's "no points"
+    # sentinel is None, not 0 like submit_signup — a pre-existing difference
+    # between the two endpoints (Kill Team isn't points-based either way),
+    # preserved deliberately rather than normalized, per user decision.
+    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+    vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
+    if config.uses_points:
+        points = max(0, min(int(body.points or config.default_points), config.max_points))
     else:
-        # Original hardcoded path — untouched, stays live while the flag is off.
-        is_kt = body.system == "Kill Team"
-        is_hh = body.system == "The Horus Heresy"
-
-        if is_kt:
-            vibe = "Standard"
-            points = None
-        elif is_hh:
-            vibe = body.vibe if body.vibe in HH_VIBES else "Standard"
-            points = max(0, min(int(body.points or 3000), 10000))
-        else:
-            vibe = body.vibe if body.vibe in TOW_VIBES else "Casual"
-            points = max(0, min(int(body.points or 2000), 10000))
+        points = None
 
     eta = (body.eta or "").strip() or None
 
