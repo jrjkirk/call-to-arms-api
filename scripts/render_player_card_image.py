@@ -68,7 +68,7 @@ def render_player_card_image(payload: dict) -> io.BytesIO | None:
     loss_color = "#cf5a54"
 
     fig_w_in, fig_h_in = 5.4, 7.6
-    fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=200)
+    fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=150)
     fig.patch.set_facecolor(bg_color)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, fig_w_in)
