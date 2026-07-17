@@ -2,13 +2,11 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select, or_
 
 from database import get_session, resolve_request_club_id, scoped
 from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date
-from scripts.render_player_card_image import render_player_card_image
 from systems import factions_for, icon_folder_for
 from services import (
     compute_league_record,
@@ -189,13 +187,11 @@ def _parse_week(week: str) -> datetime:
         return datetime.min
 
 
-def _build_player_detail(player_id: int, user: User, session: Session) -> Optional[dict]:
-    """Assembles the full GET /players/{id} payload. Shared by the JSON
-    route and the /card image route so both render from identical data.
-    Returns None if the player doesn't exist or isn't in the caller's club."""
+@app.get("/players/{player_id}")
+def get_player(player_id: int, user: User = Depends(require_user), session: Session = Depends(get_session)):
     player = session.get(Player, player_id)
     if player is None or player.club_id != user.club_id:
-        return None
+        raise HTTPException(status_code=404, detail="Player not found")
 
     club = session.get(Club, player.club_id)
 
@@ -359,25 +355,6 @@ def _build_player_detail(player_id: int, user: User, session: Session) -> Option
             "elo_history": elo_history,
         },
     }
-
-
-@app.get("/players/{player_id}")
-def get_player(player_id: int, user: User = Depends(require_user), session: Session = Depends(get_session)):
-    detail = _build_player_detail(player_id, user, session)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Player not found")
-    return detail
-
-
-@app.get("/players/{player_id}/card")
-def get_player_card(player_id: int, user: User = Depends(require_user), session: Session = Depends(get_session)):
-    detail = _build_player_detail(player_id, user, session)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Player not found")
-    buf = render_player_card_image(detail)
-    if buf is None:
-        raise HTTPException(status_code=404, detail="Player has no league record yet")
-    return StreamingResponse(buf, media_type="image/png")
 
 
 def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
