@@ -115,6 +115,7 @@ def _system_dict(r: SystemConfig, club_system=None) -> dict:
         "scenario_options": r.scenario_options,
         "default_scenario": r.default_scenario,
         "allows_demo": r.allows_demo,
+        "has_league": r.has_league,
         # System *rules* — sourced from the hardcoded per-system modules in
         # systems/, keyed by legacy_system_name, NOT from the (dead)
         # SystemConfig.faction_list / icon_folder DB columns. None for any
@@ -263,14 +264,15 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     # a newly-added system appears here automatically. Ordered by id for a
     # stable display order; systems the player has no signups in fall through
     # the empty-set guard below just as before.
-    systems = [
-        s.legacy_system_name
-        for s in session.exec(
-            select(SystemConfig)
-            .where(SystemConfig.active == True)
-            .order_by(SystemConfig.id)
-        ).all()
-    ]
+    active_systems = session.exec(
+        select(SystemConfig)
+        .where(SystemConfig.active == True)
+        .order_by(SystemConfig.id)
+    ).all()
+    systems = [s.legacy_system_name for s in active_systems]
+    # League-eligible systems come from the has_league capability, not a
+    # hardcoded name check — a future league system needs no code change here.
+    league_systems = {s.legacy_system_name for s in active_systems if s.has_league}
     recent_games_by_system: dict[str, list] = {}
 
     for system in systems:
@@ -326,7 +328,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
             opp_player_id = opp_signup.player_id if opp_signup else None
 
             result_str = None
-            if system == "The Old World" and opp_player_id is not None:
+            if system in league_systems and opp_player_id is not None:
                 week_date = _parse_week(p.week)
                 if week_date is not datetime.min:
                     lr = tow_lookup.get((frozenset({player_id, opp_player_id}), week_date.date()))

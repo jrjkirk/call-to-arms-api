@@ -1843,6 +1843,7 @@ class SystemConfigCreateBody(BaseModel):
     default_scenario: Optional[str] = None
     allows_demo: bool = False
     has_intro_prepass: bool = False
+    has_league: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
     # faction_list / icon_folder are NOT accepted here. A system's factions
@@ -1870,6 +1871,7 @@ class SystemConfigEditBody(BaseModel):
     default_scenario: Optional[str] = None
     allows_demo: bool = False
     has_intro_prepass: bool = False
+    has_league: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
     active: bool = True

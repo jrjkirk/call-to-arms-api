@@ -226,6 +226,12 @@ class SystemConfig(SQLModel, table=True):
     allows_demo: bool = False
     has_intro_prepass: bool = False
 
+    # Whether this system runs a league (ELO ladder + results). Replaces the
+    # hardcoded `system == "The Old World"` league checks so league
+    # eligibility is per-system data, not a name check. Distinct from
+    # Club.leagues_enabled, which gates whether a club runs leagues at all.
+    has_league: bool = False
+
     # Pairing-history lookback windows (weeks). HH runs fortnightly so its
     # windows are roughly double TOW/KT's weekly cadence — see
     # pairings_engine.generate(): recent_w, extended_w = (6, 12) for HH,
