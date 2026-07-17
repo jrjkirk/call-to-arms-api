@@ -13,6 +13,9 @@ on:
       week:
         description: 'Week (DD/MM/YYYY)'
         required: true
+      club:
+        description: 'Club slug (leave blank if only one club runs this system)'
+        required: false
 
 jobs:
   post:
@@ -28,6 +31,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           SYSTEM: ${{ inputs.system }}
           WEEK: ${{ inputs.week }}
+          CLUB: ${{ inputs.club }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DISCORD_TOW_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_TOW_PAIRINGS_WEBHOOK_URL }}
           DISCORD_HH_PAIRINGS_WEBHOOK_URL: ${{ secrets.DISCORD_HH_PAIRINGS_WEBHOOK_URL }}
