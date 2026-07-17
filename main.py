@@ -193,6 +193,8 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     if player is None or player.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="Player not found")
 
+    club = session.get(Club, player.club_id)
+
     rating_row = session.exec(
         scoped(LeagueRating, user.club_id).where(LeagueRating.player_id == player_id)
     ).first()
@@ -338,6 +340,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
 
     return {
         "player": player,
+        "club": {"name": club.name, "slug": club.slug} if club else None,
         "discord": discord_info,
         "titles": player_titles(player),
         "achievements": achievements_detailed,
