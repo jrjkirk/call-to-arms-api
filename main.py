@@ -259,10 +259,21 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
             signup_ids_by_system.setdefault(s.system, set()).add(s.id)
             signup_by_id[s.id] = s
 
-    SYSTEMS = ["The Old World", "The Horus Heresy", "Kill Team"]
+    # Systems come from the active catalogue rather than a hardcoded list, so
+    # a newly-added system appears here automatically. Ordered by id for a
+    # stable display order; systems the player has no signups in fall through
+    # the empty-set guard below just as before.
+    systems = [
+        s.legacy_system_name
+        for s in session.exec(
+            select(SystemConfig)
+            .where(SystemConfig.active == True)
+            .order_by(SystemConfig.id)
+        ).all()
+    ]
     recent_games_by_system: dict[str, list] = {}
 
-    for system in SYSTEMS:
+    for system in systems:
         sys_signup_ids = signup_ids_by_system.get(system, set())
         if not sys_signup_ids:
             recent_games_by_system[system] = []

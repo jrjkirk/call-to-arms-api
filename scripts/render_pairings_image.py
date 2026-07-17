@@ -53,11 +53,15 @@ def _icon_png_path(faction_name: str | None) -> str | None:
     # a repo-root asset, not a sibling of this file, so go up one level.
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     icons_root = os.path.join(repo_root, "icons")
-    search_dirs = [
-        icons_root,
-        os.path.join(icons_root, "TOW"),
-        os.path.join(icons_root, "HH"),
-        os.path.join(icons_root, "KT"),
+    # Search the root plus every registered system's icon folder, sourced from
+    # the systems/ registry rather than a hardcoded TOW/HH/KT list — adding a
+    # system module makes its folder searchable automatically. All folders are
+    # searched regardless of which system a faction belongs to (unchanged
+    # behaviour; icon filenames are unique across systems in practice).
+    from systems import all_icon_folders
+
+    search_dirs = [icons_root] + [
+        os.path.join(icons_root, folder) for folder in all_icon_folders()
     ]
     for ext in ("png", "jpg"):
         for d in search_dirs:
@@ -106,6 +110,10 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
     bye_color = "#8a8270"
     border_default = "#5a4a26"
 
+    # Per-(system, vibe) accent colours. A system/vibe not listed here (e.g. a
+    # newly-added system) falls back to border_default via _accent below — a
+    # graceful default, not a crash. Extend this map to give a new system its
+    # own accent colours.
     accent_by_type = {
         ("The Old World", "intro"):       "#6eb46e",
         ("The Old World", "casual"):      "#c9a14a",

@@ -102,6 +102,10 @@ Complete the online form if you are coming this Wednesday {session_date}. The re
 
 
 def default_template(system: str) -> str:
+    # System copy is code-owned content (like the systems/ faction registry),
+    # not catalogue data. A system with no entry here degrades gracefully to
+    # an empty default template (no crash); adding a new system means adding
+    # its DEFAULT_TEMPLATES / SCENARIO_DATA entry above.
     return DEFAULT_TEMPLATES.get(system, "")
 
 

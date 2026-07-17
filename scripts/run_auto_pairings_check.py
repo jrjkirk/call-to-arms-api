@@ -16,9 +16,6 @@ from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
 from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
 
-SYSTEMS = ["The Old World", "The Horus Heresy", "Kill Team"]
-
-
 def _slug(system: str) -> str:
     return system.replace(" ", "").replace("'", "")
 
@@ -44,16 +41,18 @@ def main() -> None:
     today = now_uk.date()
 
     with Session(engine) as db:
-        for system in SYSTEMS:
+        # Iterate the active catalogue directly rather than a hardcoded list,
+        # so a newly-added system is picked up automatically. Ordered by id
+        # for a stable, deterministic run order.
+        system_configs = db.exec(
+            select(SystemConfig)
+            .where(SystemConfig.active == True)
+            .order_by(SystemConfig.id)
+        ).all()
+        for system_config in system_configs:
+            system = system_config.legacy_system_name
             try:
                 slug = _slug(system)
-
-                system_config = db.exec(
-                    select(SystemConfig).where(SystemConfig.legacy_system_name == system)
-                ).first()
-                if system_config is None:
-                    print(f"[{system}] ERROR — no SystemConfig row for legacy_system_name={system!r}")
-                    continue
 
                 club_systems = db.exec(
                     select(ClubSystem)

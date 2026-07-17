@@ -42,3 +42,14 @@ def icon_folder_for(legacy_system_name: str):
     """The system's hardcoded icon directory name, or None."""
     module = SYSTEM_RULES.get(legacy_system_name)
     return module.ICON_FOLDER if module else None
+
+
+def all_icon_folders():
+    """Every registered system's icon directory name, de-duplicated and in
+    registration order. Used by the pairings-image renderer to build its
+    icon search path without hardcoding folder names — a newly-added system
+    module is picked up automatically."""
+    seen: dict[str, None] = {}
+    for m in _MODULES:
+        seen.setdefault(m.ICON_FOLDER, None)
+    return list(seen)
