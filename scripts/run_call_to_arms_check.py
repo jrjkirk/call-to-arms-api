@@ -21,29 +21,11 @@ from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
 
 import call_to_arms_content as cta_content
-from database import engine, resolve_webhook_url
-from models import ClubSetting, ClubSystem, Mission, SystemConfig
+from database import engine, resolve_webhook_url, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
+from models import ClubSystem, Mission, SystemConfig
 from week_logic import _is_call_to_arms_due, is_session_week, next_session_date
 
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
-
-
-def _slug(system: str) -> str:
-    return system.replace(" ", "").replace("'", "")
-
-
-def _get_setting(db: Session, club_id: int, key: str, default: str | None = None) -> str | None:
-    row = db.get(ClubSetting, (club_id, key))
-    return row.value if row is not None else default
-
-
-def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
-    row = db.get(ClubSetting, (club_id, key))
-    if row is None:
-        row = ClubSetting(club_id=club_id, key=key, value=value)
-    else:
-        row.value = value
-    db.add(row)
 
 
 def main() -> None:

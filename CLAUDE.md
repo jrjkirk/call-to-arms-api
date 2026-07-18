@@ -111,11 +111,9 @@ remove this failure mode entirely (not done yet).
 
 **Before writing to any table, add it to `WRITE_ALLOWED_TABLES` with a comment explaining the use case.**
 
-Current allow-list (in `database.py`):
-- `"users"` — created on Discord login, updated on claim/create-profile
-- `"signups"` — signup CRUD
-- `"pairings"` — drop-out flow deletes prearranged pairings
-- `"players"` — new player creation via `POST /auth/create-profile`
+The allow-list lives in `database.py` (each entry carries an inline comment on
+its use case) — read it there rather than duplicating it here, so it can't
+drift out of date.
 
 ## Dev loop
 

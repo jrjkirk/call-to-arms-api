@@ -10,29 +10,11 @@ from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
-from database import engine, scoped
-from models import ClubSetting, ClubSystem, Pairing, PublishState, Signup, SystemConfig
+from database import engine, scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
+from models import ClubSystem, Pairing, PublishState, Signup, SystemConfig
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
 from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
-
-def _slug(system: str) -> str:
-    return system.replace(" ", "").replace("'", "")
-
-
-def _get_setting(db: Session, club_id: int, key: str, default: str | None = None) -> str | None:
-    row = db.get(ClubSetting, (club_id, key))
-    return row.value if row is not None else default
-
-
-def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
-    row = db.get(ClubSetting, (club_id, key))
-    if row is None:
-        row = ClubSetting(club_id=club_id, key=key, value=value)
-    else:
-        row.value = value
-    db.add(row)
-
 
 def main() -> None:
     now_uk = datetime.now(ZoneInfo("Europe/London"))

@@ -26,7 +26,7 @@ from auth import (
     require_user,
     valid_scopes,
 )
-from database import scoped
+from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -586,24 +586,6 @@ def _dicts_to_display(dicts: list, signups_by_id: dict, system: str) -> list:
 
 _VALID_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 _TIME_RE = re.compile(r"^(2[0-3]|[01]\d):[0-5]\d$")
-
-
-def _slug(system: str) -> str:
-    return system.replace(" ", "").replace("'", "")
-
-
-def _get_setting(db: Session, club_id: int, key: str, default: Optional[str] = None) -> Optional[str]:
-    row = db.get(ClubSetting, (club_id, key))
-    return row.value if row is not None else default
-
-
-def _upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
-    row = db.get(ClubSetting, (club_id, key))
-    if row is None:
-        row = ClubSetting(club_id=club_id, key=key, value=value)
-    else:
-        row.value = value
-    db.add(row)
 
 
 def _require_system_scope(system: str, user: User, db: Session) -> None:

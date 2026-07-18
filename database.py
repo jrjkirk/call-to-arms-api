@@ -9,7 +9,7 @@ WRITE_ALLOWED_TABLES is the explicit allow-list. As we build out write features
 table-by-table, we add the table name here.
 """
 import os
-from typing import Type, TypeVar
+from typing import Optional, Type, TypeVar
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
-from models import Club, ClubWebhook, User
+from models import Club, ClubSetting, ClubWebhook, User
 
 T = TypeVar("T")
 
@@ -217,3 +217,33 @@ def scoped(model: Type[T], club_id: int) -> Select:
     caller's context (user.club_id) — never accept it from a request
     body."""
     return select(model).where(model.club_id == club_id)
+
+# ---------------------------------------------------------------------------
+# Per-club-system settings helpers (ClubSetting)
+#
+# Shared by admin.py and the scheduler scripts (run_auto_pairings_check.py,
+# run_call_to_arms_check.py), which previously each defined identical private
+# copies. Defined once here (the shared-helper home, alongside scoped /
+# _default_club_id); callers import them.
+# ---------------------------------------------------------------------------
+
+def system_setting_slug(system: str) -> str:
+    """Settings-key-safe slug for a system's legacy name (spaces/apostrophes
+    stripped) — used to build per-club-system ClubSetting keys like
+    `call_to_arms_TheOldWorld_enabled`. Distinct from SystemConfig.slug
+    (tow/hh/kt), which is a different, catalogue-facing identifier."""
+    return system.replace(" ", "").replace("'", "")
+
+
+def get_setting(db: Session, club_id: int, key: str, default: Optional[str] = None) -> Optional[str]:
+    row = db.get(ClubSetting, (club_id, key))
+    return row.value if row is not None else default
+
+
+def upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
+    row = db.get(ClubSetting, (club_id, key))
+    if row is None:
+        row = ClubSetting(club_id=club_id, key=key, value=value)
+    else:
+        row.value = value
+    db.add(row)
