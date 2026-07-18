@@ -286,6 +286,38 @@ class ClubSystem(SQLModel, table=True):
     vibe_options: Optional[list] = Field(default=None, sa_column=Column(JSON))
     default_vibe: Optional[str] = None
 
+    # Per-club-system random mission pool (see the Mission table below).
+    # missions_enabled off => the Call-to-Arms post keeps its pre-catalogue
+    # behavior (hardcoded SCENARIO_DATA fallback in call_to_arms_content.py).
+    # missions_use_secondary gates whether this system's missions carry a
+    # "secondary objectives" field (some systems have no equivalent).
+    missions_enabled: bool = False
+    missions_use_secondary: bool = False
+
+
+class Mission(SQLModel, table=True):
+    """A single random-rotation mission for one club running one system.
+
+    Per-(club_id, system_id) resource, same shape/ownership model as
+    ClubWebhook. Curated by that club's per-system admin via the admin panel;
+    the weekly Call-to-Arms post picks one active mission at random and uses
+    its image_url as the Discord embed image plus name/secondary_objectives as
+    message tokens. image_path is the Supabase Storage object path (kept so
+    the image can be deleted with the row); image_url is its public URL,
+    denormalized for serving/rendering."""
+    __tablename__ = "missions"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+    name: Optional[str] = None
+    secondary_objectives: Optional[str] = None
+    image_path: str
+    image_url: str
+    active: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
 
 class ClubWebhook(SQLModel, table=True):
     """Per-club Discord webhook URLs — Phase 3 step 1, see multitenancy-plan-v2.md.

@@ -54,6 +54,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # seed_club_webhooks.py, then read-only until a
                        # later Phase 3 step switches the six webhook call
                        # sites over to reading from here
+    "missions",       # per-club-system random mission pool: admin CRUD in
+                       # admin.py (image uploaded to Supabase Storage), read
+                       # by the Call-to-Arms post to pick a random mission
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)

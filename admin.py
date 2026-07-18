@@ -11,7 +11,7 @@ from datetime import date
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -34,7 +34,8 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
 )
-from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate
@@ -2420,3 +2421,206 @@ def update_club(
         "contact_email": club.contact_email,
         "leagues_enabled": club.leagues_enabled,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-club-system random mission pool (Call-to-Arms post)
+#
+# Each club running each system curates its own set of missions — an image
+# (uploaded to Supabase Storage via storage.py) plus an optional name and
+# optional secondary objectives. The weekly Call-to-Arms post picks one active
+# mission at random. Managed by that club's per-system admin, same auth as the
+# call-to-arms-settings endpoints (_require_system_scope). Mirrors the
+# ClubWebhook per-(club_id, system_id) resource pattern.
+# ---------------------------------------------------------------------------
+
+# 5 MB cap — terrain images are ~150 KB today; this is generous headroom while
+# still rejecting accidental huge uploads before they hit storage.
+MAX_MISSION_IMAGE_BYTES = 5 * 1024 * 1024
+
+MISSION_IMAGE_GUIDELINES = {
+    "formats": ["PNG", "JPG", "WEBP"],
+    "max_size_mb": 5,
+    "recommended": (
+        "Use a clear, landscape image of the mission/terrain map. A roughly "
+        "16:9 or 4:3 image around 1200px wide looks best in Discord. Avoid "
+        "screenshots with heavy UI clutter."
+    ),
+}
+
+
+def _mission_row(m: Mission) -> dict:
+    return {
+        "id": m.id,
+        "name": m.name,
+        "secondary_objectives": m.secondary_objectives,
+        "image_url": m.image_url,
+        "active": m.active,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+def _mission_or_404(mission_id: int, user: User, db: Session) -> tuple[Mission, SystemConfig]:
+    """Fetch a mission owned by the caller's club and confirm the caller holds
+    that system's admin scope. Returns (mission, its SystemConfig)."""
+    m = db.get(Mission, mission_id)
+    if m is None or m.club_id != user.club_id:
+        raise HTTPException(status_code=404, detail="Mission not found.")
+    config = db.get(SystemConfig, m.system_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Mission's system not found.")
+    _require_system_scope(config.legacy_system_name, user, db)
+    return m, config
+
+
+@router.get("/missions")
+def list_missions(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """The caller's own club's mission pool for one system, plus the two
+    per-club-system toggles and the upload guidelines the UI renders."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    missions = db.exec(
+        scoped(Mission, user.club_id)
+        .where(Mission.system_id == config.id)
+        .order_by(Mission.created_at)
+    ).all()
+    return {
+        "missions_enabled": bool(cs and cs.missions_enabled),
+        "missions_use_secondary": bool(cs and cs.missions_use_secondary),
+        "guidelines": MISSION_IMAGE_GUIDELINES,
+        "missions": [_mission_row(m) for m in missions],
+    }
+
+
+@router.post("/missions", status_code=201)
+def create_mission(
+    system: str = Form(...),
+    name: Optional[str] = Form(None),
+    secondary_objectives: Optional[str] = Form(None),
+    image: UploadFile = File(...),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Upload one mission image + metadata. club_id always comes from the
+    session (user.club_id), never the request — same rule as scoped()."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty image upload.")
+    if len(data) > MAX_MISSION_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image too large (max {MAX_MISSION_IMAGE_BYTES // (1024 * 1024)} MB).",
+        )
+    try:
+        storage.extension_for(image.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        object_path, public_url = storage.upload_mission_image(
+            data, image.content_type, user.club_id, config.id
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"Image upload failed: {e}")
+
+    m = Mission(
+        club_id=user.club_id,
+        system_id=config.id,
+        name=(name or "").strip() or None,
+        secondary_objectives=(secondary_objectives or "").strip() or None,
+        image_path=object_path,
+        image_url=public_url,
+        active=True,
+    )
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return _mission_row(m)
+
+
+class MissionPatch(BaseModel):
+    name: Optional[str] = None
+    secondary_objectives: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@router.patch("/missions/{mission_id}")
+def update_mission(
+    mission_id: int,
+    body: MissionPatch,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Partial update of a mission's metadata (not its image — to change the
+    image, delete and re-upload). Only fields present in the body change."""
+    m, _config = _mission_or_404(mission_id, user, db)
+    provided = body.model_fields_set
+    if "name" in provided:
+        m.name = (body.name or "").strip() or None
+    if "secondary_objectives" in provided:
+        m.secondary_objectives = (body.secondary_objectives or "").strip() or None
+    if "active" in provided:
+        m.active = bool(body.active)
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return _mission_row(m)
+
+
+@router.delete("/missions/{mission_id}")
+def delete_mission(
+    mission_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Delete a mission row and best-effort delete its stored image."""
+    m, _config = _mission_or_404(mission_id, user, db)
+    object_path = m.image_path
+    db.delete(m)
+    db.commit()
+    storage.delete_mission_image(object_path)
+    return {"ok": True}
+
+
+class MissionsSettingsBody(BaseModel):
+    system: str
+    missions_enabled: bool
+    missions_use_secondary: bool
+
+
+@router.post("/missions-settings")
+def update_missions_settings(
+    body: MissionsSettingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Set the two per-club-system mission toggles on the caller's ClubSystem
+    row."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+    cs.missions_enabled = body.missions_enabled
+    cs.missions_use_secondary = body.missions_use_secondary
+    db.add(cs)
+    db.commit()
+    return {"ok": True}
