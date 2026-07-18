@@ -313,8 +313,12 @@ class Mission(SQLModel, table=True):
     system_id: int = Field(foreign_key="systems.id", index=True)
     name: Optional[str] = None
     secondary_objectives: Optional[str] = None
-    image_path: str
-    image_url: str
+    # image_path/image_url are nullable so a mission can be text-only (e.g.
+    # The Old World's "Open Battle", which has no terrain image). The admin
+    # upload endpoint still requires an image for new missions; NULLs come
+    # from the TOW seed / future text-only support.
+    image_path: Optional[str] = None
+    image_url: Optional[str] = None
     active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

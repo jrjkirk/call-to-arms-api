@@ -22,7 +22,7 @@ from sqlmodel import Session, select
 
 import call_to_arms_content as cta_content
 from database import engine, resolve_webhook_url
-from models import ClubSetting, ClubSystem, SystemConfig
+from models import ClubSetting, ClubSystem, Mission, SystemConfig
 from week_logic import _is_call_to_arms_due, is_session_week, next_session_date
 
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
@@ -125,9 +125,26 @@ def main() -> None:
                         image_mode, image_url = cta_content.parse_image_setting(
                             _get_setting(db, club_id, f"call_to_arms_{slug}_image")
                         )
+                        # Mission pool: when this club-system has missions
+                        # enabled, pass its active DB missions (post picks one
+                        # at random). Otherwise pass None so post() keeps the
+                        # hardcoded SCENARIO_DATA fallback (Manchester TOW until
+                        # migrated).
+                        missions = None
+                        if club_system.missions_enabled:
+                            missions = [
+                                {"name": m.name, "secondary_objectives": m.secondary_objectives,
+                                 "image_url": m.image_url}
+                                for m in db.exec(
+                                    select(Mission)
+                                    .where(Mission.club_id == club_id)
+                                    .where(Mission.system_id == system_config.id)
+                                    .where(Mission.active == True)
+                                ).all()
+                            ]
                         cta_content.post(
                             webhook_url, template, system, next_session, APP_PUBLIC_URL,
-                            image_mode=image_mode, image_url=image_url,
+                            image_mode=image_mode, image_url=image_url, missions=missions,
                         )
                         _upsert_setting(db, club_id, f"call_to_arms_{slug}_last_week", target_week)
                         db.commit()

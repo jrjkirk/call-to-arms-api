@@ -685,6 +685,13 @@ def get_call_to_arms_settings(
     image_mode, image_url = cta_content.parse_image_setting(
         _get_setting(db, user.club_id, f"call_to_arms_{slug}_image")
     )
+    # A club-system supports a mission image (and the scenario tokens) if it
+    # has the DB mission pool enabled, or via the legacy hardcoded fallback.
+    config = _get_system_config(db, system)
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first() if config else None
+    has_missions = bool(cs and cs.missions_enabled) or (system in cta_content.SCENARIO_DATA)
     return {
         "enabled": enabled_str == "true",
         "days_before": int(days_before_str),
@@ -692,10 +699,10 @@ def get_call_to_arms_settings(
         "last_week": _get_setting(db, user.club_id, f"call_to_arms_{slug}_last_week"),
         "template": template_override if template_override else default_template,
         "default_template": default_template,
-        "tokens": cta_content.available_tokens(system),
+        "tokens": cta_content.available_tokens(system, has_missions),
         "image_mode": image_mode,
         "image_url": image_url or "",
-        "supports_mission_image": system in cta_content.SCENARIO_DATA,
+        "supports_mission_image": has_missions,
     }
 
 

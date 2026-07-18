@@ -28,7 +28,14 @@ from models import Mission
 
 def create_table():
     Mission.metadata.create_all(engine, tables=[Mission.__table__], checkfirst=True)
-    print("Created missions table (or already present).")
+    # image_path/image_url are nullable (text-only missions like TOW's Open
+    # Battle). A freshly created table gets this from the model; a table
+    # created by an earlier revision of this script had them NOT NULL, so drop
+    # that here (idempotent — a no-op if already nullable).
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE missions ALTER COLUMN image_path DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE missions ALTER COLUMN image_url DROP NOT NULL"))
+    print("Created missions table (or already present); image columns nullable.")
 
 
 def add_flags():
@@ -63,9 +70,12 @@ def verify() -> list[str]:
             missing = expected - set(cols)
             if missing:
                 problems.append(f"missions missing columns: {missing}")
-            for nn in ("club_id", "system_id", "image_path", "image_url"):
+            for nn in ("club_id", "system_id"):
                 if cols.get(nn) != "NO":
                     problems.append(f"missions.{nn} should be NOT NULL (is_nullable={cols.get(nn)})")
+            for nullable in ("image_path", "image_url"):
+                if cols.get(nullable) != "YES":
+                    problems.append(f"missions.{nullable} should be NULLABLE (is_nullable={cols.get(nullable)})")
 
         cs_cols = {row[0]: row[1] for row in session.exec(text(
             "SELECT column_name, is_nullable FROM information_schema.columns "

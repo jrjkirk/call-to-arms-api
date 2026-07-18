@@ -109,34 +109,63 @@ def default_template(system: str) -> str:
     return DEFAULT_TEMPLATES.get(system, "")
 
 
-def available_tokens(system: str) -> list[str]:
-    """Tokens a club may use in this system's template."""
+def available_tokens(system: str, has_missions: Optional[bool] = None) -> list[str]:
+    """Tokens a club may use in this system's template. Scenario tokens
+    ({scenario_name}, {secondary_objectives}) are offered when the club-system
+    has a mission pool: `has_missions` says so explicitly (DB pool); when None,
+    fall back to the hardcoded SCENARIO_DATA check (legacy)."""
     toks = list(_BASE_TOKENS)
-    if system in SCENARIO_DATA:
+    offer_scenario = has_missions if has_missions is not None else (system in SCENARIO_DATA)
+    if offer_scenario:
         toks += _SCENARIO_TOKENS
     return toks
 
 
-def build_context(system: str, session_date: date, signup_url: str) -> tuple[dict, Optional[str]]:
-    """Resolve the dynamic token values for one post, plus an optional image
-    path to attach. For scenario systems this picks a random mission (the
-    preserved "mission selection" function) and exposes its fields."""
+def build_context(
+    system: str,
+    session_date: date,
+    signup_url: str,
+    missions: Optional[list[dict]] = None,
+) -> tuple[dict, Optional[str], Optional[str]]:
+    """Resolve the dynamic token values for one post, plus the mission image.
+
+    `missions` selects the source of the random mission:
+      - None  => legacy hardcoded fallback: pick from SCENARIO_DATA[system]
+        (The Old World today) and attach its local terrain file. Used when a
+        club-system hasn't enabled the DB mission pool.
+      - a list => this club-system's DB mission pool (dicts with name /
+        secondary_objectives / image_url). Pick one at random; its image is a
+        public URL (embedded, not uploaded). An empty list => no mission this
+        week (no scenario tokens, no image).
+
+    Returns (ctx, image_path, image_url): `image_path` is a local file to
+    upload (fallback only), `image_url` is a public URL to embed (DB pool
+    only). At most one is set."""
     ctx: dict = {
         "session_date": session_date.strftime("%d/%m/%Y"),
         "signup_url": signup_url or "",
     }
     image_path: Optional[str] = None
-    scenarios = SCENARIO_DATA.get(system)
-    if scenarios:
-        sc = random.choice(scenarios)
-        ctx["scenario_name"] = sc.get("name", "")
-        ctx["secondary_objectives"] = sc.get("secondary_objectives", "")
-        terrain_path = sc.get("terrain_path")
-        if terrain_path:
-            full_path = os.path.join(BASE_DIR, terrain_path)
-            if os.path.exists(full_path):
-                image_path = full_path
-    return ctx, image_path
+    image_url: Optional[str] = None
+
+    if missions is not None:
+        if missions:
+            m = random.choice(missions)
+            ctx["scenario_name"] = m.get("name") or ""
+            ctx["secondary_objectives"] = m.get("secondary_objectives") or ""
+            image_url = m.get("image_url") or None
+    else:
+        scenarios = SCENARIO_DATA.get(system)
+        if scenarios:
+            sc = random.choice(scenarios)
+            ctx["scenario_name"] = sc.get("name", "")
+            ctx["secondary_objectives"] = sc.get("secondary_objectives", "")
+            terrain_path = sc.get("terrain_path")
+            if terrain_path:
+                full_path = os.path.join(BASE_DIR, terrain_path)
+                if os.path.exists(full_path):
+                    image_path = full_path
+    return ctx, image_path, image_url
 
 
 def render(template: str, context: dict) -> str:
@@ -209,19 +238,25 @@ def post(
     signup_url: str,
     image_mode: str = "default",
     image_url: Optional[str] = None,
+    missions: Optional[list[dict]] = None,
 ) -> None:
     """Assemble and post one call-to-arms message: build the dynamic context
-    (picking a mission for scenario systems), render `template`, and post to
-    `webhook_url`. Image handling follows `image_mode`:
-      - "default": the system's built-in image (mission terrain for scenario
-        systems, none otherwise) — unchanged from before this control existed.
+    (picking a random mission — from `missions` if given, else the hardcoded
+    fallback), render `template`, and post to `webhook_url`. Image handling
+    follows `image_mode`:
+      - "default": the randomly-chosen mission's image (a public URL embed for
+        the DB pool, or the local terrain file for the hardcoded fallback);
+        none if there's no mission.
       - "none": text only.
-      - "custom": attach `image_url` as a Discord embed image.
-    `template` is the caller's resolved text (club override or default)."""
+      - "custom": attach `image_url` (the club's custom override) as an embed.
+    `template` is the caller's resolved text (club override or default);
+    `missions` is the caller-resolved DB pool (see build_context)."""
     if not webhook_url:
         print(f"No call-to-arms webhook for {system}, skipping.")
         return
-    ctx, default_image_path = build_context(system, session_date, signup_url)
+    ctx, default_image_path, default_image_url = build_context(
+        system, session_date, signup_url, missions=missions
+    )
     content = render(template, ctx)
 
     image_path: Optional[str] = None
@@ -232,5 +267,6 @@ def post(
         embed_image_url = image_url
     else:  # "default"
         image_path = default_image_path
+        embed_image_url = default_image_url
 
     _post_to_discord(webhook_url, content, image_path=image_path, embed_image_url=embed_image_url)
