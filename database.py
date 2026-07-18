@@ -57,6 +57,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "missions",       # per-club-system random mission pool: admin CRUD in
                        # admin.py (image uploaded to Supabase Storage), read
                        # by the Call-to-Arms post to pick a random mission
+    "league_seasons", # per-(club,system) league seasons (admin-set date
+                       # ranges); ratings reset each season
+    "league_configs", # per-(club,system) league scoring config (elo/winloss
+                       # params); one row per system-league
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)

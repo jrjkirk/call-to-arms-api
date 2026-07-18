@@ -5,17 +5,17 @@ LeagueResult row and then runs a full recalculation that replays all
 results from scratch, ordered by id ascending.
 """
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
-from sqlmodel import Session, or_
+from sqlmodel import Session, or_, select
 
 from auth import require_user, current_user
 from database import get_session, resolve_request_club_id, resolve_webhook_url, scoped
-from models import LeagueRating, LeagueResult, Player, User
+from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, User
 from services import announce_new_achievements
 
 router = APIRouter(prefix="/league", tags=["league"])
@@ -32,20 +32,73 @@ def _normalise_optional(value: Optional[str]) -> Optional[str]:
     return value
 
 
-def _painting_bonus(value: Optional[str]) -> float:
+def _get_league_config(db: Session, club_id: int, system_id: int) -> LeagueConfig:
+    """This (club, system) league's scoring config, or an unsaved defaults
+    instance (which reproduces the original hardcoded ELO exactly)."""
+    cfg = db.exec(
+        select(LeagueConfig).where(
+            LeagueConfig.club_id == club_id, LeagueConfig.system_id == system_id
+        )
+    ).first()
+    return cfg or LeagueConfig(club_id=club_id, system_id=system_id)
+
+
+def _painting_bonus(cfg: LeagueConfig, value: Optional[str]) -> float:
     if not value:
         return 0.0
     v = value.strip().lower()
     if v == "fully painted":
-        return 3.0
+        return cfg.painting_fully_bonus
     if v == "partially painted":
-        return 1.0
+        return cfg.painting_partial_bonus
     return 0.0
 
 
-def _recalculate_ratings(db: Session, club_id: int) -> None:
-    """Full replay of all LeagueResult rows. Rebuilds the LeagueRating table from scratch."""
-    results = db.exec(scoped(LeagueResult, club_id).order_by(LeagueResult.id)).all()
+def _resolve_league_system_id(db: Session, club_id: int) -> Optional[int]:
+    """The system this club runs its league for. Single-league today (the one
+    ClubSystem row with league_enabled); the explicit per-system system param
+    arrives in a later phase."""
+    row = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id, ClubSystem.league_enabled == True
+        )
+    ).first()
+    return row.system_id if row else None
+
+
+def _current_season_id(db: Session, club_id: int, system_id: int) -> Optional[int]:
+    """The season whose date range contains today for this (club, system);
+    failing that, the most recent season by start_date; None if none exist."""
+    seasons = db.exec(
+        select(LeagueSeason)
+        .where(LeagueSeason.club_id == club_id, LeagueSeason.system_id == system_id)
+        .order_by(LeagueSeason.start_date.desc())
+    ).all()
+    today = date.today()
+    for s in seasons:
+        if s.start_date <= today and (s.end_date is None or today <= s.end_date):
+            return s.id
+    return seasons[0].id if seasons else None
+
+
+def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: int) -> None:
+    """Full replay of one (club, system, season)'s LeagueResult rows, rebuilding
+    that season's LeagueRating rows from scratch (ordered by id ascending).
+
+    Scoring comes from that league's LeagueConfig — ELO with configurable K /
+    painting bonuses / starting rating. With the default config this reproduces
+    the original hardcoded ELO byte-for-byte (K 10/40, +3/+1, start 1000). The
+    win/loss and Bayesian methods branch in here in a later phase."""
+    cfg = _get_league_config(db, club_id, system_id)
+    start = cfg.starting_rating
+
+    results = db.exec(
+        select(LeagueResult)
+        .where(LeagueResult.club_id == club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.season_id == season_id)
+        .order_by(LeagueResult.id)
+    ).all()
 
     ratings: dict[int, float] = {}
     latest_name: dict[int, str] = {}
@@ -61,10 +114,10 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
             row.game_type = "Competitive"
             gt = "Competitive"
 
-        k = 10 if gt.lower() == "casual" else 40
+        k = cfg.k_casual if gt.lower() == "casual" else cfg.k_competitive
 
-        r1 = ratings.get(p1, 1000.0)
-        r2 = ratings.get(p2, 1000.0)
+        r1 = ratings.get(p1, start)
+        r2 = ratings.get(p2, start)
 
         e1 = 1.0 / (1.0 + 10.0 ** ((r2 - r1) / 400.0))
         e2 = 1.0 / (1.0 + 10.0 ** ((r1 - r2) / 400.0))
@@ -76,8 +129,8 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
         else:
             score = 0.5
 
-        new_r1 = r1 + k * (score - e1) + _painting_bonus(row.player_1_painting_bonus)
-        new_r2 = r2 + k * ((1.0 - score) - e2) + _painting_bonus(row.player_2_painting_bonus)
+        new_r1 = r1 + k * (score - e1) + _painting_bonus(cfg, row.player_1_painting_bonus)
+        new_r2 = r2 + k * ((1.0 - score) - e2) + _painting_bonus(cfg, row.player_2_painting_bonus)
 
         row.player_1_rating_before = r1
         row.player_2_rating_before = r2
@@ -91,7 +144,15 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
         latest_name[p1] = row.player_1_name
         latest_name[p2] = row.player_2_name
 
-    for old in db.exec(scoped(LeagueRating, club_id)).all():
+    # Rebuild only THIS (club, system, season)'s ratings — other systems'/
+    # seasons' ratings are untouched.
+    old_ratings = db.exec(
+        select(LeagueRating)
+        .where(LeagueRating.club_id == club_id)
+        .where(LeagueRating.system_id == system_id)
+        .where(LeagueRating.season_id == season_id)
+    ).all()
+    for old in old_ratings:
         db.delete(old)
 
     now = datetime.utcnow()
@@ -102,6 +163,8 @@ def _recalculate_ratings(db: Session, club_id: int) -> None:
             rating=rating,
             updated_at=now,
             club_id=club_id,
+            system_id=system_id,
+            season_id=season_id,
         ))
 
 
@@ -288,12 +351,24 @@ def submit_result(
     if p2_painting not in VALID_PAINTING:
         raise HTTPException(status_code=422, detail="Invalid player 2 painting bonus.")
 
+    # Resolve which system's league this result belongs to, and its current
+    # season. Single-league today (the club's one league_enabled system); the
+    # explicit per-system param arrives in a later phase.
+    system_id = _resolve_league_system_id(db, user.club_id)
+    if system_id is None:
+        raise HTTPException(status_code=422, detail="No league is enabled for this club.")
+    season_id = _current_season_id(db, user.club_id, system_id)
+    if season_id is None:
+        raise HTTPException(status_code=422, detail="No league season is configured.")
+
     result_date = datetime.utcnow().strftime("%d/%m/%Y")
 
     # Duplicate guard: match on every field. NULL == NULL must be handled explicitly
     # because SQL NULL comparisons use IS NULL, not =.
     dup_query = (
         scoped(LeagueResult, user.club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.season_id == season_id)
         .where(LeagueResult.player_1_id == body.player_1_id)
         .where(LeagueResult.player_2_id == body.player_2_id)
         .where(LeagueResult.result == body.result)
@@ -333,11 +408,13 @@ def submit_result(
         player_2_painting_bonus=p2_painting,
         game_type=body.game_type,
         club_id=user.club_id,
+        system_id=system_id,
+        season_id=season_id,
     )
     db.add(row)
     db.flush()  # assign row.id within the transaction so the recalc includes this row
 
-    _recalculate_ratings(db, user.club_id)
+    _recalculate_ratings(db, user.club_id, system_id, season_id)
     db.commit()  # single commit for insert + full recalc
     db.refresh(row)
 

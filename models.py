@@ -143,6 +143,12 @@ class LeagueResult(SQLModel, table=True):
     player_2_rating_after: Optional[float] = None
     k_factor_used: Optional[int] = None
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
+    # Per-(club, system) modular leagues. system_id ties a result to one
+    # system's league; season_id ties it to a season (ratings reset each
+    # season). Both nullable during the expand migration, backfilled to The
+    # Old World + the initial season for existing rows, then made NOT NULL.
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
+    season_id: Optional[int] = Field(default=None, foreign_key="league_seasons.id", index=True)
 
 
 class LeagueRating(SQLModel, table=True):
@@ -155,6 +161,56 @@ class LeagueRating(SQLModel, table=True):
     rating: float = 1000.0
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
+    # Ratings are per (player, club, system, season) — the recalc rebuilds one
+    # season's ratings at a time. Nullable during expand, backfilled, NOT NULL.
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
+    season_id: Optional[int] = Field(default=None, foreign_key="league_seasons.id", index=True)
+
+
+class LeagueSeason(SQLModel, table=True):
+    """A dated season for one club's league in one system. Ratings reset each
+    season (the recalc keys on season_id); past seasons stay archived. The
+    "current" season is the one whose [start_date, end_date] contains today
+    (end_date NULL = open-ended / ongoing)."""
+    __tablename__ = "league_seasons"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+    name: str
+    start_date: date
+    end_date: Optional[date] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class LeagueConfig(SQLModel, table=True):
+    """Scoring configuration for one club's league in one system. One row per
+    (club_id, system_id). Defaults reproduce the original hardcoded ELO
+    exactly (K 10 casual / 40 competitive, painting +3/+1, start 1000)."""
+    __tablename__ = "league_configs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+
+    # "elo" | "winloss"  ("bayesian" reserved for later)
+    scoring_method: str = "elo"
+
+    # ELO params
+    starting_rating: float = 1000.0
+    k_casual: int = 10
+    k_competitive: int = 40
+    painting_fully_bonus: float = 3.0
+    painting_partial_bonus: float = 1.0
+
+    # Flat win/loss points
+    points_win: float = 3.0
+    points_draw: float = 1.0
+    points_loss: float = 0.0
+    # Whether the win/loss method also adds the painting bonuses above.
+    winloss_use_painting: bool = False
 
 class User(SQLModel, table=True):
     """An authenticated user. Links a Discord identity to a player_id (after claim)."""
@@ -293,6 +349,11 @@ class ClubSystem(SQLModel, table=True):
     # "secondary objectives" field (some systems have no equivalent).
     missions_enabled: bool = False
     missions_use_secondary: bool = False
+
+    # Whether this club runs a league for this system (per-system, replacing
+    # the old club-wide Club.leagues_enabled gate). Scoring config lives in
+    # LeagueConfig, seasons in LeagueSeason.
+    league_enabled: bool = False
 
 
 class Mission(SQLModel, table=True):

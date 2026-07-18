@@ -1454,7 +1454,7 @@ def admin_league_result_patch(
 
     db.add(row)
     db.flush()
-    _recalculate_ratings(db, user.club_id)
+    _recalculate_ratings(db, user.club_id, row.system_id, row.season_id)
     db.commit()
     db.refresh(row)
     return _league_result_row(row)
@@ -1471,9 +1471,10 @@ def admin_league_result_delete(
     if row is None or row.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="League result not found.")
 
+    system_id, season_id = row.system_id, row.season_id
     db.delete(row)
     db.flush()
-    _recalculate_ratings(db, user.club_id)
+    _recalculate_ratings(db, user.club_id, system_id, season_id)
     db.commit()
     return {"ok": True}
 
