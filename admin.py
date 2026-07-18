@@ -21,7 +21,6 @@ from auth import (
     current_user,
     get_session,
     require_platform_admin,
-    require_scope,
     require_super_admin,
     require_user,
     valid_scopes,
@@ -31,10 +30,13 @@ from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
     VALID_RESULTS,
+    _current_season_id,
+    _get_league_config,
     _normalise_optional,
     _recalculate_ratings,
+    _resolve_system_id,
 )
-from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueResult, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -416,28 +418,13 @@ def admin_history(
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """Recent game history for a scope. 403 unless caller holds that scope."""
+    """Recent game history for a scope. 403 unless caller holds that scope.
+    (League game history lives in GET /admin/league/results now — there is
+    no separate "League" scope; every scope here is a system.)"""
     if scope not in valid_scopes(db):
         raise HTTPException(status_code=422, detail="Invalid scope.")
     if scope not in admin_scopes(user, db):
         raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
-
-    if scope == "League":
-        rows = db.exec(
-            scoped(LeagueResult, user.club_id).order_by(LeagueResult.id.desc()).limit(100)
-        ).all()
-        return [
-            {
-                "date": r.result_date,
-                "p1_name": r.player_1_name,
-                "p1_faction": r.player_1_faction,
-                "p2_name": r.player_2_name,
-                "p2_faction": r.player_2_faction,
-                "result": r.result,
-                "game_type": r.game_type,
-            }
-            for r in rows
-        ]
 
     # System scope: join pairings to signups for player names/factions
     pairings = db.exec(
@@ -1367,11 +1354,27 @@ def _league_result_row(r: LeagueResult) -> dict:
 
 @router.get("/league/results")
 def admin_league_results(
-    user: User = Depends(require_scope("League")),
+    system: str,
+    season_id: Optional[int] = None,
+    user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """All LeagueResult rows, newest first (display order; recalc internally is id-ascending)."""
-    rows = db.exec(scoped(LeagueResult, user.club_id).order_by(LeagueResult.id.desc())).all()
+    """One system's league results, newest first (display order; recalc
+    internally is id-ascending). Defaults to the current season; pass
+    season_id to browse an archived one (Phase 5)."""
+    _require_system_scope(system, user, db)
+    system_id = _resolve_system_id(db, user.club_id, system)
+    if system_id is None:
+        return []
+    resolved_season_id = season_id or _current_season_id(db, user.club_id, system_id)
+    if resolved_season_id is None:
+        return []
+    rows = db.exec(
+        scoped(LeagueResult, user.club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.season_id == resolved_season_id)
+        .order_by(LeagueResult.id.desc())
+    ).all()
     return [_league_result_row(r) for r in rows]
 
 
@@ -1397,13 +1400,15 @@ class AdminLeagueResultPatch(BaseModel):
 def admin_league_result_patch(
     result_id: int,
     body: AdminLeagueResultPatch,
-    user: User = Depends(require_scope("League")),
+    user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
     """Partial update of a league result, followed by a full ratings replay."""
     row = db.get(LeagueResult, result_id)
     if row is None or row.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="League result not found.")
+    row_config = db.get(SystemConfig, row.system_id)
+    _require_system_scope(row_config.legacy_system_name, user, db)
 
     provided = body.model_fields_set
 
@@ -1463,13 +1468,15 @@ def admin_league_result_patch(
 @router.delete("/league/results/{result_id}")
 def admin_league_result_delete(
     result_id: int,
-    user: User = Depends(require_scope("League")),
+    user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
     """Delete a league result and replay ratings from scratch."""
     row = db.get(LeagueResult, result_id)
     if row is None or row.club_id != user.club_id:
         raise HTTPException(status_code=404, detail="League result not found.")
+    row_config = db.get(SystemConfig, row.system_id)
+    _require_system_scope(row_config.legacy_system_name, user, db)
 
     system_id, season_id = row.system_id, row.season_id
     db.delete(row)
@@ -1477,6 +1484,184 @@ def admin_league_result_delete(
     _recalculate_ratings(db, user.club_id, system_id, season_id)
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# League scoring config + seasons — per-(club, system), self-service by that
+# system's admin (same _require_system_scope gate as the results endpoints).
+# ---------------------------------------------------------------------------
+
+def _league_config_row(cfg: LeagueConfig) -> dict:
+    return {
+        "scoring_method": cfg.scoring_method,
+        "starting_rating": cfg.starting_rating,
+        "k_casual": cfg.k_casual,
+        "k_competitive": cfg.k_competitive,
+        "painting_fully_bonus": cfg.painting_fully_bonus,
+        "painting_partial_bonus": cfg.painting_partial_bonus,
+        "points_win": cfg.points_win,
+        "points_draw": cfg.points_draw,
+        "points_loss": cfg.points_loss,
+        "winloss_use_painting": cfg.winloss_use_painting,
+    }
+
+
+@router.get("/league-config")
+def get_league_config(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """This club's scoring config for one system's league. Returns the
+    unsaved-defaults shape (matches the original hardcoded ELO) if the club
+    hasn't customised it yet — same "defaults until saved" convention as
+    SystemConfig."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cfg = _get_league_config(db, user.club_id, config.id)
+    return _league_config_row(cfg)
+
+
+VALID_SCORING_METHODS = {"elo", "winloss"}
+
+
+class LeagueConfigBody(BaseModel):
+    system: str
+    scoring_method: str = "elo"
+    starting_rating: float = 1000.0
+    k_casual: int = 10
+    k_competitive: int = 40
+    painting_fully_bonus: float = 3.0
+    painting_partial_bonus: float = 1.0
+    points_win: float = 3.0
+    points_draw: float = 1.0
+    points_loss: float = 0.0
+    winloss_use_painting: bool = False
+
+
+@router.post("/league-config")
+def save_league_config(
+    body: LeagueConfigBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Upsert this club's scoring config for one system's league, then replay
+    the current season's ratings under the new config (a config change must
+    take effect immediately, not just for future results)."""
+    _require_system_scope(body.system, user, db)
+    if body.scoring_method not in VALID_SCORING_METHODS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scoring_method must be one of {sorted(VALID_SCORING_METHODS)}.",
+        )
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    cfg = db.exec(
+        select(LeagueConfig).where(
+            LeagueConfig.club_id == user.club_id, LeagueConfig.system_id == config.id
+        )
+    ).first()
+    if cfg is None:
+        cfg = LeagueConfig(club_id=user.club_id, system_id=config.id)
+    for field in LeagueConfigBody.model_fields:
+        if field == "system":
+            continue
+        setattr(cfg, field, getattr(body, field))
+    db.add(cfg)
+    db.commit()
+
+    season_id = _current_season_id(db, user.club_id, config.id)
+    if season_id is not None:
+        _recalculate_ratings(db, user.club_id, config.id, season_id)
+        db.commit()
+    return _league_config_row(cfg)
+
+
+def _league_season_row(s: LeagueSeason, current_id: Optional[int]) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "start_date": s.start_date.isoformat(),
+        "end_date": s.end_date.isoformat() if s.end_date else None,
+        "current": s.id == current_id,
+    }
+
+
+@router.get("/league-seasons")
+def list_league_seasons(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """This club's seasons for one system's league, newest first, each
+    flagged whether it's the current one (see league._current_season_id)."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    seasons = db.exec(
+        select(LeagueSeason)
+        .where(LeagueSeason.club_id == user.club_id, LeagueSeason.system_id == config.id)
+        .order_by(LeagueSeason.start_date.desc())
+    ).all()
+    current_id = _current_season_id(db, user.club_id, config.id)
+    return [_league_season_row(s, current_id) for s in seasons]
+
+
+class LeagueSeasonCreateBody(BaseModel):
+    system: str
+    name: str
+    start_date: date
+    end_date: Optional[date] = None
+
+
+@router.post("/league-seasons")
+def create_league_season(
+    body: LeagueSeasonCreateBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Start a new season for one system's league. Ratings reset — the new
+    season begins empty at LeagueConfig.starting_rating; results/ratings
+    already tagged to prior seasons are untouched and stay archived.
+
+    If an existing season for this (club, system) is open-ended (end_date
+    NULL) and starts before this one, it's automatically closed the day
+    before this season's start_date — "creating a new season closes the
+    old one" (no separate close step needed)."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    if body.end_date is not None and body.end_date < body.start_date:
+        raise HTTPException(status_code=422, detail="end_date must not be before start_date.")
+
+    open_seasons = db.exec(
+        select(LeagueSeason).where(
+            LeagueSeason.club_id == user.club_id,
+            LeagueSeason.system_id == config.id,
+            LeagueSeason.end_date.is_(None),
+        )
+    ).all()
+    for prior in open_seasons:
+        if prior.start_date < body.start_date:
+            from datetime import timedelta
+            prior.end_date = body.start_date - timedelta(days=1)
+            db.add(prior)
+
+    season = LeagueSeason(
+        club_id=user.club_id, system_id=config.id,
+        name=body.name, start_date=body.start_date, end_date=body.end_date,
+    )
+    db.add(season)
+    db.commit()
+    db.refresh(season)
+    current_id = _current_season_id(db, user.club_id, config.id)
+    return _league_season_row(season, current_id)
 
 
 # ---------------------------------------------------------------------------

@@ -463,40 +463,36 @@ def logout(response: Response):
 
 def valid_scopes(db: Session) -> set[str]:
     """The global whitelist of scope names that exist at all: every active
-    SystemConfig catalogue row's legacy_system_name, plus "League" (which
-    stays its own separate, already-working toggle via Club.leagues_enabled
-    — not part of the SystemConfig catalogue, see club_runnable_scopes).
+    SystemConfig catalogue row's legacy_system_name. There is no separate
+    "League" scope — league admin (results/config/seasons) lives inside each
+    system's own scope now (ClubSystem.league_enabled gates whether that
+    system's league section is usable), not a standalone pseudo-scope.
 
     This is a global "is this even a real scope name anywhere" check, not
     per-club authorization — a scope can pass this and still be unusable
     for a specific club (see club_runnable_scopes). Replaces the old
     hardcoded VALID_SCOPES frozenset, which went stale the moment the
     system catalogue became editable via POST /admin/platform/systems."""
-    names = {
+    return {
         sc.legacy_system_name
         for sc in db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
     }
-    names.add("League")
-    return names
 
 
 def club_runnable_scopes(club_id: int, db: Session) -> set[str]:
     """The scopes a given club can actually administer: its enabled
-    ClubSystem rows' legacy_system_name, plus "League" if the club has
-    leagues_enabled. Distinct from valid_scopes() (a global format/existence
-    whitelist) — this is per-club authorization, used both for
-    super-admins' implicit scope set (admin_scopes) and to validate
+    ClubSystem rows' legacy_system_name. (League admin is folded into each
+    system's own scope, gated within by ClubSystem.league_enabled — not a
+    separate scope name.) Distinct from valid_scopes() (a global
+    format/existence whitelist) — this is per-club authorization, used both
+    for super-admins' implicit scope set (admin_scopes) and to validate
     POST /admin/roles grants."""
     rows = db.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
         .where(ClubSystem.club_id == club_id, ClubSystem.enabled == True)
     ).all()
-    scopes = {sc.legacy_system_name for _, sc in rows}
-    club = db.get(Club, club_id)
-    if club is not None and club.leagues_enabled:
-        scopes.add("League")
-    return scopes
+    return {sc.legacy_system_name for _, sc in rows}
 
 
 def admin_scopes(user: Optional[User], db: Session) -> set[str]:

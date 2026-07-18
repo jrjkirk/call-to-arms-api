@@ -29,11 +29,14 @@ def compute_league_record(player_id: int, results: Iterable[LeagueResult]) -> di
     return {"wins": wins, "losses": losses, "draws": draws, "total_games": wins + losses + draws}
 
 
-def fetch_player_results(session: Session, player_id: int, club_id: int) -> list[LeagueResult]:
-    """Return all league results involving the given player, newest first."""
+def fetch_player_results(session: Session, player_id: int, club_id: int, system_id: int) -> list[LeagueResult]:
+    """Return all league results involving the given player in one system's
+    league, newest first. system_id is required — a club can now run more
+    than one system's league, and results must not be mixed across them."""
     stmt = (
         select(LeagueResult)
         .where(LeagueResult.club_id == club_id)
+        .where(LeagueResult.system_id == system_id)
         .where(or_(LeagueResult.player_1_id == player_id, LeagueResult.player_2_id == player_id))
         .order_by(LeagueResult.created_at.desc())
     )
@@ -99,9 +102,20 @@ def build_elo_history(player_id: int, results: Iterable[LeagueResult]) -> list[d
     return history
 
 
-def first_league_winner_id(session: Session) -> Optional[int]:
-    """Returns the player_id of the player who won the very first non-draw league game."""
-    stmt = select(LeagueResult).where(LeagueResult.result != "Draw").order_by(LeagueResult.created_at).limit(1)
+def first_league_winner_id(session: Session, club_id: int, system_id: int) -> Optional[int]:
+    """Returns the player_id of the player who won the very first non-draw
+    game in this (club, system)'s league. Was previously unscoped (queried
+    LeagueResult globally, across every club) — fixed as part of
+    system-scoping every league query; a club's "First Blood" achievement
+    must only ever consider that club's own (system's) results."""
+    stmt = (
+        select(LeagueResult)
+        .where(LeagueResult.club_id == club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.result != "Draw")
+        .order_by(LeagueResult.created_at)
+        .limit(1)
+    )
     first = session.exec(stmt).first()
     if first is None:
         return None
@@ -297,8 +311,9 @@ def post_discord_achievement(player_name: str, achievement: str, club_id: int, d
         pass
 
 
-def announce_new_achievements(db: Session, player_id: int) -> None:
-    """Check for newly earned league achievements and post to Discord.
+def announce_new_achievements(db: Session, player_id: int, system_id: int) -> None:
+    """Check for newly earned league achievements (in one system's league)
+    and post to Discord.
 
     Best-effort: the whole function is wrapped in try/except so a failure
     never breaks the caller (result submission, etc.).
@@ -315,12 +330,12 @@ def announce_new_achievements(db: Session, player_id: int) -> None:
         if not webhook_url:
             return
 
-        results = fetch_player_results(db, player_id, player.club_id)
+        results = fetch_player_results(db, player_id, player.club_id, system_id)
         record = compute_league_record(player_id, results)
         elo_history = build_elo_history(player_id, results)
         signups = fetch_player_signups(db, player_id, player.club_id)
         fac_usage = faction_usage_per_system(signups)
-        first_winner = first_league_winner_id(db)
+        first_winner = first_league_winner_id(db, player.club_id, system_id)
 
         current = set(compute_achievements(player_id, record, results, fac_usage, elo_history, first_winner))
         eligible_current = current & LEAGUE_ANNOUNCED_ACHIEVEMENTS

@@ -15,7 +15,7 @@ from sqlmodel import Session, or_, select
 
 from auth import require_user, current_user
 from database import get_session, resolve_request_club_id, resolve_webhook_url, scoped
-from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, User
+from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, SystemConfig, User
 from services import announce_new_achievements
 
 router = APIRouter(prefix="/league", tags=["league"])
@@ -66,6 +66,34 @@ def _resolve_league_system_id(db: Session, club_id: int) -> Optional[int]:
     return row.system_id if row else None
 
 
+def _resolve_system_id(db: Session, club_id: int, system: Optional[str]) -> Optional[int]:
+    """Resolve which system's league a request is for.
+
+    `system` given: must be a real catalogue system with a league enabled for
+    this club, else 422/404. `system` omitted: falls back to
+    _resolve_league_system_id (today's "the club's one league-enabled
+    system" behaviour) — every existing caller that doesn't pass `system`
+    keeps working unchanged, including once a club runs more than one
+    league (it then just needs to start passing `system` explicitly)."""
+    if system is None:
+        return _resolve_league_system_id(db, club_id)
+    config = db.exec(
+        select(SystemConfig).where(SystemConfig.legacy_system_name == system)
+    ).first()
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id,
+            ClubSystem.system_id == config.id,
+            ClubSystem.league_enabled == True,
+        )
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail=f"No league enabled for {system!r} at this club.")
+    return config.id
+
+
 def _current_season_id(db: Session, club_id: int, system_id: int) -> Optional[int]:
     """The season whose date range contains today for this (club, system);
     failing that, the most recent season by start_date; None if none exist."""
@@ -81,16 +109,61 @@ def _current_season_id(db: Session, club_id: int, system_id: int) -> Optional[in
     return seasons[0].id if seasons else None
 
 
+def _apply_elo(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tuple[float, float, Optional[int]]:
+    gt = (row.game_type or "Competitive").lower()
+    k = cfg.k_casual if gt == "casual" else cfg.k_competitive
+
+    e1 = 1.0 / (1.0 + 10.0 ** ((r2 - r1) / 400.0))
+    e2 = 1.0 / (1.0 + 10.0 ** ((r1 - r2) / 400.0))
+
+    if row.result == "Player 1 Victory":
+        score = 1.0
+    elif row.result == "Player 2 Victory":
+        score = 0.0
+    else:
+        score = 0.5
+
+    new_r1 = r1 + k * (score - e1) + _painting_bonus(cfg, row.player_1_painting_bonus)
+    new_r2 = r2 + k * ((1.0 - score) - e2) + _painting_bonus(cfg, row.player_2_painting_bonus)
+    return new_r1, new_r2, k
+
+
+def _apply_winloss(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tuple[float, float, Optional[int]]:
+    """Flat points: win/draw/loss points per LeagueConfig, cumulative from the
+    starting rating. Painting bonuses only apply if winloss_use_painting."""
+    if row.result == "Player 1 Victory":
+        d1, d2 = cfg.points_win, cfg.points_loss
+    elif row.result == "Player 2 Victory":
+        d1, d2 = cfg.points_loss, cfg.points_win
+    else:
+        d1 = d2 = cfg.points_draw
+
+    if cfg.winloss_use_painting:
+        d1 += _painting_bonus(cfg, row.player_1_painting_bonus)
+        d2 += _painting_bonus(cfg, row.player_2_painting_bonus)
+
+    return r1 + d1, r2 + d2, None
+
+
+# Method name -> (cfg, r1, r2, row) -> (new_r1, new_r2, k_used). Add a new
+# entry here (e.g. "bayesian") to plug in a third scoring method — nothing
+# else in _recalculate_ratings needs to change.
+_SCORING_METHODS = {
+    "elo": _apply_elo,
+    "winloss": _apply_winloss,
+}
+
+
 def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: int) -> None:
     """Full replay of one (club, system, season)'s LeagueResult rows, rebuilding
     that season's LeagueRating rows from scratch (ordered by id ascending).
 
-    Scoring comes from that league's LeagueConfig — ELO with configurable K /
-    painting bonuses / starting rating. With the default config this reproduces
-    the original hardcoded ELO byte-for-byte (K 10/40, +3/+1, start 1000). The
-    win/loss and Bayesian methods branch in here in a later phase."""
+    Scoring comes from that league's LeagueConfig.scoring_method. With the
+    default config ("elo") this reproduces the original hardcoded ELO
+    byte-for-byte (K 10/40, +3/+1, start 1000)."""
     cfg = _get_league_config(db, club_id, system_id)
     start = cfg.starting_rating
+    apply_result = _SCORING_METHODS.get(cfg.scoring_method, _apply_elo)
 
     results = db.exec(
         select(LeagueResult)
@@ -109,34 +182,19 @@ def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: i
         if p1 is None or p2 is None or p1 == p2:
             continue
 
-        gt = (row.game_type or "").strip()
-        if not gt:
+        if not (row.game_type or "").strip():
             row.game_type = "Competitive"
-            gt = "Competitive"
-
-        k = cfg.k_casual if gt.lower() == "casual" else cfg.k_competitive
 
         r1 = ratings.get(p1, start)
         r2 = ratings.get(p2, start)
 
-        e1 = 1.0 / (1.0 + 10.0 ** ((r2 - r1) / 400.0))
-        e2 = 1.0 / (1.0 + 10.0 ** ((r1 - r2) / 400.0))
-
-        if row.result == "Player 1 Victory":
-            score = 1.0
-        elif row.result == "Player 2 Victory":
-            score = 0.0
-        else:
-            score = 0.5
-
-        new_r1 = r1 + k * (score - e1) + _painting_bonus(cfg, row.player_1_painting_bonus)
-        new_r2 = r2 + k * ((1.0 - score) - e2) + _painting_bonus(cfg, row.player_2_painting_bonus)
+        new_r1, new_r2, k_used = apply_result(cfg, r1, r2, row)
 
         row.player_1_rating_before = r1
         row.player_2_rating_before = r2
         row.player_1_rating_after = new_r1
         row.player_2_rating_after = new_r2
-        row.k_factor_used = k
+        row.k_factor_used = k_used
         db.add(row)
 
         ratings[p1] = new_r1
@@ -216,6 +274,7 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
 @router.get("/factions")
 def list_factions(
     club: str | None = None,
+    system: str | None = None,
     origin: str | None = Header(default=None),
     user: Optional[User] = Depends(current_user),
     db: Session = Depends(get_session),
@@ -227,7 +286,10 @@ def list_factions(
     requests resolve via an explicit `club` param first, then the request's
     Origin header (subdomain-based resolution, no param needed for real
     browser calls); with neither, an anonymous request falls back to the
-    fail-loud single-active-club stopgap. See resolve_request_club_id."""
+    fail-loud single-active-club stopgap. See resolve_request_club_id.
+
+    `system` selects which system's league (omit for the club's one
+    league-enabled system, today's behaviour — see _resolve_system_id)."""
     try:
         club_id = resolve_request_club_id(db, user, club, origin)
     except ValueError as e:
@@ -235,7 +297,11 @@ def list_factions(
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    rows = db.exec(scoped(LeagueResult, club_id)).all()
+    system_id = _resolve_system_id(db, club_id, system)
+    if system_id is None:
+        return {"factions": []}
+
+    rows = db.exec(scoped(LeagueResult, club_id).where(LeagueResult.system_id == system_id)).all()
     factions: set[str] = set()
     for r in rows:
         if r.player_1_faction:
@@ -248,11 +314,18 @@ def list_factions(
 @router.get("/faction-stats")
 def faction_stats(
     faction: str = Query(...),
+    system: str | None = None,
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
+    system_id = _resolve_system_id(db, user.club_id, system)
+    if system_id is None:
+        return {"faction": faction, "players": []}
+
     rows = db.exec(
-        scoped(LeagueResult, user.club_id).where(
+        scoped(LeagueResult, user.club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(
             or_(
                 LeagueResult.player_1_faction == faction,
                 LeagueResult.player_2_faction == faction,
@@ -313,6 +386,9 @@ class SubmitResultIn(BaseModel):
     player_2_painting_bonus: Optional[str] = None
     game_type: str
     result: str
+    # Which system's league this result is for. Omit for the club's one
+    # league-enabled system (today's single-league behaviour).
+    system: Optional[str] = None
 
 
 @router.post("/results")
@@ -352,9 +428,8 @@ def submit_result(
         raise HTTPException(status_code=422, detail="Invalid player 2 painting bonus.")
 
     # Resolve which system's league this result belongs to, and its current
-    # season. Single-league today (the club's one league_enabled system); the
-    # explicit per-system param arrives in a later phase.
-    system_id = _resolve_league_system_id(db, user.club_id)
+    # season.
+    system_id = _resolve_system_id(db, user.club_id, body.system)
     if system_id is None:
         raise HTTPException(status_code=422, detail="No league is enabled for this club.")
     season_id = _current_season_id(db, user.club_id, system_id)
@@ -419,7 +494,7 @@ def submit_result(
     db.refresh(row)
 
     _post_league_webhook(db, row)
-    announce_new_achievements(db, row.player_1_id)
-    announce_new_achievements(db, row.player_2_id)
+    announce_new_achievements(db, row.player_1_id, system_id)
+    announce_new_achievements(db, row.player_2_id, system_id)
 
     return {"ok": True, "duplicate": False, "result": row}

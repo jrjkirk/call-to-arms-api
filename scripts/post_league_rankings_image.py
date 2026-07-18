@@ -20,42 +20,52 @@ from sqlmodel import Session, select
 
 from database import engine, resolve_webhook_url
 from main import _compute_league_rankings
-from models import Club
+from models import Club, ClubSystem, SystemConfig
 from render_league_rankings_image import render_league_rankings_image
 
 
 def main() -> None:
-    # Resolve every qualifying club's webhook + rankings inside the DB session,
-    # then close it before doing any network posting (same ordering the
-    # single-club version deliberately used — never hold a DB connection open
-    # across a 30s Discord POST).
-    jobs: list[tuple[str, str, list]] = []  # (slug, webhook_url, rankings)
+    # Resolve every qualifying club-system's webhook + rankings inside the DB
+    # session, then close it before doing any network posting (same ordering
+    # the single-club version deliberately used — never hold a DB connection
+    # open across a 30s Discord POST). Iterates league_enabled ClubSystem rows
+    # rather than a single club-wide flag — a club can now run more than one
+    # system's league, each posted separately.
+    jobs: list[tuple[str, str, str, list]] = []  # (slug, system_name, webhook_url, rankings)
     with Session(engine) as db:
-        clubs = db.exec(
-            select(Club).where(Club.active == True).where(Club.leagues_enabled == True)
+        rows = db.exec(
+            select(ClubSystem, Club, SystemConfig)
+            .join(Club, Club.id == ClubSystem.club_id)
+            .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+            .where(Club.active == True)
+            .where(ClubSystem.league_enabled == True)
         ).all()
-        if not clubs:
-            print("No active leagues-enabled clubs, nothing to post.")
+        if not rows:
+            print("No active clubs with a league enabled, nothing to post.")
             return
 
-        for club in clubs:
+        for club_system, club, system_config in rows:
+            # league_rankings is a club-level webhook type (system_id always
+            # NULL — see admin.py's WEBHOOK_TYPES_CLUB_LEVEL), not per-system:
+            # a club with more than one league still posts all of them to the
+            # same configured channel. Not resolved per-system_config here.
             webhook_url = resolve_webhook_url(db, club.id, "league_rankings")
             if not webhook_url:
-                # Skip loudly-but-cleanly, before computing rankings for a club
-                # that has nowhere to post them.
-                print(f"[{club.slug}] No league-rankings webhook configured, skipping.")
+                # Skip loudly-but-cleanly, before computing rankings for a
+                # club-system that has nowhere to post them.
+                print(f"[{club.slug}/{system_config.slug}] No league-rankings webhook configured, skipping.")
                 continue
-            rankings = _compute_league_rankings(db, club.id)
-            jobs.append((club.slug, webhook_url, rankings))
+            rankings = _compute_league_rankings(db, club.id, system_config.id)
+            jobs.append((club.slug, system_config.name, webhook_url, rankings))
 
-    for slug, webhook_url, rankings in jobs:
+    for slug, system_name, webhook_url, rankings in jobs:
         buf = render_league_rankings_image(rankings)
         if buf is None:
             print(f"[{slug}] No league results yet, skipping.")
             continue
 
         content = (
-            "📜 **The Old World League Standings** 📜\n\n"
+            f"📜 **The {system_name} League Standings** 📜\n\n"
             "The latest rankings have been recorded by the keepers of the chronicle. "
             "View who climbs, who falls, and who clings to the top of the table.\n\n"
             "*Submit your results to keep the standings sharp. The throne is never safe.*"

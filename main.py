@@ -22,7 +22,7 @@ from services import (
 )
 from auth import router as auth_router, require_user, current_user
 from signups import router as signups_router, CANONICAL_VIBES, _get_system_config
-from league import router as league_router
+from league import router as league_router, _resolve_league_system_id, _resolve_system_id
 from admin import router as admin_router
 
 app = FastAPI()
@@ -196,10 +196,21 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
 
     club = session.get(Club, player.club_id)
 
-    rating_row = session.exec(
-        scoped(LeagueRating, user.club_id).where(LeagueRating.player_id == player_id)
-    ).first()
-    results = fetch_player_results(session, player_id, user.club_id)
+    # Resolves to the club's one league-enabled system today; a club running
+    # more than one system's league will need per-system player pages (Phase
+    # 4) — this keeps get_player's single `league` section correct and
+    # unchanged for the current single-league reality.
+    league_system_id = _resolve_league_system_id(session, user.club_id)
+
+    rating_row = None
+    results: list[LeagueResult] = []
+    if league_system_id is not None:
+        rating_row = session.exec(
+            scoped(LeagueRating, user.club_id)
+            .where(LeagueRating.player_id == player_id)
+            .where(LeagueRating.system_id == league_system_id)
+        ).first()
+        results = fetch_player_results(session, player_id, user.club_id, league_system_id)
     record = compute_league_record(player_id, results)
     elo_history = build_elo_history(player_id, results)
 
@@ -209,6 +220,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
             select(LeagueRating)
             .join(Player, Player.id == LeagueRating.player_id)
             .where(LeagueRating.club_id == user.club_id)
+            .where(LeagueRating.system_id == league_system_id)
             .where(Player.active == True)
             .where(LeagueRating.rating > rating_row.rating)
         ).all()
@@ -218,7 +230,10 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     sign_counts = signup_counts_per_system(signups)
     fac_usage = faction_usage_per_system(signups)
 
-    first_winner = first_league_winner_id(session)
+    first_winner = (
+        first_league_winner_id(session, user.club_id, league_system_id)
+        if league_system_id is not None else None
+    )
     achievements = compute_achievements(
         player_id, record, results, fac_usage, elo_history, first_winner
     )
@@ -370,12 +385,13 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     }
 
 
-def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
+def _compute_league_rankings(session: Session, club_id: int, system_id: int) -> list[dict]:
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
         .where(Player.active == True)
         .where(LeagueRating.club_id == club_id)
+        .where(LeagueRating.system_id == system_id)
         .order_by(LeagueRating.rating.desc())
     )
     rows = session.exec(statement).all()
@@ -385,7 +401,7 @@ def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
     # and use their rating_before from that row as the comparison point.
     cutoff = datetime.utcnow().date() - timedelta(days=7)
     earliest_recent: dict[int, LeagueResult] = {}
-    for r in session.exec(scoped(LeagueResult, club_id)).all():
+    for r in session.exec(scoped(LeagueResult, club_id).where(LeagueResult.system_id == system_id)).all():
         if not r.result_date:
             continue
         parsed = None
@@ -415,7 +431,7 @@ def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
 
     rankings = []
     for rank, (rating, player) in enumerate(rows, start=1):
-        results = fetch_player_results(session, player.id, club_id)
+        results = fetch_player_results(session, player.id, club_id, system_id)
         record = compute_league_record(player.id, results)
 
         faction_counts: dict[str, int] = {}
@@ -440,8 +456,17 @@ def _compute_league_rankings(session: Session, club_id: int) -> list[dict]:
 
 
 @app.get("/league/rankings")
-def league_rankings(user: User = Depends(require_user), session: Session = Depends(get_session)):
-    return _compute_league_rankings(session, user.club_id)
+def league_rankings(
+    system: Optional[str] = None,
+    user: User = Depends(require_user),
+    session: Session = Depends(get_session),
+):
+    """`system` selects which system's league (omit for the club's one
+    league-enabled system, today's behaviour — see league._resolve_system_id)."""
+    system_id = _resolve_system_id(session, user.club_id, system)
+    if system_id is None:
+        return []
+    return _compute_league_rankings(session, user.club_id, system_id)
 
 
 @app.get("/signups/stats")
