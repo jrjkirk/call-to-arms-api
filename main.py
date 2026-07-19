@@ -22,7 +22,7 @@ from services import (
 )
 from auth import router as auth_router, require_user, current_user
 from signups import router as signups_router, CANONICAL_VIBES, _get_system_config
-from league import router as league_router, _resolve_league_system_id, _resolve_system_id, _current_season_id
+from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
 
 app = FastAPI()
@@ -200,53 +200,103 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
 
     club = session.get(Club, player.club_id)
 
-    # Resolves to the club's one league-enabled system today; a club running
-    # more than one system's league will need per-system player pages (Phase
-    # 4) — this keeps get_player's single `league` section correct and
-    # unchanged for the current single-league reality.
-    league_system_id = _resolve_league_system_id(session, user.club_id)
-
-    rating_row = None
-    results: list[LeagueResult] = []
-    if league_system_id is not None:
-        rating_row = session.exec(
-            scoped(LeagueRating, user.club_id)
-            .where(LeagueRating.player_id == player_id)
-            .where(LeagueRating.system_id == league_system_id)
-        ).first()
-        results = fetch_player_results(session, player_id, user.club_id, league_system_id)
-    record = compute_league_record(player_id, results)
-    elo_history = build_elo_history(player_id, results)
-
-    rank = None
-    if rating_row is not None and player.active:
-        higher = session.exec(
-            select(LeagueRating)
-            .join(Player, Player.id == LeagueRating.player_id)
-            .where(LeagueRating.club_id == user.club_id)
-            .where(LeagueRating.system_id == league_system_id)
-            .where(Player.active == True)
-            .where(LeagueRating.rating > rating_row.rating)
-        ).all()
-        rank = len(higher) + 1
-
     signups = fetch_player_signups(session, player_id, user.club_id)
     sign_counts = signup_counts_per_system(signups)
     fac_usage = faction_usage_per_system(signups)
 
-    first_winner = (
-        first_league_winner_id(session, user.club_id, league_system_id)
-        if league_system_id is not None else None
-    )
-    achievements = compute_achievements(
-        player_id, record, results, fac_usage, elo_history, first_winner
-    )
+    # A club can run more than one system's league now — build one section
+    # per league-enabled system the player has actually played in, not just
+    # the first one. Achievements are computed per system too (so "5+ games"
+    # etc. mean 5+ games IN THAT league, not summed across leagues) and then
+    # merged with the cross-system achievements (Diversifier/Veteran/etc,
+    # which use signups across all systems and are identical every call) —
+    # merge dedupes by name since compute_achievements() returns the same
+    # cross-system entries on every iteration.
+    league_rows = session.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == user.club_id, ClubSystem.league_enabled == True)
+        .order_by(SystemConfig.id)
+    ).all()
+
+    achievement_names: list[str] = []
+    seen_achievements: set[str] = set()
+    leagues_out: list[dict] = []
+    # (frozenset{p1,p2}, date) -> LeagueResult, across every league system —
+    # feeds the per-system "recent games" Win/Loss/Draw badge below. Used to
+    # be built from only the single resolved league's results, so a second
+    # league's recent games silently got no result badge; now covers all of
+    # them.
+    tow_lookup: dict[tuple, LeagueResult] = {}
+
+    def _record_lookup(results: list[LeagueResult]) -> None:
+        for r in results:
+            if r.result_date and r.player_1_id and r.player_2_id:
+                parsed_date = None
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+                    try:
+                        parsed_date = datetime.strptime(r.result_date, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if parsed_date:
+                    tow_lookup[(frozenset({r.player_1_id, r.player_2_id}), parsed_date)] = r
+
+    if not league_rows:
+        record0 = compute_league_record(player_id, [])
+        for a in compute_achievements(player_id, record0, [], fac_usage, [], None):
+            if a not in seen_achievements:
+                seen_achievements.add(a)
+                achievement_names.append(a)
+    else:
+        for _cs, sys_config in league_rows:
+            sid = sys_config.id
+            rating_row = session.exec(
+                scoped(LeagueRating, user.club_id)
+                .where(LeagueRating.player_id == player_id)
+                .where(LeagueRating.system_id == sid)
+            ).first()
+            results = fetch_player_results(session, player_id, user.club_id, sid)
+            record = compute_league_record(player_id, results)
+            elo_history = build_elo_history(player_id, results)
+            first_winner = first_league_winner_id(session, user.club_id, sid)
+
+            for a in compute_achievements(player_id, record, results, fac_usage, elo_history, first_winner):
+                if a not in seen_achievements:
+                    seen_achievements.add(a)
+                    achievement_names.append(a)
+
+            _record_lookup(results)
+
+            if record["total_games"] == 0:
+                continue
+
+            rank = None
+            if rating_row is not None and player.active:
+                higher = session.exec(
+                    select(LeagueRating)
+                    .join(Player, Player.id == LeagueRating.player_id)
+                    .where(LeagueRating.club_id == user.club_id)
+                    .where(LeagueRating.system_id == sid)
+                    .where(Player.active == True)
+                    .where(LeagueRating.rating > rating_row.rating)
+                ).all()
+                rank = len(higher) + 1
+
+            leagues_out.append({
+                "system": sys_config.legacy_system_name,
+                "system_name": sys_config.name,
+                "rating": rating_row.rating if rating_row else None,
+                "rank": rank,
+                **record,
+                "recent_results": results[:5],
+                "elo_history": elo_history,
+            })
+
     achievements_detailed = [
         {"name": a, "description": ACHIEVEMENT_DESCRIPTIONS.get(a, "")}
-        for a in achievements
+        for a in achievement_names
     ]
-
-    recent = results[:5]
 
     # Discord identity
     discord_user = session.exec(
@@ -256,20 +306,6 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
         {"discord_name": discord_user.discord_name, "avatar_url": discord_user.avatar_url}
         if discord_user else None
     )
-
-    # Build lookup for TOW league results: (frozenset{p1_id, p2_id}, date) -> LeagueResult
-    tow_lookup: dict[tuple, LeagueResult] = {}
-    for r in results:
-        if r.result_date and r.player_1_id and r.player_2_id:
-            parsed_date = None
-            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-                try:
-                    parsed_date = datetime.strptime(r.result_date, fmt).date()
-                    break
-                except ValueError:
-                    continue
-            if parsed_date:
-                tow_lookup[(frozenset({r.player_1_id, r.player_2_id}), parsed_date)] = r
 
     # Index this player's signups by system and by id for quick lookup
     signup_ids_by_system: dict[str, set[int]] = {}
@@ -379,13 +415,11 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
         "signup_counts": sign_counts,
         "faction_usage": fac_usage,
         "recent_games_by_system": recent_games_by_system,
-        "league": {
-            "rating": rating_row.rating if rating_row else None,
-            "rank": rank,
-            **record,
-            "recent_results": recent,
-            "elo_history": elo_history,
-        },
+        # One entry per league-enabled system the player has actually played
+        # in (empty list if none) — replaces the old single `league` object,
+        # which only ever showed whichever league-enabled system happened to
+        # come back first from the DB.
+        "leagues": leagues_out,
     }
 
 
