@@ -35,6 +35,7 @@ from league import (
     _normalise_optional,
     _recalculate_ratings,
     _resolve_system_id,
+    _season_champion,
 )
 from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 import storage
@@ -1613,13 +1614,14 @@ def save_league_config(
     return _league_config_row(cfg)
 
 
-def _league_season_row(s: LeagueSeason, current_id: Optional[int]) -> dict:
+def _league_season_row(db: Session, s: LeagueSeason, current_id: Optional[int]) -> dict:
     return {
         "id": s.id,
         "name": s.name,
         "start_date": s.start_date.isoformat(),
         "end_date": s.end_date.isoformat() if s.end_date else None,
         "current": s.id == current_id,
+        "champion": _season_champion(db, s.club_id, s.system_id, s.id),
     }
 
 
@@ -1630,7 +1632,8 @@ def list_league_seasons(
     db: Session = Depends(get_session),
 ):
     """This club's seasons for one system's league, newest first, each
-    flagged whether it's the current one (see league._current_season_id)."""
+    flagged whether it's the current one (see league._current_season_id) and
+    carrying its champion (see league._season_champion)."""
     _require_system_scope(system, user, db)
     config = _get_system_config(db, system)
     if config is None:
@@ -1641,7 +1644,7 @@ def list_league_seasons(
         .order_by(LeagueSeason.start_date.desc())
     ).all()
     current_id = _current_season_id(db, user.club_id, config.id)
-    return [_league_season_row(s, current_id) for s in seasons]
+    return [_league_season_row(db, s, current_id) for s in seasons]
 
 
 class LeagueSeasonCreateBody(BaseModel):
@@ -1693,7 +1696,7 @@ def create_league_season(
     db.commit()
     db.refresh(season)
     current_id = _current_season_id(db, user.club_id, config.id)
-    return _league_season_row(season, current_id)
+    return _league_season_row(db, season, current_id)
 
 
 # ---------------------------------------------------------------------------

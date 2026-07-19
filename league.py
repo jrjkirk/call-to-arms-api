@@ -109,6 +109,25 @@ def _current_season_id(db: Session, club_id: int, system_id: int) -> Optional[in
     return seasons[0].id if seasons else None
 
 
+def _season_champion(db: Session, club_id: int, system_id: int, season_id: int) -> Optional[dict]:
+    """The top-rated active player in one season, or None if that season has
+    no ratings yet (e.g. the current season before any result is recorded).
+    Used to surface each closed season's champion in season listings."""
+    row = db.exec(
+        select(LeagueRating, Player)
+        .join(Player, Player.id == LeagueRating.player_id)
+        .where(Player.active == True)
+        .where(LeagueRating.club_id == club_id)
+        .where(LeagueRating.system_id == system_id)
+        .where(LeagueRating.season_id == season_id)
+        .order_by(LeagueRating.rating.desc())
+    ).first()
+    if row is None:
+        return None
+    rating, player = row
+    return {"player_id": player.id, "name": player.name, "rating": rating.rating}
+
+
 def _apply_elo(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tuple[float, float, Optional[int]]:
     gt = (row.game_type or "Competitive").lower()
     k = cfg.k_casual if gt == "casual" else cfg.k_competitive
@@ -269,6 +288,48 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
         httpx.post(url, json={"content": content}, timeout=5.0)
     except Exception:
         pass
+
+
+@router.get("/seasons")
+def list_seasons(
+    club: str | None = None,
+    system: str | None = None,
+    origin: str | None = Header(default=None),
+    user: Optional[User] = Depends(current_user),
+    db: Session = Depends(get_session),
+):
+    """Public season list for one system's league, newest first, each with
+    its champion (the top-rated active player in that season, or null if it
+    has no ratings yet — normal for a freshly-started current season). Same
+    optional-auth club resolution as list_factions; used by the /leagues
+    page's archive picker."""
+    try:
+        club_id = resolve_request_club_id(db, user, club, origin)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    system_id = _resolve_system_id(db, club_id, system)
+    if system_id is None:
+        return []
+    current_id = _current_season_id(db, club_id, system_id)
+    seasons = db.exec(
+        select(LeagueSeason)
+        .where(LeagueSeason.club_id == club_id, LeagueSeason.system_id == system_id)
+        .order_by(LeagueSeason.start_date.desc())
+    ).all()
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "start_date": s.start_date.isoformat(),
+            "end_date": s.end_date.isoformat() if s.end_date else None,
+            "current": s.id == current_id,
+            "champion": _season_champion(db, club_id, system_id, s.id),
+        }
+        for s in seasons
+    ]
 
 
 @router.get("/factions")

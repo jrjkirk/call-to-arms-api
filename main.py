@@ -22,7 +22,7 @@ from services import (
 )
 from auth import router as auth_router, require_user, current_user
 from signups import router as signups_router, CANONICAL_VIBES, _get_system_config
-from league import router as league_router, _resolve_league_system_id, _resolve_system_id
+from league import router as league_router, _resolve_league_system_id, _resolve_system_id, _current_season_id
 from admin import router as admin_router
 
 app = FastAPI()
@@ -389,23 +389,44 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     }
 
 
-def _compute_league_rankings(session: Session, club_id: int, system_id: int) -> list[dict]:
+def _compute_league_rankings(session: Session, club_id: int, system_id: int, season_id: int) -> list[dict]:
+    """Standings for one (club, system, season). season_id is required —
+    LeagueRating rows from a closed season are never deleted when a new one
+    starts (see league._recalculate_ratings), so without this filter a
+    club's second season would silently blend both seasons' ratings into one
+    table. Pass an archived season_id to get that season's frozen final
+    standings (no new results can land there once a newer season exists)."""
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
         .where(Player.active == True)
         .where(LeagueRating.club_id == club_id)
         .where(LeagueRating.system_id == system_id)
+        .where(LeagueRating.season_id == season_id)
         .order_by(LeagueRating.rating.desc())
     )
     rows = session.exec(statement).all()
+
+    # This season's results only — record/most-played-faction below are
+    # season stats, distinct from fetch_player_results' all-time career view
+    # (used by achievements, which are deliberately not season-scoped).
+    season_results = session.exec(
+        scoped(LeagueResult, club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.season_id == season_id)
+    ).all()
+    results_by_player: dict[int, list[LeagueResult]] = {}
+    for r in season_results:
+        for pid in (r.player_1_id, r.player_2_id):
+            if pid is not None:
+                results_by_player.setdefault(pid, []).append(r)
 
     # Build previous_rank using a 7-day rolling comparison.
     # For each player, find their earliest-processed result in the last 7 days
     # and use their rating_before from that row as the comparison point.
     cutoff = datetime.utcnow().date() - timedelta(days=7)
     earliest_recent: dict[int, LeagueResult] = {}
-    for r in session.exec(scoped(LeagueResult, club_id).where(LeagueResult.system_id == system_id)).all():
+    for r in season_results:
         if not r.result_date:
             continue
         parsed = None
@@ -435,7 +456,7 @@ def _compute_league_rankings(session: Session, club_id: int, system_id: int) -> 
 
     rankings = []
     for rank, (rating, player) in enumerate(rows, start=1):
-        results = fetch_player_results(session, player.id, club_id, system_id)
+        results = results_by_player.get(player.id, [])
         record = compute_league_record(player.id, results)
 
         faction_counts: dict[str, int] = {}
@@ -462,15 +483,21 @@ def _compute_league_rankings(session: Session, club_id: int, system_id: int) -> 
 @app.get("/league/rankings")
 def league_rankings(
     system: Optional[str] = None,
+    season_id: Optional[int] = None,
     user: User = Depends(require_user),
     session: Session = Depends(get_session),
 ):
     """`system` selects which system's league (omit for the club's one
-    league-enabled system, today's behaviour — see league._resolve_system_id)."""
+    league-enabled system, today's behaviour — see league._resolve_system_id).
+    `season_id` selects which season's standings (omit for the current one);
+    pass an archived season's id to view its frozen final standings."""
     system_id = _resolve_system_id(session, user.club_id, system)
     if system_id is None:
         return []
-    return _compute_league_rankings(session, user.club_id, system_id)
+    resolved_season_id = season_id or _current_season_id(session, user.club_id, system_id)
+    if resolved_season_id is None:
+        return []
+    return _compute_league_rankings(session, user.club_id, system_id, resolved_season_id)
 
 
 @app.get("/signups/stats")

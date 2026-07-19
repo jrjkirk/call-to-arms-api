@@ -19,6 +19,7 @@ import httpx
 from sqlmodel import Session, select
 
 from database import engine, resolve_webhook_url
+from league import _current_season_id
 from main import _compute_league_rankings
 from models import Club, ClubSystem, SystemConfig
 from render_league_rankings_image import render_league_rankings_image
@@ -55,7 +56,11 @@ def main() -> None:
                 # club-system that has nowhere to post them.
                 print(f"[{club.slug}/{system_config.slug}] No league-rankings webhook configured, skipping.")
                 continue
-            rankings = _compute_league_rankings(db, club.id, system_config.id)
+            season_id = _current_season_id(db, club.id, system_config.id)
+            if season_id is None:
+                print(f"[{club.slug}/{system_config.slug}] No season configured yet, skipping.")
+                continue
+            rankings = _compute_league_rankings(db, club.id, system_config.id, season_id)
             jobs.append((club.slug, system_config.name, webhook_url, rankings))
 
     for slug, system_name, webhook_url, rankings in jobs:
