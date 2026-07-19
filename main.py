@@ -115,7 +115,11 @@ def _system_dict(r: SystemConfig, club_system=None) -> dict:
         "scenario_options": r.scenario_options,
         "default_scenario": r.default_scenario,
         "allows_demo": r.allows_demo,
-        "has_league": r.has_league,
+        # Per-club reality when club context is available (does THIS club run
+        # a league for this system — ClubSystem.league_enabled, the source of
+        # truth since the modular-leagues work); falls back to the platform
+        # catalogue flag only for the fully-unscoped call (no club to ask).
+        "has_league": bool(club_system.league_enabled) if club_system is not None else r.has_league,
         # System *rules* — sourced from the hardcoded per-system modules in
         # systems/, keyed by legacy_system_name, NOT from the (dead)
         # SystemConfig.faction_list / icon_folder DB columns. None for any
