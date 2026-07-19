@@ -1512,16 +1512,48 @@ def get_league_config(
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """This club's scoring config for one system's league. Returns the
-    unsaved-defaults shape (matches the original hardcoded ELO) if the club
-    hasn't customised it yet — same "defaults until saved" convention as
-    SystemConfig."""
+    """This club's league_enabled flag + scoring config for one system.
+    Config returns the unsaved-defaults shape (matches the original
+    hardcoded ELO) if the club hasn't customised it yet — same
+    "defaults until saved" convention as SystemConfig."""
     _require_system_scope(system, user, db)
     config = _get_system_config(db, system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
     cfg = _get_league_config(db, user.club_id, config.id)
-    return _league_config_row(cfg)
+    return {"league_enabled": bool(cs and cs.league_enabled), **_league_config_row(cfg)}
+
+
+class LeagueSettingsBody(BaseModel):
+    system: str
+    league_enabled: bool
+
+
+@router.post("/league-settings")
+def update_league_settings(
+    body: LeagueSettingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Enable/disable this club's league for one system (mirrors
+    POST /admin/missions-settings). Disabling does not delete any data —
+    results/ratings/seasons/config are all preserved, just inactive."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+    cs.league_enabled = body.league_enabled
+    db.add(cs)
+    db.commit()
+    return {"ok": True}
 
 
 VALID_SCORING_METHODS = {"elo", "winloss"}
