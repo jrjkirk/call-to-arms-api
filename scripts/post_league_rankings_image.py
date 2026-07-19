@@ -5,12 +5,12 @@ Thursdays). Reuses main.py's _compute_league_rankings helper directly (same
 DRY pattern as post_pairings_image.py importing from admin.py) so this always
 reflects the same rankings/W-D-L/most-played-faction data the live site shows.
 
-Iterates every active, leagues-enabled club rather than resolving a single
-active club — league rankings is a league-only feature, so only clubs with
-leagues_enabled=true are ever considered (same gating as the Discord
-Integrations webhooks panel). The webhook is resolved DB-only via
+Iterates every league-enabled ClubSystem row rather than resolving a single
+active club — a club can run more than one system's league, each posted
+separately (league_rankings is a per-system webhook — see admin.py's
+WEBHOOK_TYPES_LEAGUE). The webhook is resolved DB-only via
 resolve_webhook_url with no env-var fallback (matching run_call_to_arms_check.py
-and the signups.py read-path convention); a club with no configured
+and the signups.py read-path convention); a club-system with no configured
 league_rankings webhook is skipped cleanly, before its rankings are computed.
 """
 import json
@@ -46,11 +46,10 @@ def main() -> None:
             return
 
         for club_system, club, system_config in rows:
-            # league_rankings is a club-level webhook type (system_id always
-            # NULL — see admin.py's WEBHOOK_TYPES_CLUB_LEVEL), not per-system:
-            # a club with more than one league still posts all of them to the
-            # same configured channel. Not resolved per-system_config here.
-            webhook_url = resolve_webhook_url(db, club.id, "league_rankings")
+            # league_rankings is a per-system webhook type (see admin.py's
+            # WEBHOOK_TYPES_LEAGUE) — a club running two leagues can route
+            # each one's rankings post to its own Discord channel.
+            webhook_url = resolve_webhook_url(db, club.id, "league_rankings", system_config.id)
             if not webhook_url:
                 # Skip loudly-but-cleanly, before computing rankings for a
                 # club-system that has nowhere to post them.

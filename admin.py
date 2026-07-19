@@ -485,8 +485,8 @@ def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
     return a_eta or b_eta
 
 
-def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup], system: str) -> Optional[str]:
-    if system == "Kill Team":
+def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup], uses_points: bool) -> Optional[str]:
+    if not uses_points:
         return None
     vals = [su.points for su in (a_su, b_su) if su is not None and isinstance(su.points, int)]
     return str(min(vals)) if vals else None
@@ -500,7 +500,7 @@ def _build_display_row(
     b_faction: Optional[str],
     prearranged: bool,
     signups_by_id: dict,
-    system: str,
+    uses_points: bool,
 ) -> dict:
     a_su = signups_by_id.get(a_signup_id)
     b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
@@ -523,7 +523,7 @@ def _build_display_row(
         "b_vibe": b_vibe,
         "type": _public_vibe_display(a_vibe, b_vibe),
         "eta": _eta_show(a_su, b_su),
-        "points": _pts_show(a_su, b_su, system),
+        "points": _pts_show(a_su, b_su, uses_points),
         "prearranged": prearranged,
     }
 
@@ -546,7 +546,7 @@ def _collect_signups_for_rows(rows, db: Session, club_id: int) -> dict:
     return {s.id: s for s in rows_q}
 
 
-def _pairing_rows_to_display(pairings: list, signups_by_id: dict, system: str) -> list:
+def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: bool) -> list:
     result = []
     for p in pairings:
         a_faction = p.a_faction or (signups_by_id.get(p.a_signup_id, None) and signups_by_id[p.a_signup_id].faction)
@@ -556,18 +556,18 @@ def _pairing_rows_to_display(pairings: list, signups_by_id: dict, system: str) -
         result.append(_build_display_row(
             p.id, p.a_signup_id, p.b_signup_id,
             a_faction, b_faction,
-            p.prearranged, signups_by_id, system,
+            p.prearranged, signups_by_id, uses_points,
         ))
     return result
 
 
-def _dicts_to_display(dicts: list, signups_by_id: dict, system: str) -> list:
+def _dicts_to_display(dicts: list, signups_by_id: dict, uses_points: bool) -> list:
     return [
         _build_display_row(
             None,
             d["a_signup_id"], d.get("b_signup_id"),
             d.get("a_faction"), d.get("b_faction"),
-            False, signups_by_id, system,
+            False, signups_by_id, uses_points,
         )
         for d in dicts
     ]
@@ -810,8 +810,10 @@ def pairings_preview(
     all_rows = list(prearranged) + proposed_dicts
     signups_by_id = _collect_signups_for_rows(all_rows, db, user.club_id)
 
-    display = _pairing_rows_to_display(prearranged, signups_by_id, body.system) + \
-              _dicts_to_display(proposed_dicts, signups_by_id, body.system)
+    config = _get_system_config(db, body.system)
+    uses_points = config.uses_points if config else (body.system != "Kill Team")
+    display = _pairing_rows_to_display(prearranged, signups_by_id, uses_points) + \
+              _dicts_to_display(proposed_dicts, signups_by_id, uses_points)
 
     return {"rows": display, "preview": True}
 
@@ -840,7 +842,9 @@ def pairings_generate(
     new_pairings = generate(db, body.week, body.system, persist=True, club_id=user.club_id)
 
     signups_by_id = _collect_signups_for_rows(new_pairings, db, user.club_id)
-    display = _pairing_rows_to_display(new_pairings, signups_by_id, body.system)
+    config = _get_system_config(db, body.system)
+    uses_points = config.uses_points if config else (body.system != "Kill Team")
+    display = _pairing_rows_to_display(new_pairings, signups_by_id, uses_points)
     return {"rows": display}
 
 
@@ -869,7 +873,9 @@ def pairings_get(
     published = gate.published if gate else False
 
     signups_by_id = _collect_signups_for_rows(rows, db, user.club_id)
-    display = _pairing_rows_to_display(rows, signups_by_id, system)
+    config = _get_system_config(db, system)
+    uses_points = config.uses_points if config else (system != "Kill Team")
+    display = _pairing_rows_to_display(rows, signups_by_id, uses_points)
     return {"rows": display, "published": published}
 
 
@@ -1700,12 +1706,19 @@ def create_league_season(
 
 
 # ---------------------------------------------------------------------------
-# Club webhooks — self-service (club-wide, not per-system scope)
+# Club webhooks — self-service, per-system scope
 # ---------------------------------------------------------------------------
 
+# Shown (and creatable) for every system the club has enabled.
 WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms")
-WEBHOOK_TYPES_CLUB_LEVEL: tuple[str, ...] = ("league_result", "achievement", "league_rankings")
-ALL_WEBHOOK_TYPES: frozenset[str] = frozenset(WEBHOOK_TYPES_PER_SYSTEM + WEBHOOK_TYPES_CLUB_LEVEL)
+# Shown (and creatable) only for systems that ALSO have their league enabled
+# (ClubSystem.league_enabled) — these were club-wide (system_id always NULL)
+# before leagues themselves became per-system; a club running two leagues
+# couldn't route their result/rankings/achievement posts to different
+# channels. Migrated existing club-level rows to their club's single
+# league-enabled system — see migrations/split_league_webhooks_per_system.py.
+WEBHOOK_TYPES_LEAGUE: tuple[str, ...] = ("league_result", "achievement", "league_rankings")
+ALL_WEBHOOK_TYPES: frozenset[str] = frozenset(WEBHOOK_TYPES_PER_SYSTEM + WEBHOOK_TYPES_LEAGUE)
 
 
 def _mask_webhook_row(row: Optional[ClubWebhook]) -> dict:
@@ -1724,21 +1737,19 @@ def list_club_webhooks(
     db: Session = Depends(get_session),
 ):
     """Webhook grid for the caller's own club, scoped to what the club
-    actually runs: per-system webhooks appear only for the systems this club
-    has enabled (not the whole catalogue), and the club-level league/
-    achievement webhooks appear only when the club has leagues enabled. Each
-    listed (type, system) appears whether or not a row exists yet, so the UI
-    shows what's configurable, not just what's set."""
-    enabled_system_ids = {
-        cs.system_id
-        for cs in db.exec(scoped(ClubSystem, user.club_id).where(ClubSystem.enabled == True)).all()
-    }
+    actually runs: per-system webhooks (signup/pairings/call_to_arms) appear
+    for every system this club has enabled (not the whole catalogue); league
+    webhooks (league_result/achievement/league_rankings) appear only for
+    systems that also have their league enabled. Each listed (type, system)
+    appears whether or not a row exists yet, so the UI shows what's
+    configurable, not just what's set."""
+    club_systems = db.exec(scoped(ClubSystem, user.club_id)).all()
+    enabled_system_ids = {cs.system_id for cs in club_systems if cs.enabled}
+    league_system_ids = {cs.system_id for cs in club_systems if cs.league_enabled}
     systems = [
         s for s in db.exec(select(SystemConfig).where(SystemConfig.active == True)).all()
         if s.id in enabled_system_ids
     ]
-    club = db.get(Club, user.club_id)
-    leagues_enabled = bool(club and club.leagues_enabled)
 
     existing = db.exec(
         select(ClubWebhook).where(ClubWebhook.club_id == user.club_id)
@@ -1755,13 +1766,15 @@ def list_club_webhooks(
                 "system_name": system.name,
                 **_mask_webhook_row(row),
             })
-    if leagues_enabled:
-        for webhook_type in WEBHOOK_TYPES_CLUB_LEVEL:
-            row = existing_by_key.get((webhook_type, None))
+    for webhook_type in WEBHOOK_TYPES_LEAGUE:
+        for system in systems:
+            if system.id not in league_system_ids:
+                continue
+            row = existing_by_key.get((webhook_type, system.id))
             grid.append({
                 "webhook_type": webhook_type,
-                "system_id": None,
-                "system_name": None,
+                "system_id": system.id,
+                "system_name": system.name,
                 **_mask_webhook_row(row),
             })
     return grid
@@ -1789,7 +1802,7 @@ def upsert_club_webhook(
             detail=f"webhook_type must be one of: {sorted(ALL_WEBHOOK_TYPES)}",
         )
 
-    if body.webhook_type in WEBHOOK_TYPES_PER_SYSTEM:
+    if body.webhook_type in WEBHOOK_TYPES_PER_SYSTEM or body.webhook_type in WEBHOOK_TYPES_LEAGUE:
         if body.system_id is None:
             raise HTTPException(
                 status_code=422,
@@ -1798,27 +1811,20 @@ def upsert_club_webhook(
         system = db.get(SystemConfig, body.system_id)
         if system is None:
             raise HTTPException(status_code=404, detail="System not found.")
-        enabled = db.exec(
+        club_system = db.exec(
             scoped(ClubSystem, user.club_id)
             .where(ClubSystem.system_id == body.system_id)
             .where(ClubSystem.enabled == True)
         ).first()
-        if enabled is None:
+        if club_system is None:
             raise HTTPException(
                 status_code=422,
                 detail="This system is not enabled for your club.",
             )
-    else:
-        if body.system_id is not None:
+        if body.webhook_type in WEBHOOK_TYPES_LEAGUE and not club_system.league_enabled:
             raise HTTPException(
                 status_code=422,
-                detail=f"system_id must not be set for webhook_type={body.webhook_type!r}.",
-            )
-        club = db.get(Club, user.club_id)
-        if not (club and club.leagues_enabled):
-            raise HTTPException(
-                status_code=422,
-                detail="League and achievement webhooks require leagues to be enabled for your club.",
+                detail="League and achievement webhooks require this system's league to be enabled.",
             )
 
     if not body.url or not body.url.strip():
@@ -2190,7 +2196,6 @@ def list_platform_clubs(
             "name": c.name,
             "slug": c.slug,
             "active": c.active,
-            "leagues_enabled": c.leagues_enabled,
             "timezone": c.timezone,
             "contact_email": c.contact_email,
             "enabled_system_count": enabled_system_count,
@@ -2204,7 +2209,6 @@ class ClubCreateBody(BaseModel):
     slug: str
     timezone: str = "Europe/London"
     contact_email: Optional[str] = None
-    leagues_enabled: bool = True
     active: bool = True
 
 
@@ -2236,7 +2240,6 @@ def create_club(
         slug=slug,
         timezone=body.timezone,
         contact_email=body.contact_email,
-        leagues_enabled=body.leagues_enabled,
         active=body.active,
     )
     db.add(club)
@@ -2559,7 +2562,6 @@ class ClubUpdateBody(BaseModel):
     slug: Optional[str] = None
     timezone: Optional[str] = None
     contact_email: Optional[str] = None
-    leagues_enabled: Optional[bool] = None
 
 
 @router.patch("/platform/clubs/{club_id}")
@@ -2570,8 +2572,8 @@ def update_club(
     db: Session = Depends(get_session),
 ):
     """Partial-update a club's editable details (name, slug, timezone,
-    contact email, leagues flag). Platform-admin only. Each field is only
-    touched when present in the body — same partial-update pattern as
+    contact email). Platform-admin only. Each field is only touched when
+    present in the body — same partial-update pattern as
     PATCH /admin/players/{id}. Active state is handled separately by
     POST .../active and is intentionally not editable here.
 
@@ -2616,9 +2618,6 @@ def update_club(
     if body.contact_email is not None:
         club.contact_email = body.contact_email.strip() or None
 
-    if body.leagues_enabled is not None:
-        club.leagues_enabled = body.leagues_enabled
-
     db.add(club)
     db.commit()
     db.refresh(club)
@@ -2629,7 +2628,6 @@ def update_club(
         "active": club.active,
         "timezone": club.timezone,
         "contact_email": club.contact_email,
-        "leagues_enabled": club.leagues_enabled,
     }
 
 

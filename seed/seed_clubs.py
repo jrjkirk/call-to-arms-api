@@ -35,7 +35,6 @@ CLUB = dict(
     active=True,
     timezone="Europe/London",
     contact_email=None,
-    leagues_enabled=True,
 )
 
 # system_id is resolved at seed/verify time by looking up SystemConfig.legacy_system_name.

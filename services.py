@@ -236,13 +236,17 @@ def set_player_titles(player: Player, titles: list[str]) -> None:
     player.titles = json.dumps(cleaned) if cleaned else None
 
 
-# Tooltip text for each achievement, shown in the UI.
+# Tooltip text for each achievement, shown in the UI. Deliberately system-
+# agnostic wording ("league game" not "Old World League game") — achievements
+# are computed per-system now (see compute_achievements/announce_new_
+# achievements' system_id param), so this text must read correctly for any
+# system's league, not just the original Old World one.
 ACHIEVEMENT_DESCRIPTIONS: dict[str, str] = {
-    "First Blood": "Was the very first player to win an Old World League game.",
-    "Grizzled": "Played 5 or more Old World League games.",
-    "Battle-Hardened": "Played 10 or more Old World League games.",
-    "Hat-Trick": "Won 3 or more Old World League games in a row.",
-    "Unstoppable": "Won 5 or more Old World League games in a row.",
+    "First Blood": "Was the very first player to win a league game.",
+    "Grizzled": "Played 5 or more league games.",
+    "Battle-Hardened": "Played 10 or more league games.",
+    "Hat-Trick": "Won 3 or more league games in a row.",
+    "Unstoppable": "Won 5 or more league games in a row.",
     "Loyalist": "Played 5 or more league games with the same faction.",
     "Giant Slayer": "Won a league game against an opponent rated 100+ ELO higher than you.",
     "Climber": "Reached 1100 ELO or higher at any point.",
@@ -293,9 +297,13 @@ def _set_player_announced_achievements(player: Player, names: Iterable[str]) -> 
     player.announced_achievements = json.dumps(sorted(set(names)))
 
 
-def post_discord_achievement(player_name: str, achievement: str, club_id: int, db: Session) -> None:
-    """Post an achievement unlock message to Discord. No-op if webhook unset."""
-    url = resolve_webhook_url(db, club_id, "achievement")
+def post_discord_achievement(player_name: str, achievement: str, club_id: int, system_id: int, db: Session) -> None:
+    """Post an achievement unlock message to Discord. No-op if webhook unset.
+    Per-system webhook (see admin.py WEBHOOK_TYPES_LEAGUE) — system_id is the
+    system whose league result triggered the achievement check (the only
+    context this function has, including for cross-system achievements like
+    "Veteran" — see announce_new_achievements)."""
+    url = resolve_webhook_url(db, club_id, "achievement", system_id)
     if not url:
         return
     lines = [
@@ -326,7 +334,7 @@ def announce_new_achievements(db: Session, player_id: int, system_id: int) -> No
         if player is None:
             return
 
-        webhook_url = resolve_webhook_url(db, player.club_id, "achievement")
+        webhook_url = resolve_webhook_url(db, player.club_id, "achievement", system_id)
         if not webhook_url:
             return
 
@@ -358,6 +366,6 @@ def announce_new_achievements(db: Session, player_id: int, system_id: int) -> No
         db.commit()
 
         for ach in sorted(new_unlocks):
-            post_discord_achievement(player.name, ach, player.club_id, db)
+            post_discord_achievement(player.name, ach, player.club_id, system_id, db)
     except Exception:
         pass

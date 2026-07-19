@@ -217,9 +217,10 @@ def _eta_bucket_diff(a: MatcherSignup, b: MatcherSignup) -> int:
     return 2
 
 
-def _scenario_diff_tow(
-    a: MatcherSignup, b: MatcherSignup, system: str, config: SystemConfig
-) -> int:
+def _scenario_diff(a: MatcherSignup, b: MatcherSignup, config: SystemConfig) -> int:
+    """0 if both signups picked the same scenario (or neither uses scenarios),
+    else 1. Fully catalogue-driven (config.uses_scenarios) — not TOW-specific
+    despite the historical name this function used to have."""
     if not config.uses_scenarios:
         return 0
     a_sc = (a.row.scenario or "").strip()
@@ -285,7 +286,7 @@ def _pair_dist(
     dv = _vibe_distance_override(ms, other, abs(ms.preference[0] - other.preference[0]))
     de = abs(ms.preference[1] - other.preference[1])
     eta_b = _eta_bucket_diff(ms, other)
-    scen_d = _scenario_diff_tow(ms, other, system, config)
+    scen_d = _scenario_diff(ms, other, config)
     dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
 
     return (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)

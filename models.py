@@ -282,10 +282,11 @@ class SystemConfig(SQLModel, table=True):
     allows_demo: bool = False
     has_intro_prepass: bool = False
 
-    # Whether this system runs a league (ELO ladder + results). Replaces the
-    # hardcoded `system == "The Old World"` league checks so league
-    # eligibility is per-system data, not a name check. Distinct from
-    # Club.leagues_enabled, which gates whether a club runs leagues at all.
+    # Platform-wide catalogue default: does this system generally support a
+    # league. Distinct from the real per-club answer, ClubSystem.league_enabled
+    # (whether THIS club actually runs one) — main.py's _system_dict prefers
+    # the per-club value whenever club context is available; this field is
+    # only the fallback for the fully-unscoped GET /systems call.
     has_league: bool = False
 
     # Pairing-history lookback windows (weeks). HH runs fortnightly so its
@@ -316,7 +317,11 @@ class Club(SQLModel, table=True):
     active: bool = True
     timezone: str = "Europe/London"
     contact_email: Optional[str] = None
-    leagues_enabled: bool = True
+    # leagues_enabled retired 2026-07-19: was a club-wide flag, superseded by
+    # ClubSystem.league_enabled (per-system) once leagues went modular. The DB
+    # column is left in place (unused, harmless) rather than dropped — same
+    # "orphan column over risky migration" call as SystemConfig's old
+    # escalation_priority column.
 
 
 class ClubSystem(SQLModel, table=True):

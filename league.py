@@ -246,7 +246,7 @@ def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: i
 
 
 def _post_league_webhook(db: Session, row: LeagueResult) -> None:
-    url = resolve_webhook_url(db, row.club_id, "league_result")
+    url = resolve_webhook_url(db, row.club_id, "league_result", row.system_id)
     if not url:
         return
 
