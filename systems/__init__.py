@@ -18,9 +18,9 @@ module here (e.g. a newly-added one) simply has no hardcoded ruleset yet;
 the accessors return None so callers can fall back cleanly.
 """
 
-from . import horus_heresy, kill_team, old_world
+from . import age_of_sigmar, horus_heresy, kill_team, old_world
 
-_MODULES = (old_world, horus_heresy, kill_team)
+_MODULES = (old_world, horus_heresy, kill_team, age_of_sigmar)
 
 # legacy_system_name -> rules module
 SYSTEM_RULES = {m.LEGACY_SYSTEM_NAME: m for m in _MODULES}
