@@ -21,17 +21,19 @@ from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
 
 import call_to_arms_content as cta_content
-from database import engine, resolve_webhook_url, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
+from database import engine, record_job_run, resolve_webhook_url, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
 from models import ClubSystem, Mission, SystemConfig
 from week_logic import _is_call_to_arms_due, is_session_week, next_session_date
 
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
+JOB_NAME = "call_to_arms_check"
 
 
 def main() -> None:
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     print(f"Call-to-arms check — {now_uk.strftime('%Y-%m-%d %H:%M %Z')}")
     today = now_uk.date()
+    errors: list[str] = []
 
     with Session(engine) as db:
         # Iterate the active catalogue directly rather than a hardcoded list,
@@ -136,11 +138,20 @@ def main() -> None:
                         import traceback
                         print(f"[{system} club={club_id}] ERROR — {exc}")
                         traceback.print_exc()
+                        errors.append(f"{system} club={club_id}: {exc}")
 
             except Exception as exc:
                 import traceback
                 print(f"[{system}] ERROR — {exc}")
                 traceback.print_exc()
+                errors.append(f"{system}: {exc}")
+
+        record_job_run(
+            db, JOB_NAME,
+            status="error" if errors else "ok",
+            detail="; ".join(errors[:5]) + (f" (+{len(errors) - 5} more)" if len(errors) > 5 else "") if errors else None,
+        )
+        db.commit()
 
 
 if __name__ == "__main__":

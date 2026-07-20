@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
 from database import get_session, resolve_request_club_id, scoped
-from models import Club, ClubEvent, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from models import Club, ClubEvent, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
 from systems import factions_for, icon_folder_for
 from services import (
@@ -56,6 +56,19 @@ app.include_router(admin_router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/platform-banner")
+def get_platform_banner(session: Session = Depends(get_session)):
+    """Public read of the site-wide announcement banner, for the frontend
+    to show at the top of every page (any club, logged in or not). Only
+    ever returns the banner when active — an inactive/never-set banner
+    looks identical to the frontend (active: False), so there's no need
+    for a separate "does a banner exist" signal."""
+    banner = session.get(PlatformBanner, 1)
+    if banner is None or not banner.active:
+        return {"active": False, "message": "", "severity": "info"}
+    return {"active": True, "message": banner.message, "severity": banner.severity}
 
 
 @app.get("/systems")

@@ -7,7 +7,7 @@ Permission model:
 """
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 import httpx
@@ -25,7 +25,7 @@ from auth import (
     require_user,
     valid_scopes,
 )
-from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
+from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -37,7 +37,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, Club, ClubEvent, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -190,6 +190,7 @@ def grant_role(
 
     if existing is None:
         db.add(AdminRole(user_id=body.user_id, scope=body.scope, club_id=user.club_id))
+        log_audit(db, user, "role.grant", "user", target.id, f"{target.discord_name!r} -> {body.scope!r}")
         db.commit()
 
     return {"ok": True}
@@ -210,7 +211,10 @@ def remove_role(
     ).first()
 
     if row is not None:
+        target = db.get(User, user_id)
+        target_name = target.discord_name if target else str(user_id)
         db.delete(row)
+        log_audit(db, user, "role.revoke", "user", user_id, f"{target_name!r} -> {scope!r}")
         db.commit()
         return {"ok": True, "removed": True}
 
@@ -2110,7 +2114,7 @@ def list_platform_systems(
 @router.post("/platform/systems")
 def create_platform_system(
     body: SystemConfigCreateBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Create a new catalogue system. Replaces seed_systems_config.py as the
@@ -2131,6 +2135,8 @@ def create_platform_system(
 
     system = SystemConfig(**body.model_dump())
     db.add(system)
+    db.flush()
+    log_audit(db, user, "system.create", "system", system.id, f"{system.name!r} (slug={system.slug})")
     db.commit()
     db.refresh(system)
     return system
@@ -2140,7 +2146,7 @@ def create_platform_system(
 def edit_platform_system(
     system_id: int,
     body: SystemConfigEditBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Full-replace edit of a catalogue system. slug is not accepted here —
@@ -2167,6 +2173,7 @@ def edit_platform_system(
     for k, v in body.model_dump().items():
         setattr(system, k, v)
     db.add(system)
+    log_audit(db, user, "system.update", "system", system.id, system.name)
     db.commit()
     db.refresh(system)
     return system
@@ -2218,7 +2225,7 @@ class ClubCreateBody(BaseModel):
 @router.post("/platform/clubs")
 def create_club(
     body: ClubCreateBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Create a new club. Platform-admin only — is_platform_admin is set by
@@ -2246,6 +2253,8 @@ def create_club(
         active=body.active,
     )
     db.add(club)
+    db.flush()
+    log_audit(db, user, "club.create", "club", club.id, f"{club.name!r} (slug={club.slug})")
     db.commit()
     db.refresh(club)
     return club
@@ -2422,7 +2431,7 @@ def _platform_user_row(u: User) -> dict:
 def appoint_club_super_admin(
     club_id: int,
     body: AppointSuperAdminBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Appoint a club's first super-admin.
@@ -2443,6 +2452,7 @@ def appoint_club_super_admin(
     if not target.is_super_admin:
         target.is_super_admin = True
         db.add(target)
+        log_audit(db, user, "club.super_admin.grant", "user", target.id, f"{target.discord_name!r} on club {club.slug!r}")
         db.commit()
         db.refresh(target)
 
@@ -2515,7 +2525,7 @@ def list_platform_club_grantable_users(
 def remove_club_super_admin(
     club_id: int,
     user_id: int,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Revoke a club's super-admin status. Idempotent."""
@@ -2531,6 +2541,7 @@ def remove_club_super_admin(
     if removed:
         target.is_super_admin = False
         db.add(target)
+        log_audit(db, user, "club.super_admin.revoke", "user", target.id, f"{target.discord_name!r} on club {club.slug!r}")
         db.commit()
 
     return {"ok": True, "removed": removed}
@@ -2544,7 +2555,7 @@ class ClubActiveBody(BaseModel):
 def set_club_active(
     club_id: int,
     body: ClubActiveBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Set a club's active flag directly. Idempotent — calling with the
@@ -2558,6 +2569,7 @@ def set_club_active(
     if club.active != body.active:
         club.active = body.active
         db.add(club)
+        log_audit(db, user, "club.activate" if body.active else "club.deactivate", "club", club.id, club.slug)
         db.commit()
         db.refresh(club)
 
@@ -2580,7 +2592,7 @@ class ClubUpdateBody(BaseModel):
 def update_club(
     club_id: int,
     body: ClubUpdateBody,
-    _: User = Depends(require_platform_admin),
+    user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
     """Partial-update a club's editable details (name, slug, timezone,
@@ -2631,6 +2643,7 @@ def update_club(
         club.contact_email = body.contact_email.strip() or None
 
     db.add(club)
+    log_audit(db, user, "club.update", "club", club.id, f"fields changed: {sorted(body.model_fields_set)}")
     db.commit()
     db.refresh(club)
     return {
@@ -3053,6 +3066,182 @@ def delete_platform_club_logo(
         raise HTTPException(status_code=404, detail="Club not found.")
     _delete_club_logo_for(club, db)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Platform admin tools: site banner, scheduled-job health check, audit log,
+# cross-club user lookup.
+# ---------------------------------------------------------------------------
+
+class PlatformBannerBody(BaseModel):
+    message: str
+    severity: str = "info"
+    active: bool = False
+
+
+_VALID_BANNER_SEVERITIES = frozenset({"info", "warning", "critical"})
+
+
+def _banner_dict(b: PlatformBanner) -> dict:
+    return {
+        "message": b.message,
+        "severity": b.severity,
+        "active": b.active,
+        "updated_at": b.updated_at,
+    }
+
+
+@router.get("/platform/banner")
+def get_platform_banner_admin(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Platform-admin view of the banner (unlike GET /platform-banner in
+    main.py, which is public and only ever returns it when active)."""
+    banner = db.get(PlatformBanner, 1)
+    if banner is None:
+        return {"message": "", "severity": "info", "active": False, "updated_at": None}
+    return _banner_dict(banner)
+
+
+@router.post("/platform/banner")
+def set_platform_banner(
+    body: PlatformBannerBody,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    if body.severity not in _VALID_BANNER_SEVERITIES:
+        raise HTTPException(
+            status_code=422, detail=f"severity must be one of: {sorted(_VALID_BANNER_SEVERITIES)}"
+        )
+    banner = db.get(PlatformBanner, 1)
+    if banner is None:
+        banner = PlatformBanner(id=1, message=body.message, severity=body.severity, active=body.active)
+    else:
+        banner.message = body.message
+        banner.severity = body.severity
+        banner.active = body.active
+        banner.updated_at = datetime.utcnow()
+    db.add(banner)
+    log_audit(
+        db, user, "banner.update", "platform_banner", 1,
+        f"active={body.active} severity={body.severity!r}",
+    )
+    db.commit()
+    db.refresh(banner)
+    return _banner_dict(banner)
+
+
+# Every scheduled job that calls record_job_run() — kept as one list so the
+# health-check UI can show "never run" for a job with zero rows, not just
+# silently omit it.
+KNOWN_SCHEDULED_JOBS = ["auto_pairings_check", "call_to_arms_check"]
+
+
+def _job_run_dict(r: ScheduledJobRun) -> dict:
+    return {"job_name": r.job_name, "ran_at": r.ran_at, "status": r.status, "detail": r.detail}
+
+
+@router.get("/platform/job-runs")
+def list_job_runs(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Health-check view of the two scheduled GitHub Actions jobs — the
+    most recent run of each (so a silently-broken cron is visible instead
+    of only surfacing when a club complains their pairings never posted),
+    plus a short recent history across both for spotting flakiness."""
+    jobs = []
+    for job_name in KNOWN_SCHEDULED_JOBS:
+        latest = db.exec(
+            select(ScheduledJobRun)
+            .where(ScheduledJobRun.job_name == job_name)
+            .order_by(ScheduledJobRun.ran_at.desc())
+        ).first()
+        jobs.append({"job_name": job_name, "latest": _job_run_dict(latest) if latest else None})
+
+    recent = db.exec(
+        select(ScheduledJobRun).order_by(ScheduledJobRun.ran_at.desc()).limit(20)
+    ).all()
+    return {"jobs": jobs, "recent": [_job_run_dict(r) for r in recent]}
+
+
+@router.get("/platform/audit-log")
+def list_audit_log(
+    limit: int = 100,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    limit = max(1, min(limit, 500))
+    rows = db.exec(
+        select(AuditLogEntry).order_by(AuditLogEntry.created_at.desc()).limit(limit)
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "created_at": r.created_at,
+            "actor_name": r.actor_name,
+            "action": r.action,
+            "target_type": r.target_type,
+            "target_id": r.target_id,
+            "detail": r.detail,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/platform/users/search")
+def search_users(
+    q: str,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Cross-club lookup by Discord name or linked player name — for
+    support ("my account's broken") when you don't know which club the
+    reporter belongs to, unlike every other platform-admin user-facing
+    endpoint which is scoped to one club_id at a time."""
+    query = q.strip()
+    if not query:
+        return []
+    like = f"%{query}%"
+    rows = db.exec(
+        select(User, Club)
+        .join(Club, Club.id == User.club_id)
+        .where(User.discord_name.ilike(like))
+        .order_by(User.discord_name)
+        .limit(50)
+    ).all()
+    matched_ids = {u.id for u, _ in rows}
+
+    player_rows = db.exec(
+        select(User, Club, Player)
+        .join(Club, Club.id == User.club_id)
+        .join(Player, Player.id == User.player_id)
+        .where(Player.name.ilike(like))
+        .order_by(Player.name)
+        .limit(50)
+    ).all()
+
+    result = []
+    for u, c in rows:
+        p = db.get(Player, u.player_id) if u.player_id else None
+        result.append({
+            "user_id": u.id, "discord_name": u.discord_name,
+            "player_name": p.name if p else None,
+            "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
+            "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
+        })
+    for u, c, p in player_rows:
+        if u.id in matched_ids:
+            continue
+        matched_ids.add(u.id)
+        result.append({
+            "user_id": u.id, "discord_name": u.discord_name,
+            "player_name": p.name,
+            "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
+            "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
+        })
+    return result[:50]
 
 
 class ClubSystemCarouselBody(BaseModel):

@@ -10,17 +10,21 @@ from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
-from database import engine, scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
+from database import engine, record_job_run, scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
 from models import ClubSystem, Pairing, PublishState, Signup, SystemConfig
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
 from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
+
+JOB_NAME = "auto_pairings_check"
+
 
 def main() -> None:
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     print(f"Auto-pairings check — {now_uk.strftime('%Y-%m-%d %H:%M %Z')}")
 
     today = now_uk.date()
+    errors: list[str] = []
 
     with Session(engine) as db:
         # Iterate the active catalogue directly rather than a hardcoded list,
@@ -136,11 +140,20 @@ def main() -> None:
                         import traceback
                         print(f"[{system} club={club_id}] ERROR — {exc}")
                         traceback.print_exc()
+                        errors.append(f"{system} club={club_id}: {exc}")
 
             except Exception as exc:
                 import traceback
                 print(f"[{system}] ERROR — {exc}")
                 traceback.print_exc()
+                errors.append(f"{system}: {exc}")
+
+        record_job_run(
+            db, JOB_NAME,
+            status="error" if errors else "ok",
+            detail="; ".join(errors[:5]) + (f" (+{len(errors) - 5} more)" if len(errors) > 5 else "") if errors else None,
+        )
+        db.commit()
 
 
 if __name__ == "__main__":

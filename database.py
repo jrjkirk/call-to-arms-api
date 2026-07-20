@@ -18,7 +18,7 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
-from models import Club, ClubSetting, ClubWebhook, User
+from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, ScheduledJobRun, User
 
 T = TypeVar("T")
 
@@ -64,6 +64,11 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # ranges); ratings reset each season
     "league_configs", # per-(club,system) league scoring config (elo/winloss
                        # params); one row per system-league
+    "platform_banner",    # site-wide announcement banner, platform-admin only
+    "scheduled_job_runs", # cron heartbeat, written by the two scheduler
+                           # scripts on every invocation
+    "audit_log_entries",  # platform-wide "who changed X" log, appended by
+                           # admin.py's mutation endpoints
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
@@ -254,3 +259,36 @@ def upsert_setting(db: Session, club_id: int, key: str, value: str) -> None:
     else:
         row.value = value
     db.add(row)
+
+
+# ---------------------------------------------------------------------------
+# Platform admin tools: scheduled-job heartbeat + audit log helpers. Shared
+# by admin.py (audit log) and the two scheduler scripts (job heartbeat),
+# same "define once here" convention as the ClubSetting helpers above.
+# ---------------------------------------------------------------------------
+
+def record_job_run(db: Session, job_name: str, status: str, detail: Optional[str] = None) -> None:
+    """Append a heartbeat row for one invocation of a scheduled job. Callers
+    commit their own session — this only adds, matching upsert_setting's
+    convention of leaving the commit to the caller (both scheduler scripts
+    already commit once per club/system inside their loop)."""
+    db.add(ScheduledJobRun(job_name=job_name, status=status, detail=detail))
+
+
+def log_audit(
+    db: Session, actor: User, action: str,
+    target_type: Optional[str] = None, target_id: Optional[int] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Append one audit-log row for a notable admin mutation. Caller commits
+    (same convention as record_job_run/upsert_setting) — call this right
+    before the endpoint's own db.commit() so the log entry lands in the
+    same transaction as the change it's recording."""
+    db.add(AuditLogEntry(
+        actor_user_id=actor.id,
+        actor_name=actor.discord_name,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+    ))

@@ -482,3 +482,67 @@ class ClubWebhook(SQLModel, table=True):
     url: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Platform admin tools (2026-07-20): site banner, scheduled-job health check,
+# audit log, cross-club lookup. All platform-admin-only surfaces — see admin.py.
+# ---------------------------------------------------------------------------
+
+class PlatformBanner(SQLModel, table=True):
+    """Single-row (id always 1) site-wide announcement banner, set by a
+    platform admin and shown to every visitor (logged in or not, any club)
+    at the top of the app. Not club-owned — this is platform-level, unlike
+    everything else in this file scoped by club_id."""
+    __tablename__ = "platform_banner"
+    __table_args__ = {"extend_existing": True}
+
+    id: int = Field(default=1, primary_key=True)
+    message: str
+    # "info" | "warning" | "critical" — drives the banner's colour treatment.
+    severity: str = "info"
+    active: bool = False
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ScheduledJobRun(SQLModel, table=True):
+    """One row per invocation of a scheduled GitHub Actions job
+    (run_auto_pairings_check.py, run_call_to_arms_check.py). Lets platform
+    admin see "is the cron actually running" instead of only finding out a
+    job silently stopped when a club complains — see record_job_run() in
+    database.py, called once per script run regardless of whether any
+    individual club/system inside that run succeeded or errored."""
+    __tablename__ = "scheduled_job_runs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    job_name: str = Field(index=True)
+    ran_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    # "ok" | "error" — "ok" means the script completed; per-club/system
+    # errors inside a run are caught individually and folded into `detail`
+    # rather than failing the whole run, so "ok" with a non-empty detail
+    # can still mean "completed, but N clubs had errors".
+    status: str = "ok"
+    detail: Optional[str] = None
+
+
+class AuditLogEntry(SQLModel, table=True):
+    """Platform-wide record of notable admin mutations (club create/edit/
+    activate, super-admin grant/revoke, scope grant/revoke, system catalogue
+    changes) — "who changed X, and when". actor_user_id/actor_name are
+    denormalized so the log stays readable even if the acting user is later
+    deleted. Not itself club-scoped — a platform admin views the whole
+    platform's history in one place; club_id (when the action was about a
+    specific club) is carried in target_id/detail instead."""
+    __tablename__ = "audit_log_entries"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    actor_user_id: Optional[int] = Field(default=None, index=True)
+    actor_name: str
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[int] = None
+    detail: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
