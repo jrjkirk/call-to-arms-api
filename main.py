@@ -150,12 +150,21 @@ def list_my_systems(user: User = Depends(require_user), session: Session = Depen
 @app.get("/clubs")
 def list_clubs(session: Session = Depends(get_session)):
     """Public read of active clubs, for the frontend's club-picker at
-    signup. No auth required — same tone/structure as GET /systems."""
+    signup, and the multi-club map on the logged-out hero (which uses
+    latitude/longitude — clubs without coordinates just don't get a pin).
+    No auth required — same tone/structure as GET /systems."""
     rows = session.exec(
         select(Club).where(Club.active == True)
     ).all()
     return [
-        {"id": c.id, "name": c.name, "slug": c.slug}
+        {
+            "id": c.id,
+            "name": c.name,
+            "slug": c.slug,
+            "address": c.address,
+            "latitude": c.latitude,
+            "longitude": c.longitude,
+        }
         for c in rows
     ]
 
@@ -180,13 +189,20 @@ def get_club(
     if club is None:
         raise HTTPException(status_code=404, detail="Club not found")
 
+    # Deliberately no manual ordering here (ClubSystem.carousel_order is
+    # unused — kept as a harmless orphan column, same convention as
+    # Club.leagues_enabled). A fixed admin-chosen order would silently
+    # favour whichever system got put first; the frontend shuffles this
+    # list itself on every page load instead, so no system is permanently
+    # advantaged. Ordering by name here just keeps the API response stable
+    # for anything that doesn't shuffle (e.g. tests).
     club_systems = session.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
         .where(ClubSystem.club_id == club.id)
         .where(ClubSystem.enabled == True)
         .where(SystemConfig.active == True)
-        .order_by(ClubSystem.carousel_order, SystemConfig.name)
+        .order_by(SystemConfig.name)
     ).all()
 
     systems_out = [
@@ -200,7 +216,6 @@ def get_club(
             "blurb": cs.carousel_blurb,
             "photo_url": cs.carousel_photo_url,
             "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
-            "carousel_order": cs.carousel_order,
         }
         for cs, sc in club_systems
     ]
@@ -223,16 +238,21 @@ def get_club(
     calendar_out: list[dict] = []
     for cs, sc in club_systems:
         for d in sessions_in_range(cs.session_day, cs.session_cadence, cs.cadence_anchor, month_start, month_end):
+            title = f"{sc.name} session"
+            if cs.session_start_time:
+                title = f"{title} {cs.session_start_time}"
             calendar_out.append({
                 "type": "session",
                 "date": d.isoformat(),
-                "title": f"{sc.name} session",
+                "title": title,
                 "system_id": sc.id,
                 "system_name": sc.name,
                 "system_slug": sc.slug,
                 "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
-                "all_day": True,
-                "start_time": None,
+                # An all-day entry when no start time is set (unchanged
+                # default); otherwise a timed entry, same shape as ClubEvent.
+                "all_day": cs.session_start_time is None,
+                "start_time": cs.session_start_time,
                 "end_time": None,
             })
 
@@ -269,6 +289,9 @@ def get_club(
             "website_url": club.website_url,
             "discord_url": club.discord_url,
             "opening_hours": club.opening_hours or [],
+            "address": club.address,
+            "latitude": club.latitude,
+            "longitude": club.longitude,
         },
         "systems": systems_out,
         "calendar": {

@@ -1911,6 +1911,7 @@ def list_club_systems(
             "session_day": cs.session_day,
             "session_cadence": cs.session_cadence,
             "cadence_anchor": cs.cadence_anchor,
+            "session_start_time": cs.session_start_time,
             # Per-club vibe override (null = falls back to the catalogue
             # default). The catalogue default is surfaced too so the edit
             # form can pre-fill / show what "unset" resolves to.
@@ -1929,6 +1930,7 @@ class ClubSystemScheduleBody(BaseModel):
     session_day: str
     session_cadence: str
     cadence_anchor: Optional[date] = None
+    session_start_time: Optional[str] = None
     # Per-club vibe config. Omit (None) to leave unchanged; an empty list
     # clears the override (falls back to the catalogue default).
     vibe_options: Optional[list] = None
@@ -1957,7 +1959,7 @@ def update_club_system_schedule(
             status_code=422, detail="This system is not active in the catalogue and cannot be enabled."
         )
 
-    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
+    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor, body.session_start_time)
 
     # Vibe config: omitted (None) leaves it unchanged; [] clears the override
     # (falls back to the catalogue default); a list validates against the
@@ -1988,6 +1990,7 @@ def update_club_system_schedule(
         session_day=body.session_day,
         session_cadence=body.session_cadence,
         cadence_anchor=body.cadence_anchor,
+        session_start_time=body.session_start_time,
         **vibe_fields,
     )
     if existing:
@@ -2251,11 +2254,17 @@ def create_club(
 VALID_CADENCES: frozenset[str] = frozenset({"weekly", "fortnightly"})
 
 
-def _validate_schedule_fields(session_day: str, session_cadence: str, cadence_anchor: Optional[date]) -> None:
+def _validate_schedule_fields(
+    session_day: str, session_cadence: str, cadence_anchor: Optional[date],
+    session_start_time: Optional[str] = None,
+) -> None:
     """Shared by upsert_club_system (platform-admin, enabling a new
     system for a club) and update_club_system_schedule (club
     self-service, editing an already-enabled system's schedule) — same
     fields, same rules, extracted once rather than duplicated."""
+    if session_start_time is not None and not _TIME_RE.match(session_start_time):
+        raise HTTPException(status_code=422, detail="session_start_time must match HH:MM (00-23 / 00-59)")
+
     if session_day not in _DAY_NAME_TO_INT:
         raise HTTPException(
             status_code=422,
@@ -2295,6 +2304,7 @@ class ClubSystemBody(BaseModel):
     session_day: str
     session_cadence: str
     cadence_anchor: Optional[date] = None
+    session_start_time: Optional[str] = None
 
 
 @router.post("/platform/clubs/{club_id}/systems")
@@ -2326,7 +2336,7 @@ def upsert_club_system(
             status_code=422, detail="This system is not active in the catalogue and cannot be enabled."
         )
 
-    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor)
+    _validate_schedule_fields(body.session_day, body.session_cadence, body.cadence_anchor, body.session_start_time)
 
     existing = db.exec(
         select(ClubSystem).where(
@@ -2340,6 +2350,7 @@ def upsert_club_system(
         session_day=body.session_day,
         session_cadence=body.session_cadence,
         cadence_anchor=body.cadence_anchor,
+        session_start_time=body.session_start_time,
     )
     if existing:
         for k, v in fields.items():
@@ -2381,6 +2392,7 @@ def list_platform_club_systems(
             "session_day": cs.session_day,
             "session_cadence": cs.session_cadence,
             "cadence_anchor": cs.cadence_anchor,
+            "session_start_time": cs.session_start_time,
             # Per-club vibe override (null = falls back to the catalogue
             # default). The catalogue default is surfaced too so the edit
             # form can pre-fill / show what "unset" resolves to.
@@ -2849,6 +2861,9 @@ class ClubProfileBody(BaseModel):
     website_url: Optional[str] = None
     discord_url: Optional[str] = None
     opening_hours: Optional[list[dict]] = None
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 @router.post("/club")
@@ -2868,6 +2883,11 @@ def update_club_profile(
             if row.get("day") not in _DAY_NAME_TO_INT:
                 raise HTTPException(status_code=422, detail=f"Invalid day: {row.get('day')!r}")
 
+    if body.latitude is not None and not (-90 <= body.latitude <= 90):
+        raise HTTPException(status_code=422, detail="latitude must be between -90 and 90.")
+    if body.longitude is not None and not (-180 <= body.longitude <= 180):
+        raise HTTPException(status_code=422, detail="longitude must be between -180 and 180.")
+
     provided = body.model_fields_set
     if "blurb" in provided:
         club.blurb = (body.blurb or "").strip() or None
@@ -2877,6 +2897,12 @@ def update_club_profile(
         club.discord_url = (body.discord_url or "").strip() or None
     if "opening_hours" in provided:
         club.opening_hours = body.opening_hours
+    if "address" in provided:
+        club.address = (body.address or "").strip() or None
+    if "latitude" in provided:
+        club.latitude = body.latitude
+    if "longitude" in provided:
+        club.longitude = body.longitude
     db.add(club)
     db.commit()
     db.refresh(club)
@@ -2885,6 +2911,9 @@ def update_club_profile(
         "website_url": club.website_url,
         "discord_url": club.discord_url,
         "opening_hours": club.opening_hours or [],
+        "address": club.address,
+        "latitude": club.latitude,
+        "longitude": club.longitude,
     }
 
 
@@ -2948,7 +2977,6 @@ class ClubSystemCarouselBody(BaseModel):
     system: str
     blurb: Optional[str] = None
     accent_color: Optional[str] = None
-    carousel_order: Optional[int] = None
 
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -2961,7 +2989,10 @@ def update_carousel_card(
     db: Session = Depends(get_session),
 ):
     """That system's own admin edits its Club-page carousel card (blurb,
-    accent colour, ordering). Photo is a separate upload endpoint below."""
+    accent colour). Photo is a separate upload endpoint below. Ordering is
+    deliberately not admin-settable — GET /club always returns systems in a
+    fixed order and the frontend shuffles them itself on every page load,
+    so no system can be permanently favoured by ordering."""
     _require_system_scope(body.system, user, db)
     config = _get_system_config(db, body.system)
     if config is None:
@@ -2980,8 +3011,6 @@ def update_carousel_card(
         cs.carousel_blurb = (body.blurb or "").strip() or None
     if "accent_color" in provided:
         cs.accent_color = body.accent_color or None
-    if "carousel_order" in provided and body.carousel_order is not None:
-        cs.carousel_order = body.carousel_order
     db.add(cs)
     db.commit()
     db.refresh(cs)
@@ -2989,7 +3018,6 @@ def update_carousel_card(
         "blurb": cs.carousel_blurb,
         "photo_url": cs.carousel_photo_url,
         "accent_color": cs.accent_color,
-        "carousel_order": cs.carousel_order,
     }
 
 

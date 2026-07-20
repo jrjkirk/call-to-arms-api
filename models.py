@@ -336,6 +336,17 @@ class Club(SQLModel, table=True):
     # [{"day": "Monday", "open": "18:00", "close": "22:00", "note": None}, ...]
     opening_hours: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
+    # Location (2026-07-20 follow-up). address is freeform display text;
+    # latitude/longitude are entered manually by the super-admin (no free
+    # geocoding API available) and drive the OpenStreetMap/Leaflet pin on
+    # this club's own Club page and its marker on the multi-club map on the
+    # logged-out hero. Either can be set independently — a club with an
+    # address but no coordinates just shows the text + a directions link,
+    # no map.
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
 
 class ClubSystem(SQLModel, table=True):
     """Which systems a club runs, and that club's schedule for each —
@@ -351,6 +362,11 @@ class ClubSystem(SQLModel, table=True):
     session_day: str  # e.g. "Wednesday", "Friday"
     session_cadence: str  # "weekly" | "fortnightly"
     cadence_anchor: Optional[date] = None  # only meaningful when fortnightly
+    # Default session start time ("HH:MM", 24h), shown on the Club page
+    # calendar's auto-derived session entries (e.g. "The Old World session
+    # 18:00"). Optional — a system with no start time set just shows as an
+    # all-day entry, same as before this field existed.
+    session_start_time: Optional[str] = None
 
     # Per-club vibe configuration. NULL = fall back to this system's
     # SystemConfig.vibe_options/default_vibe (platform default). Set by a
