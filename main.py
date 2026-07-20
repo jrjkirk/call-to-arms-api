@@ -218,6 +218,7 @@ def get_club(
 
     accent_by_system_id = {cs.system_id: (cs.accent_color or DEFAULT_ACCENT_COLOR) for cs, _ in club_systems}
     name_by_system_id = {sc.id: sc.name for _, sc in club_systems}
+    slug_by_system_id = {sc.id: sc.slug for _, sc in club_systems}
 
     calendar_out: list[dict] = []
     for cs, sc in club_systems:
@@ -228,6 +229,7 @@ def get_club(
                 "title": f"{sc.name} session",
                 "system_id": sc.id,
                 "system_name": sc.name,
+                "system_slug": sc.slug,
                 "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
                 "all_day": True,
                 "start_time": None,
@@ -248,6 +250,7 @@ def get_club(
             "description": ev.description,
             "system_id": ev.system_id,
             "system_name": name_by_system_id.get(ev.system_id) if ev.system_id else None,
+            "system_slug": slug_by_system_id.get(ev.system_id) if ev.system_id else None,
             "accent_color": accent_by_system_id.get(ev.system_id, DEFAULT_ACCENT_COLOR) if ev.system_id else DEFAULT_ACCENT_COLOR,
             "all_day": ev.all_day,
             "start_time": ev.start_time,
