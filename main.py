@@ -5,8 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select, or_
 
 from database import get_session, resolve_request_club_id, scoped
-from models import Club, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
-from week_logic import next_session_date
+from models import Club, ClubEvent, ClubSystem, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from week_logic import next_session_date, sessions_in_range
 from systems import factions_for, icon_folder_for
 from services import (
     compute_league_record,
@@ -158,6 +158,120 @@ def list_clubs(session: Session = Depends(get_session)):
         {"id": c.id, "name": c.name, "slug": c.slug}
         for c in rows
     ]
+
+
+DEFAULT_ACCENT_COLOR = "#c9a14a"  # platform gold, used when a system admin hasn't set accent_color
+
+
+@app.get("/club")
+def get_club(
+    month: Optional[str] = None,
+    user: User = Depends(require_user),
+    session: Session = Depends(get_session),
+):
+    """Club landing page: profile, the systems carousel (this club's enabled
+    systems, ordered for display), and one calendar month's worth of
+    entries — auto-derived recurring sessions (from each ClubSystem's
+    schedule) merged with one-off ClubEvent rows, both colour-coded by
+    system via accent_color.
+
+    ?month=YYYY-MM selects the calendar month (default: current month)."""
+    club = session.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+
+    club_systems = session.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club.id)
+        .where(ClubSystem.enabled == True)
+        .where(SystemConfig.active == True)
+        .order_by(ClubSystem.carousel_order, SystemConfig.name)
+    ).all()
+
+    systems_out = [
+        {
+            "system_id": sc.id,
+            "slug": sc.slug,
+            "name": sc.name,
+            "legacy_system_name": sc.legacy_system_name,
+            "session_day": cs.session_day,
+            "session_cadence": cs.session_cadence,
+            "blurb": cs.carousel_blurb,
+            "photo_url": cs.carousel_photo_url,
+            "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
+        }
+        for cs, sc in club_systems
+    ]
+
+    if month:
+        try:
+            month_start = datetime.strptime(month, "%Y-%m").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="month must be formatted YYYY-MM")
+    else:
+        today = date.today()
+        month_start = date(today.year, today.month, 1)
+    next_month = date(month_start.year + (month_start.month == 12), (month_start.month % 12) + 1, 1)
+    month_end = next_month - timedelta(days=1)
+
+    accent_by_system_id = {cs.system_id: (cs.accent_color or DEFAULT_ACCENT_COLOR) for cs, _ in club_systems}
+    name_by_system_id = {sc.id: sc.name for _, sc in club_systems}
+
+    calendar_out: list[dict] = []
+    for cs, sc in club_systems:
+        for d in sessions_in_range(cs.session_day, cs.session_cadence, cs.cadence_anchor, month_start, month_end):
+            calendar_out.append({
+                "type": "session",
+                "date": d.isoformat(),
+                "title": f"{sc.name} session",
+                "system_id": sc.id,
+                "system_name": sc.name,
+                "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
+                "all_day": True,
+                "start_time": None,
+                "end_time": None,
+            })
+
+    events = session.exec(
+        scoped(ClubEvent, club.id)
+        .where(ClubEvent.event_date >= month_start)
+        .where(ClubEvent.event_date <= month_end)
+        .order_by(ClubEvent.event_date)
+    ).all()
+    for ev in events:
+        calendar_out.append({
+            "type": "event",
+            "date": ev.event_date.isoformat(),
+            "title": ev.title,
+            "description": ev.description,
+            "system_id": ev.system_id,
+            "system_name": name_by_system_id.get(ev.system_id) if ev.system_id else None,
+            "accent_color": accent_by_system_id.get(ev.system_id, DEFAULT_ACCENT_COLOR) if ev.system_id else DEFAULT_ACCENT_COLOR,
+            "all_day": ev.all_day,
+            "start_time": ev.start_time,
+            "end_time": ev.end_time,
+        })
+
+    calendar_out.sort(key=lambda e: (e["date"], e["start_time"] or ""))
+
+    return {
+        "club": {
+            "id": club.id,
+            "name": club.name,
+            "slug": club.slug,
+            "blurb": club.blurb,
+            "logo_url": club.logo_url,
+            "website_url": club.website_url,
+            "discord_url": club.discord_url,
+            "opening_hours": club.opening_hours or [],
+        },
+        "systems": systems_out,
+        "calendar": {
+            "month": month_start.strftime("%Y-%m"),
+            "entries": calendar_out,
+        },
+    }
 
 
 @app.get("/players")

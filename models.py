@@ -323,6 +323,19 @@ class Club(SQLModel, table=True):
     # "orphan column over risky migration" call as SystemConfig's old
     # escalation_priority column.
 
+    # Club landing page (Phase: club page feature, 2026-07-20). Managed by
+    # the club super-admin. blurb/opening_hours/website/discord are freeform;
+    # logo_path/logo_url follow the same Supabase-Storage pattern as
+    # Mission.image_path/image_url (path kept so the file can be deleted
+    # alongside a re-upload, url denormalized for direct serving).
+    blurb: Optional[str] = None
+    logo_path: Optional[str] = None
+    logo_url: Optional[str] = None
+    website_url: Optional[str] = None
+    discord_url: Optional[str] = None
+    # [{"day": "Monday", "open": "18:00", "close": "22:00", "note": None}, ...]
+    opening_hours: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
 
 class ClubSystem(SQLModel, table=True):
     """Which systems a club runs, and that club's schedule for each —
@@ -359,6 +372,43 @@ class ClubSystem(SQLModel, table=True):
     # the old club-wide Club.leagues_enabled gate). Scoring config lives in
     # LeagueConfig, seasons in LeagueSeason.
     league_enabled: bool = False
+
+    # Club landing page systems carousel (2026-07-20). Managed by this
+    # system's own admin (_require_system_scope), same ownership model as
+    # missions_enabled/missions_use_secondary above. photo_path/photo_url
+    # follow the same Supabase-Storage pattern as Mission's image fields —
+    # optional, a carousel card can be text-only. accent_color threads this
+    # system's identity through the carousel card, calendar entries, and
+    # opening-hours grid; NULL falls back to the platform gold accent.
+    carousel_blurb: Optional[str] = None
+    carousel_photo_path: Optional[str] = None
+    carousel_photo_url: Optional[str] = None
+    accent_color: Optional[str] = None
+    carousel_order: int = 0
+
+
+class ClubEvent(SQLModel, table=True):
+    """A calendar entry for one club: either a one-off event or an override/
+    addition alongside the auto-derived recurring sessions (which come from
+    ClubSystem.session_day/session_cadence/cadence_anchor, not stored here).
+
+    system_id is nullable — a club-wide event (e.g. "Christmas closure") has
+    no system and is super-admin-only to create; a system_id set means a
+    per-system event (e.g. a one-off tournament) manageable by that system's
+    own admin, same ownership model as Mission/carousel fields above."""
+    __tablename__ = "club_events"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
+    title: str
+    description: Optional[str] = None
+    event_date: date
+    start_time: Optional[str] = None  # "HH:MM", None = all_day
+    end_time: Optional[str] = None
+    all_day: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Mission(SQLModel, table=True):

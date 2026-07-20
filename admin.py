@@ -37,7 +37,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, Club, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
+from models import AdminRole, Club, ClubEvent, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PublishState, Signup, SystemConfig, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -2830,5 +2830,385 @@ def update_missions_settings(
     cs.missions_enabled = body.missions_enabled
     cs.missions_use_secondary = body.missions_use_secondary
     db.add(cs)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Club landing page — super-admin manages the club profile, each system's own
+# admin manages that system's carousel card + events. Same ownership split as
+# the rest of this file (missions/webhooks are per-system; roles/blocks are
+# super-admin-only).
+# ---------------------------------------------------------------------------
+
+MAX_CLUB_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+class ClubProfileBody(BaseModel):
+    blurb: Optional[str] = None
+    website_url: Optional[str] = None
+    discord_url: Optional[str] = None
+    opening_hours: Optional[list[dict]] = None
+
+
+@router.post("/club")
+def update_club_profile(
+    body: ClubProfileBody,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Super-admin edits the caller's own club's landing-page profile.
+    club_id always comes from the session (user.club_id)."""
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+
+    if body.opening_hours is not None:
+        for row in body.opening_hours:
+            if row.get("day") not in _DAY_NAME_TO_INT:
+                raise HTTPException(status_code=422, detail=f"Invalid day: {row.get('day')!r}")
+
+    provided = body.model_fields_set
+    if "blurb" in provided:
+        club.blurb = (body.blurb or "").strip() or None
+    if "website_url" in provided:
+        club.website_url = (body.website_url or "").strip() or None
+    if "discord_url" in provided:
+        club.discord_url = (body.discord_url or "").strip() or None
+    if "opening_hours" in provided:
+        club.opening_hours = body.opening_hours
+    db.add(club)
+    db.commit()
+    db.refresh(club)
+    return {
+        "blurb": club.blurb,
+        "website_url": club.website_url,
+        "discord_url": club.discord_url,
+        "opening_hours": club.opening_hours or [],
+    }
+
+
+@router.post("/club/logo", status_code=201)
+def upload_club_logo(
+    image: UploadFile = File(...),
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty image upload.")
+    if len(data) > MAX_CLUB_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image too large (max {MAX_CLUB_IMAGE_BYTES // (1024 * 1024)} MB).",
+        )
+    try:
+        storage.extension_for(image.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        object_path, public_url = storage.upload_club_logo(data, image.content_type, club.id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"Image upload failed: {e}")
+
+    old_path = club.logo_path
+    club.logo_path = object_path
+    club.logo_url = public_url
+    db.add(club)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+    return {"logo_url": public_url}
+
+
+@router.delete("/club/logo")
+def delete_club_logo(
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+    old_path = club.logo_path
+    club.logo_path = None
+    club.logo_url = None
+    db.add(club)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+    return {"ok": True}
+
+
+class ClubSystemCarouselBody(BaseModel):
+    system: str
+    blurb: Optional[str] = None
+    accent_color: Optional[str] = None
+    carousel_order: Optional[int] = None
+
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+@router.post("/club-systems/carousel")
+def update_carousel_card(
+    body: ClubSystemCarouselBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """That system's own admin edits its Club-page carousel card (blurb,
+    accent colour, ordering). Photo is a separate upload endpoint below."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+
+    if body.accent_color is not None and body.accent_color != "" and not _HEX_COLOR_RE.match(body.accent_color):
+        raise HTTPException(status_code=422, detail="accent_color must be a hex colour like #c9a14a.")
+
+    provided = body.model_fields_set
+    if "blurb" in provided:
+        cs.carousel_blurb = (body.blurb or "").strip() or None
+    if "accent_color" in provided:
+        cs.accent_color = body.accent_color or None
+    if "carousel_order" in provided and body.carousel_order is not None:
+        cs.carousel_order = body.carousel_order
+    db.add(cs)
+    db.commit()
+    db.refresh(cs)
+    return {
+        "blurb": cs.carousel_blurb,
+        "photo_url": cs.carousel_photo_url,
+        "accent_color": cs.accent_color,
+        "carousel_order": cs.carousel_order,
+    }
+
+
+@router.post("/club-systems/carousel/photo", status_code=201)
+def upload_carousel_photo(
+    system: str = Form(...),
+    image: UploadFile = File(...),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty image upload.")
+    if len(data) > MAX_CLUB_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image too large (max {MAX_CLUB_IMAGE_BYTES // (1024 * 1024)} MB).",
+        )
+    try:
+        storage.extension_for(image.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        object_path, public_url = storage.upload_carousel_photo(
+            data, image.content_type, user.club_id, config.id
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"Image upload failed: {e}")
+
+    old_path = cs.carousel_photo_path
+    cs.carousel_photo_path = object_path
+    cs.carousel_photo_url = public_url
+    db.add(cs)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+    return {"photo_url": public_url}
+
+
+@router.delete("/club-systems/carousel/photo")
+def delete_carousel_photo(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+    old_path = cs.carousel_photo_path
+    cs.carousel_photo_path = None
+    cs.carousel_photo_url = None
+    db.add(cs)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+    return {"ok": True}
+
+
+def _event_row(ev: ClubEvent) -> dict:
+    return {
+        "id": ev.id,
+        "system_id": ev.system_id,
+        "title": ev.title,
+        "description": ev.description,
+        "event_date": ev.event_date.isoformat(),
+        "start_time": ev.start_time,
+        "end_time": ev.end_time,
+        "all_day": ev.all_day,
+    }
+
+
+@router.get("/club/events")
+def list_club_events(
+    system: Optional[str] = None,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """List this club's events. ?system=<legacy name> filters to one
+    system's own events; omitted returns everything the caller can manage
+    (super-admin: all; system admin: only their own systems' events)."""
+    query = scoped(ClubEvent, user.club_id)
+    if system is not None:
+        config = _get_system_config(db, system)
+        if config is None:
+            raise HTTPException(status_code=422, detail="Unknown system.")
+        _require_system_scope(system, user, db)
+        query = query.where(ClubEvent.system_id == config.id)
+    elif not user.is_super_admin:
+        owned_ids = {
+            c.id for c in db.exec(
+                select(SystemConfig).where(SystemConfig.legacy_system_name.in_(admin_scopes(user, db)))
+            ).all()
+        }
+        if not owned_ids:
+            return []
+        query = query.where(ClubEvent.system_id.in_(owned_ids))
+    rows = db.exec(query.order_by(ClubEvent.event_date)).all()
+    return [_event_row(r) for r in rows]
+
+
+class ClubEventBody(BaseModel):
+    system: Optional[str] = None  # None = club-wide event, super-admin only
+    title: str
+    description: Optional[str] = None
+    event_date: date
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    all_day: bool = False
+
+
+def _resolve_event_system_id(body_system: Optional[str], user: User, db: Session) -> Optional[int]:
+    if body_system is None:
+        if not user.is_super_admin:
+            raise HTTPException(status_code=403, detail="Only a super-admin can create a club-wide event.")
+        return None
+    _require_system_scope(body_system, user, db)
+    config = _get_system_config(db, body_system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    return config.id
+
+
+@router.post("/club/events", status_code=201)
+def create_club_event(
+    body: ClubEventBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    system_id = _resolve_event_system_id(body.system, user, db)
+    ev = ClubEvent(
+        club_id=user.club_id,
+        system_id=system_id,
+        title=body.title.strip(),
+        description=(body.description or "").strip() or None,
+        event_date=body.event_date,
+        start_time=body.start_time,
+        end_time=body.end_time,
+        all_day=body.all_day,
+    )
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return _event_row(ev)
+
+
+def _event_or_404(event_id: int, user: User, db: Session) -> ClubEvent:
+    ev = db.get(ClubEvent, event_id)
+    if ev is None or ev.club_id != user.club_id:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if ev.system_id is None:
+        if not user.is_super_admin:
+            raise HTTPException(status_code=403, detail="Only a super-admin can manage a club-wide event.")
+    else:
+        config = db.get(SystemConfig, ev.system_id)
+        if config is None or config.legacy_system_name not in admin_scopes(user, db):
+            raise HTTPException(status_code=403, detail="Admin access for this system required.")
+    return ev
+
+
+class ClubEventPatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    event_date: Optional[date] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    all_day: Optional[bool] = None
+
+
+@router.patch("/club/events/{event_id}")
+def update_club_event(
+    event_id: int,
+    body: ClubEventPatch,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    ev = _event_or_404(event_id, user, db)
+    provided = body.model_fields_set
+    if "title" in provided and body.title is not None:
+        ev.title = body.title.strip()
+    if "description" in provided:
+        ev.description = (body.description or "").strip() or None
+    if "event_date" in provided and body.event_date is not None:
+        ev.event_date = body.event_date
+    if "start_time" in provided:
+        ev.start_time = body.start_time
+    if "end_time" in provided:
+        ev.end_time = body.end_time
+    if "all_day" in provided and body.all_day is not None:
+        ev.all_day = body.all_day
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return _event_row(ev)
+
+
+@router.delete("/club/events/{event_id}")
+def delete_club_event(
+    event_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    ev = _event_or_404(event_id, user, db)
+    db.delete(ev)
     db.commit()
     return {"ok": True}

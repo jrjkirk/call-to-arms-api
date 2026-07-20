@@ -41,12 +41,15 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "systems",        # Phase 0 systems-as-data catalogue: seeded once by
                        # seed_systems_config.py, then read-only until the
                        # systems_from_catalogue flag flips app code onto it
-    "clubs",          # Phase 1 step 1: seeded once by seed_clubs.py, then
-                       # read-only until a later Phase 1 step starts
-                       # scoping queries by club
-    "club_systems",   # Phase 1 step 1: seeded once by seed_clubs.py, then
-                       # read-only until a later Phase 1 step starts
-                       # scoping queries by club
+    "clubs",          # Phase 1 step 1: seeded once by seed_clubs.py; now also
+                       # written by the club super-admin editing the Club
+                       # landing page profile (blurb/logo/links/hours)
+    "club_systems",   # Phase 1 step 1: seeded once by seed_clubs.py; now also
+                       # written by each system's own admin editing that
+                       # system's Club-page carousel card
+    "club_events",    # Club landing page calendar: one-off/override events,
+                       # CRUD by club super-admin (system_id=None) or that
+                       # system's own admin (system_id set)
     "club_settings",  # auto-pairings scheduler settings, now per-club
                        # (split out of app_settings) — admin.py's
                        # auto-pairings-settings endpoints + the scheduler

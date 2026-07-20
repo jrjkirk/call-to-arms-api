@@ -58,6 +58,33 @@ def next_session_date(
     return _next_weekly(session_day, today)
 
 
+def sessions_in_range(
+    session_day: str, session_cadence: str, cadence_anchor: Optional[date],
+    start: date, end: date,
+) -> list[date]:
+    """All session dates for a club's system falling within [start, end]
+    (inclusive), for the Club-page calendar's auto-derived recurring
+    sessions. Weekly: every occurrence of session_day in range. Fortnightly:
+    every occurrence on the cadence_anchor's 14-day cycle in range."""
+    if session_cadence == "fortnightly":
+        assert cadence_anchor is not None
+        dates: list[date] = []
+        candidate = _next_fortnightly(session_day, cadence_anchor, start)
+        while candidate <= end:
+            if candidate >= start:
+                dates.append(candidate)
+            candidate += timedelta(days=14)
+        return dates
+
+    target = _DAY_NAME_TO_INT[session_day]
+    dates = []
+    candidate = start + timedelta(days=(target - start.weekday()) % 7)
+    while candidate <= end:
+        dates.append(candidate)
+        candidate += timedelta(days=7)
+    return dates
+
+
 def is_session_week(
     session_cadence: str, cadence_anchor: Optional[date], next_session: date, today: date
 ) -> bool:
