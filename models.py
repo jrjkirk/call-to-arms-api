@@ -546,3 +546,27 @@ class AuditLogEntry(SQLModel, table=True):
     target_id: Optional[int] = None
     detail: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ClubRequest(SQLModel, table=True):
+    """A "please add my club" submission from the logged-out hero page.
+    Not itself a Club row — approving a request is a platform-admin
+    decision recorded here; the actual club still gets created by hand via
+    the existing POST /admin/platform/clubs flow, since Joel emails the
+    requester a getting-started pack before/alongside setting them up.
+    reviewed_by_name is denormalized (see AuditLogEntry's actor_name) so
+    the record stays readable if the reviewing user is later deleted."""
+    __tablename__ = "club_requests"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    status: str = Field(default="pending", index=True)  # "pending" | "approved" | "denied"
+    requester_name: str
+    requester_email: str
+    club_name: str
+    club_location: str
+    notes: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    reviewed_by_user_id: Optional[int] = None
+    reviewed_by_name: Optional[str] = None

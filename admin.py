@@ -37,7 +37,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -3242,6 +3242,79 @@ def search_users(
             "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
         })
     return result[:50]
+
+
+def _club_request_dict(r: ClubRequest) -> dict:
+    return {
+        "id": r.id,
+        "created_at": r.created_at,
+        "status": r.status,
+        "requester_name": r.requester_name,
+        "requester_email": r.requester_email,
+        "club_name": r.club_name,
+        "club_location": r.club_location,
+        "notes": r.notes,
+        "reviewed_at": r.reviewed_at,
+        "reviewed_by_name": r.reviewed_by_name,
+    }
+
+
+@router.get("/platform/club-requests")
+def list_club_requests(
+    status: Optional[str] = None,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """"Please add my club" submissions from the logged-out hero page.
+    ?status=pending|approved|denied filters; omitted returns all, newest
+    first."""
+    query = select(ClubRequest)
+    if status is not None:
+        if status not in {"pending", "approved", "denied"}:
+            raise HTTPException(status_code=422, detail="status must be one of: pending, approved, denied")
+        query = query.where(ClubRequest.status == status)
+    rows = db.exec(query.order_by(ClubRequest.created_at.desc())).all()
+    return [_club_request_dict(r) for r in rows]
+
+
+def _review_club_request(request_id: int, new_status: str, user: User, db: Session) -> ClubRequest:
+    req = db.get(ClubRequest, request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail="Club request not found.")
+    req.status = new_status
+    req.reviewed_at = datetime.utcnow()
+    req.reviewed_by_user_id = user.id
+    req.reviewed_by_name = user.discord_name
+    db.add(req)
+    log_audit(
+        db, user, f"club_request.{new_status}", "club_request", req.id,
+        f"{req.club_name!r} ({req.requester_email})",
+    )
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+@router.post("/platform/club-requests/{request_id}/approve")
+def approve_club_request(
+    request_id: int,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Marks the request reviewed/approved — does not create the Club row
+    itself. The real club is still created by hand via the existing
+    POST /admin/platform/clubs flow, since Joel emails the requester a
+    getting-started pack as part of onboarding them."""
+    return _club_request_dict(_review_club_request(request_id, "approved", user, db))
+
+
+@router.post("/platform/club-requests/{request_id}/deny")
+def deny_club_request(
+    request_id: int,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    return _club_request_dict(_review_club_request(request_id, "denied", user, db))
 
 
 class ClubSystemCarouselBody(BaseModel):

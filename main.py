@@ -1,11 +1,14 @@
+import os
 from datetime import date, datetime, timedelta
 from typing import Optional
+import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
 from database import get_session, resolve_request_club_id, scoped
-from models import Club, ClubEvent, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
 from systems import factions_for, icon_folder_for
 from services import (
@@ -312,6 +315,73 @@ def get_club(
             "entries": calendar_out,
         },
     }
+
+
+DISCORD_CLUB_REQUESTS_WEBHOOK_URL = os.environ.get("DISCORD_CLUB_REQUESTS_WEBHOOK_URL", "")
+
+
+def _post_club_request_webhook(req: ClubRequest) -> None:
+    """Fire-and-forget Discord ping for a new club request — platform-level,
+    not tied to any club (the club doesn't exist yet), so this reads a
+    plain env var rather than going through ClubWebhook/resolve_webhook_url
+    like every other webhook post in this app. Never breaks the request on
+    failure, same convention as signups.py's _post_webhook."""
+    if not DISCORD_CLUB_REQUESTS_WEBHOOK_URL:
+        return
+    content = (
+        f"📬 **New club request:** {req.club_name}\n"
+        f"📍 {req.club_location}\n"
+        f"👤 {req.requester_name} — {req.requester_email}"
+        + (f"\n💬 {req.notes}" if req.notes else "")
+        + "\nReview it in Platform Admin."
+    )
+    try:
+        httpx.post(DISCORD_CLUB_REQUESTS_WEBHOOK_URL, json={"content": content}, timeout=5.0)
+    except Exception:
+        pass
+
+
+class ClubRequestBody(BaseModel):
+    requester_name: str
+    requester_email: str
+    club_name: str
+    club_location: str
+    notes: Optional[str] = None
+
+
+@app.post("/club-requests", status_code=201)
+def create_club_request(body: ClubRequestBody, session: Session = Depends(get_session)):
+    """Public "please add my club" submission from the logged-out hero page.
+    No auth required — the whole point is a visitor who doesn't have an
+    account yet. Doesn't create a Club row itself; a platform admin
+    reviews it (GET/approve/deny under /admin/platform/club-requests) and
+    still creates the real club by hand via the existing club-creation
+    flow, since there's a manual "getting started pack" email step in
+    between."""
+    name = body.requester_name.strip()
+    email = body.requester_email.strip()
+    club_name = body.club_name.strip()
+    location = body.club_location.strip()
+    if not name or not email or not club_name or not location:
+        raise HTTPException(
+            status_code=422,
+            detail="requester_name, requester_email, club_name, and club_location are all required.",
+        )
+    if "@" not in email or " " in email:
+        raise HTTPException(status_code=422, detail="requester_email doesn't look like a valid email address.")
+
+    req = ClubRequest(
+        requester_name=name,
+        requester_email=email,
+        club_name=club_name,
+        club_location=location,
+        notes=(body.notes or "").strip() or None,
+    )
+    session.add(req)
+    session.commit()
+    session.refresh(req)
+    _post_club_request_webhook(req)
+    return {"ok": True}
 
 
 @app.get("/players")

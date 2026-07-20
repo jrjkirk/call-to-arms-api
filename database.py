@@ -69,6 +69,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
                            # scripts on every invocation
     "audit_log_entries",  # platform-wide "who changed X" log, appended by
                            # admin.py's mutation endpoints
+    "club_requests",      # "please add my club" submissions from the
+                           # logged-out hero page; reviewed (approve/deny)
+                           # by a platform admin
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
