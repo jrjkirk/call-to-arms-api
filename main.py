@@ -200,6 +200,7 @@ def get_club(
             "blurb": cs.carousel_blurb,
             "photo_url": cs.carousel_photo_url,
             "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
+            "carousel_order": cs.carousel_order,
         }
         for cs, sc in club_systems
     ]
