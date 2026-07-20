@@ -2866,18 +2866,24 @@ class ClubProfileBody(BaseModel):
     longitude: Optional[float] = None
 
 
-@router.post("/club")
-def update_club_profile(
-    body: ClubProfileBody,
-    user: User = Depends(require_super_admin),
-    db: Session = Depends(get_session),
-):
-    """Super-admin edits the caller's own club's landing-page profile.
-    club_id always comes from the session (user.club_id)."""
-    club = db.get(Club, user.club_id)
-    if club is None:
-        raise HTTPException(status_code=404, detail="Club not found")
+def _club_profile_dict(club: Club) -> dict:
+    return {
+        "blurb": club.blurb,
+        "logo_url": club.logo_url,
+        "website_url": club.website_url,
+        "discord_url": club.discord_url,
+        "opening_hours": club.opening_hours or [],
+        "address": club.address,
+        "latitude": club.latitude,
+        "longitude": club.longitude,
+    }
 
+
+def _apply_club_profile_update(club: Club, body: ClubProfileBody, db: Session) -> Club:
+    """Shared by the club's own super-admin (POST /admin/club, always their
+    own club) and a platform admin editing any club
+    (POST /admin/platform/clubs/{club_id}/profile) — same fields, same
+    validation, extracted once rather than duplicated."""
     if body.opening_hours is not None:
         for row in body.opening_hours:
             if row.get("day") not in _DAY_NAME_TO_INT:
@@ -2906,27 +2912,12 @@ def update_club_profile(
     db.add(club)
     db.commit()
     db.refresh(club)
-    return {
-        "blurb": club.blurb,
-        "website_url": club.website_url,
-        "discord_url": club.discord_url,
-        "opening_hours": club.opening_hours or [],
-        "address": club.address,
-        "latitude": club.latitude,
-        "longitude": club.longitude,
-    }
+    return club
 
 
-@router.post("/club/logo", status_code=201)
-def upload_club_logo(
-    image: UploadFile = File(...),
-    user: User = Depends(require_super_admin),
-    db: Session = Depends(get_session),
-):
-    club = db.get(Club, user.club_id)
-    if club is None:
-        raise HTTPException(status_code=404, detail="Club not found")
-
+def _upload_club_logo_for(club: Club, image: UploadFile, db: Session) -> str:
+    """Shared by the club's own super-admin and a platform admin uploading
+    on any club's behalf."""
     data = image.file.read()
     if not data:
         raise HTTPException(status_code=422, detail="Empty image upload.")
@@ -2952,6 +2943,44 @@ def upload_club_logo(
     db.commit()
     if old_path:
         storage.delete_club_image(old_path)
+    return public_url
+
+
+def _delete_club_logo_for(club: Club, db: Session) -> None:
+    old_path = club.logo_path
+    club.logo_path = None
+    club.logo_url = None
+    db.add(club)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+
+
+@router.post("/club")
+def update_club_profile(
+    body: ClubProfileBody,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Super-admin edits the caller's own club's landing-page profile.
+    club_id always comes from the session (user.club_id)."""
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+    club = _apply_club_profile_update(club, body, db)
+    return _club_profile_dict(club)
+
+
+@router.post("/club/logo", status_code=201)
+def upload_club_logo(
+    image: UploadFile = File(...),
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+    public_url = _upload_club_logo_for(club, image, db)
     return {"logo_url": public_url}
 
 
@@ -2963,13 +2992,66 @@ def delete_club_logo(
     club = db.get(Club, user.club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="Club not found")
-    old_path = club.logo_path
-    club.logo_path = None
-    club.logo_url = None
-    db.add(club)
-    db.commit()
-    if old_path:
-        storage.delete_club_image(old_path)
+    _delete_club_logo_for(club, db)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Platform admin — editing any club's landing-page profile (location,
+# opening hours, logo). Same fields/validation as the club's own super-admin
+# self-service above, just addressed by club_id instead of user.club_id.
+# ---------------------------------------------------------------------------
+
+@router.get("/platform/clubs/{club_id}/profile")
+def get_platform_club_profile(
+    club_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+    return _club_profile_dict(club)
+
+
+@router.post("/platform/clubs/{club_id}/profile")
+def update_platform_club_profile(
+    club_id: int,
+    body: ClubProfileBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+    club = _apply_club_profile_update(club, body, db)
+    return _club_profile_dict(club)
+
+
+@router.post("/platform/clubs/{club_id}/logo", status_code=201)
+def upload_platform_club_logo(
+    club_id: int,
+    image: UploadFile = File(...),
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+    public_url = _upload_club_logo_for(club, image, db)
+    return {"logo_url": public_url}
+
+
+@router.delete("/platform/clubs/{club_id}/logo")
+def delete_platform_club_logo(
+    club_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+    _delete_club_logo_for(club, db)
     return {"ok": True}
 
 
