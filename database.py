@@ -64,6 +64,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # ranges); ratings reset each season
     "league_configs", # per-(club,system) league scoring config (elo/winloss
                        # params); one row per system-league
+    "pairing_configs", # per-(club,system) pairing weighting config (admin-set
+                        # sliders for mirror/rematch/vibe/experience/eta/
+                        # scenario/points); read by pairings_engine.generate()
     "platform_banner",    # site-wide announcement banner, platform-admin only
     "scheduled_job_runs", # cron heartbeat, written by the two scheduler
                            # scripts on every invocation

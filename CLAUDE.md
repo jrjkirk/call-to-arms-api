@@ -152,7 +152,7 @@ fly status                  # machine health
 "optimise", or change the algorithm logic without explicit instruction.
 
 Key invariants:
-- **9-tuple `_pair_dist` order (must not change):** `(block_pen, esc_p, mir, rematch_p, dv, de, eta_b, scen_d, dp)`
+- **`_pair_dist` returns `(last_opp_pen, block_pen, weighted_score)`.** `last_opp_pen`/`block_pen` stay hard, unconfigurable top-priority filters (admin blocks / "don't repeat last week's opponent"). `weighted_score` linearly combines the soft factors (mirror, rematch, vibe, experience, eta, scenario, points) using per-(club,system) weights from `PairingConfig` (`models.py`), editable via admin UI sliders — `GET/POST /admin/pairing-config`. Do not change how `last_opp_pen`/`block_pen` dominate without explicit instruction.
 - Intro pre-pass applies to The Old World and The Horus Heresy only (never Kill Team)
 - T&T / 3-way grouping intentionally removed (club never uses it)
 - Odd numbers produce a single BYE via the greedy fallback — this is correct behaviour

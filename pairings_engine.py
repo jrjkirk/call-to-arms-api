@@ -1,7 +1,13 @@
 """Pairing generation engine — faithful port of the original Streamlit matcher.
 
-9-tuple _pair_dist order: (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)
-Do NOT reorder or "optimise" — the tuple order encodes matchmaking priority.
+_pair_dist returns (last_opp_pen, block_pen, weighted_score). last_opp_pen and
+block_pen remain hard, unconfigurable top-priority filters (admin blocks /
+"don't repeat last week's opponent" are safety rules, not taste). The soft
+factors (mirror faction, rematch history, vibe, experience, eta, scenario,
+points) are combined into weighted_score using per-(club,system) weights from
+PairingConfig (see models.py) — admin-configurable via sliders in the web UI.
+Do NOT reorder or change how last_opp_pen/block_pen dominate — that ordering
+is still load-bearing.
 T&T / 3-way grouping intentionally removed (club never uses it).
 Odd numbers naturally produce a single BYE via the greedy fallback.
 standby_ok=True players sort later in the candidate list (soft BYE preference).
@@ -15,9 +21,22 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlmodel import Session
 
+from sqlmodel import select
+
 from database import scoped
-from models import Pairing, PairingBlock, Signup, SystemConfig
+from models import Pairing, PairingBlock, PairingConfig, Signup, SystemConfig
 from signups import _get_system_config
+
+
+def _get_pairing_config(session: Session, club_id: int, system_id: int) -> PairingConfig:
+    """This (club, system) pairing's weighting config, or an unsaved defaults
+    instance (approximates the original lexicographic priority order)."""
+    cfg = session.exec(
+        select(PairingConfig).where(
+            PairingConfig.club_id == club_id, PairingConfig.system_id == system_id
+        )
+    ).first()
+    return cfg or PairingConfig(club_id=club_id, system_id=system_id)
 
 
 def _normalize_name(n: str) -> str:
@@ -255,6 +274,7 @@ def _pair_dist(
     blocks: set,
     last_opp_pairs: set,
     config: SystemConfig,
+    pconfig: PairingConfig,
 ) -> tuple:
     a_pid = ms.row.player_id
     b_pid = other.row.player_id
@@ -289,7 +309,17 @@ def _pair_dist(
     scen_d = _scenario_diff(ms, other, config)
     dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
 
-    return (last_opp_pen, block_pen, mir, rematch_p, dv, de, eta_b, scen_d, dp)
+    score = (
+        pconfig.weight_mirror * mir
+        + pconfig.weight_rematch * rematch_p
+        + pconfig.weight_vibe * dv
+        + pconfig.weight_experience * de
+        + pconfig.weight_eta * eta_b
+        + (pconfig.weight_scenario * scen_d if config.uses_scenarios else 0)
+        + (pconfig.weight_points * dp if config.uses_points else 0)
+    )
+
+    return (last_opp_pen, block_pen, score)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +347,7 @@ def generate(
     config: SystemConfig = _get_system_config(session, system)
     if config is None:
         raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
+    pconfig: PairingConfig = _get_pairing_config(session, club_id, config.id)
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -457,11 +488,11 @@ def generate(
                 continue
             if has_played(ms, other):
                 continue
-            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config)
+            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config, pconfig)
             if best_dist is None or d < best_dist:
                 best_dist = d
                 best_j = j
-                if d[:8] == (0, 0, 0, 0, 0, 0, 0, 0):
+                if d == (0, 0, 0):
                     break
 
         # Second pass: lift recent-repeat and last-opponent constraints.

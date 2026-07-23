@@ -37,11 +37,11 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
-from pairings_engine import generate
+from pairings_engine import generate, _get_pairing_config
 from systems import factions_for, icon_folder_for
 from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
@@ -1625,6 +1625,85 @@ def save_league_config(
         _recalculate_ratings(db, user.club_id, config.id, season_id)
         db.commit()
     return _league_config_row(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Pairing weighting config — per-(club, system), self-service by that
+# system's admin (same _require_system_scope gate as league config above).
+# ---------------------------------------------------------------------------
+
+def _pairing_config_row(cfg: PairingConfig) -> dict:
+    return {
+        "weight_mirror": cfg.weight_mirror,
+        "weight_rematch": cfg.weight_rematch,
+        "weight_vibe": cfg.weight_vibe,
+        "weight_experience": cfg.weight_experience,
+        "weight_eta": cfg.weight_eta,
+        "weight_scenario": cfg.weight_scenario,
+        "weight_points": cfg.weight_points,
+    }
+
+
+@router.get("/pairing-config")
+def get_pairing_config(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """This club's pairing weighting config for one system. Returns the
+    unsaved-defaults shape if the club hasn't customised it yet — same
+    "defaults until saved" convention as league config."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cfg = _get_pairing_config(db, user.club_id, config.id)
+    return {
+        "uses_scenarios": config.uses_scenarios,
+        "uses_points": config.uses_points,
+        **_pairing_config_row(cfg),
+    }
+
+
+class PairingConfigBody(BaseModel):
+    system: str
+    weight_mirror: float = 50.0
+    weight_rematch: float = 30.0
+    weight_vibe: float = 15.0
+    weight_experience: float = 8.0
+    weight_eta: float = 4.0
+    weight_scenario: float = 2.0
+    weight_points: float = 1.0
+
+
+@router.post("/pairing-config")
+def save_pairing_config(
+    body: PairingConfigBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Upsert this club's pairing weighting config for one system. Takes
+    effect on the next pairings preview/generate call — no replay needed
+    (unlike league config, weighting only affects future matchmaking)."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    cfg = db.exec(
+        select(PairingConfig).where(
+            PairingConfig.club_id == user.club_id, PairingConfig.system_id == config.id
+        )
+    ).first()
+    if cfg is None:
+        cfg = PairingConfig(club_id=user.club_id, system_id=config.id)
+    for field in PairingConfigBody.model_fields:
+        if field == "system":
+            continue
+        setattr(cfg, field, getattr(body, field))
+    db.add(cfg)
+    db.commit()
+    return _pairing_config_row(cfg)
 
 
 # ---------------------------------------------------------------------------

@@ -212,6 +212,32 @@ class LeagueConfig(SQLModel, table=True):
     # Whether the win/loss method also adds the painting bonuses above.
     winloss_use_painting: bool = False
 
+class PairingConfig(SQLModel, table=True):
+    """Pairing weighting configuration for one club's system. One row per
+    (club_id, system_id). Weights combine the soft matchmaking factors
+    (mirror faction, rematch history, vibe, experience, eta, scenario,
+    points) into a single score for ranking candidate opponents — see
+    pairings_engine._pair_dist(). Defaults approximate the original
+    lexicographic priority order (mirror > rematch > vibe > experience >
+    eta > scenario > points) but are not a byte-exact reproduction of it.
+    `last_opp_pen` / `block_pen` are NOT configurable here — those stay
+    hard, unconfigurable top-priority filters in the engine."""
+    __tablename__ = "pairing_configs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+
+    weight_mirror: float = 50.0
+    weight_rematch: float = 30.0
+    weight_vibe: float = 15.0
+    weight_experience: float = 8.0
+    weight_eta: float = 4.0
+    weight_scenario: float = 2.0
+    weight_points: float = 1.0
+
+
 class User(SQLModel, table=True):
     """An authenticated user. Links a Discord identity to a player_id (after claim)."""
     __tablename__ = "users"
