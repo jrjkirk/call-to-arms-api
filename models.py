@@ -402,6 +402,11 @@ class ClubSystem(SQLModel, table=True):
     accent_color: Optional[str] = None
     carousel_order: int = 0
 
+    # Whether this club sends venue table-booking emails for this system.
+    # Scoring/venue config lives in TableBookingConfig, same ownership model
+    # as missions_enabled/league_enabled above.
+    table_booking_enabled: bool = False
+
 
 class ClubEvent(SQLModel, table=True):
     """A calendar entry for one club: either a one-off event or an override/
@@ -453,6 +458,61 @@ class Mission(SQLModel, table=True):
     image_url: Optional[str] = None
     active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TableBookingConfig(SQLModel, table=True):
+    """Venue table-booking email configuration for one club running one
+    system. One row per (club_id, system_id), same shape/ownership model as
+    LeagueConfig — created/updated by that system's own admin.
+
+    send_mode is "on_publish" (fire when pairings are published, whether by
+    the admin panel or the scheduled auto-pairings run) or "cutoff" (fire at
+    a fixed day/time regardless of pairing state, using headcount only —
+    cutoff_day/cutoff_time only meaningful in this mode). cutoff_time is
+    "HH:MM" 24h, resolved against Europe/London by the cutoff scheduler
+    script, not server UTC."""
+    __tablename__ = "table_booking_configs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+
+    venue_name: Optional[str] = None
+    venue_email: str
+    cc_emails: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    players_per_table: int = 2
+    include_player_names: bool = True
+
+    send_mode: str = "on_publish"  # "on_publish" | "cutoff"
+    cutoff_day: Optional[str] = None   # e.g. "Wednesday", only used in cutoff mode
+    cutoff_time: Optional[str] = None  # "HH:MM", only used in cutoff mode
+
+    subject_template: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TableBookingNotification(SQLModel, table=True):
+    """Audit trail + idempotency guard for venue table-booking emails: one
+    row per (club_id, system_id, week) that has actually been sent, so the
+    same week can never trigger a duplicate send regardless of which
+    trigger (on_publish vs cutoff) or how many times a publish/cutoff check
+    runs. week matches the "DD/MM/YYYY" string convention used elsewhere
+    (see signups.py::_validate_week), not an ISO week number."""
+    __tablename__ = "table_booking_notifications"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+    week: str
+    tables: int
+    headcount: int
+    status: str = "sent"  # "sent" | "failed"
+    error: Optional[str] = None
+    sent_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ClubWebhook(SQLModel, table=True):

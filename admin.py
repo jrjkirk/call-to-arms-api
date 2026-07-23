@@ -37,7 +37,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -1622,6 +1622,159 @@ def save_league_config(
         _recalculate_ratings(db, user.club_id, config.id, season_id)
         db.commit()
     return _league_config_row(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Table booking — per-(club, system) venue table-booking email config,
+# self-service by that system's own admin (same _require_system_scope gate
+# as missions/league config above). Slab 1: config CRUD only, no sending yet.
+# ---------------------------------------------------------------------------
+
+VALID_TABLE_BOOKING_SEND_MODES = {"on_publish", "cutoff"}
+
+
+def _table_booking_config_row(cfg: Optional[TableBookingConfig]) -> dict:
+    if cfg is None:
+        return {
+            "venue_name": None,
+            "venue_email": "",
+            "cc_emails": [],
+            "players_per_table": 2,
+            "include_player_names": True,
+            "send_mode": "on_publish",
+            "cutoff_day": None,
+            "cutoff_time": None,
+            "subject_template": None,
+            "notes": None,
+        }
+    return {
+        "venue_name": cfg.venue_name,
+        "venue_email": cfg.venue_email,
+        "cc_emails": cfg.cc_emails or [],
+        "players_per_table": cfg.players_per_table,
+        "include_player_names": cfg.include_player_names,
+        "send_mode": cfg.send_mode,
+        "cutoff_day": cfg.cutoff_day,
+        "cutoff_time": cfg.cutoff_time,
+        "subject_template": cfg.subject_template,
+        "notes": cfg.notes,
+    }
+
+
+@router.get("/table-booking-settings")
+def get_table_booking_settings(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """This club's table_booking_enabled flag + venue config for one system.
+    Config returns the unsaved-defaults shape if the club hasn't set it up
+    yet — same "defaults until saved" convention as league-config."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    cfg = db.exec(
+        select(TableBookingConfig).where(
+            TableBookingConfig.club_id == user.club_id,
+            TableBookingConfig.system_id == config.id,
+        )
+    ).first()
+    return {
+        "table_booking_enabled": bool(cs and cs.table_booking_enabled),
+        **_table_booking_config_row(cfg),
+    }
+
+
+class TableBookingSettingsBody(BaseModel):
+    system: str
+    table_booking_enabled: bool
+
+
+@router.post("/table-booking-settings")
+def update_table_booking_settings(
+    body: TableBookingSettingsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Enable/disable venue table-booking emails for one system (mirrors
+    POST /admin/league-settings). Disabling does not delete the venue
+    config, just stops sending."""
+    _require_system_scope(body.system, user, db)
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+    cs.table_booking_enabled = body.table_booking_enabled
+    db.add(cs)
+    db.commit()
+    return {"ok": True}
+
+
+class TableBookingConfigBody(BaseModel):
+    system: str
+    venue_name: Optional[str] = None
+    venue_email: str
+    cc_emails: list[str] = []
+    players_per_table: int = 2
+    include_player_names: bool = True
+    send_mode: str = "on_publish"
+    cutoff_day: Optional[str] = None
+    cutoff_time: Optional[str] = None
+    subject_template: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/table-booking-config")
+def save_table_booking_config(
+    body: TableBookingConfigBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Upsert this club's venue table-booking config for one system."""
+    _require_system_scope(body.system, user, db)
+    if body.send_mode not in VALID_TABLE_BOOKING_SEND_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"send_mode must be one of {sorted(VALID_TABLE_BOOKING_SEND_MODES)}.",
+        )
+    if "@" not in body.venue_email:
+        raise HTTPException(status_code=422, detail="venue_email must be a valid email address.")
+    if body.players_per_table < 1:
+        raise HTTPException(status_code=422, detail="players_per_table must be at least 1.")
+    if body.send_mode == "cutoff" and not (body.cutoff_day and body.cutoff_time):
+        raise HTTPException(
+            status_code=422,
+            detail="cutoff_day and cutoff_time are required when send_mode is 'cutoff'.",
+        )
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    cfg = db.exec(
+        select(TableBookingConfig).where(
+            TableBookingConfig.club_id == user.club_id,
+            TableBookingConfig.system_id == config.id,
+        )
+    ).first()
+    if cfg is None:
+        cfg = TableBookingConfig(club_id=user.club_id, system_id=config.id, venue_email=body.venue_email)
+    for field in TableBookingConfigBody.model_fields:
+        if field == "system":
+            continue
+        setattr(cfg, field, getattr(body, field))
+    cfg.updated_at = datetime.utcnow()
+    db.add(cfg)
+    db.commit()
+    db.refresh(cfg)
+    return _table_booking_config_row(cfg)
 
 
 def _league_season_row(db: Session, s: LeagueSeason, current_id: Optional[int]) -> dict:

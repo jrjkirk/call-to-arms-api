@@ -72,6 +72,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "club_requests",      # "please add my club" submissions from the
                            # logged-out hero page; reviewed (approve/deny)
                            # by a platform admin
+    "table_booking_configs",       # per-(club,system) venue table-booking
+                                    # email config, admin CRUD in admin.py
+    "table_booking_notifications", # audit trail + idempotency guard for
+                                    # sent table-booking emails
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
