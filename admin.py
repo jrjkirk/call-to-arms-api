@@ -37,12 +37,13 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate
 from systems import factions_for, icon_folder_for
+from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
     CANONICAL_VIBES,
     EXPERIENCE_OPTIONS,
@@ -909,6 +910,8 @@ def pairings_publish(
         gate.published = body.published
     db.add(gate)
     db.commit()
+    if body.published:
+        maybe_send_table_booking(db, user.club_id, body.system, body.week)
     return {"ok": True, "published": body.published}
 
 
@@ -1775,6 +1778,106 @@ def save_table_booking_config(
     db.commit()
     db.refresh(cfg)
     return _table_booking_config_row(cfg)
+
+
+def _table_booking_config_or_404(db: Session, club_id: int, system: str) -> tuple[SystemConfig, TableBookingConfig]:
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cfg = db.exec(
+        select(TableBookingConfig).where(
+            TableBookingConfig.club_id == club_id,
+            TableBookingConfig.system_id == config.id,
+        )
+    ).first()
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Table booking is not configured for this system yet.")
+    return config, cfg
+
+
+class TableBookingPreviewBody(BaseModel):
+    system: str
+    week: str
+
+
+@router.post("/table-booking/preview")
+def preview_table_booking(
+    body: TableBookingPreviewBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Dry run: compute tables/headcount and render the email for one
+    week, without sending or writing a notification row."""
+    _require_system_scope(body.system, user, db)
+    config, cfg = _table_booking_config_or_404(db, user.club_id, body.system)
+
+    data = compute_table_booking(db, user.club_id, body.system, body.week, cfg.players_per_table)
+    subject, html = render_table_booking_email(
+        cfg, body.system, body.week, data["tables"], data["headcount"], data["player_names"]
+    )
+    already_sent = db.exec(
+        select(TableBookingNotification).where(
+            TableBookingNotification.club_id == user.club_id,
+            TableBookingNotification.system_id == config.id,
+            TableBookingNotification.week == body.week,
+            TableBookingNotification.status == "sent",
+        )
+    ).first() is not None
+
+    return {**data, "subject": subject, "html": html, "already_sent": already_sent}
+
+
+@router.post("/table-booking/send")
+def send_table_booking(
+    body: TableBookingPreviewBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Explicit manual send — always executes (allow_duplicate=True), unlike
+    the automatic on_publish/cutoff triggers, which are idempotent per week.
+    A super-admin clicking Send is a deliberate action, not a re-triggered
+    automation, so it's allowed to resend a week that already went out."""
+    _require_system_scope(body.system, user, db)
+    config, cfg = _table_booking_config_or_404(db, user.club_id, body.system)
+
+    notif = send_table_booking_notification(
+        db, user.club_id, config.id, body.system, body.week, cfg, allow_duplicate=True,
+    )
+    return {
+        "status": notif.status,
+        "error": notif.error,
+        "tables": notif.tables,
+        "headcount": notif.headcount,
+        "sent_at": notif.sent_at.isoformat(),
+    }
+
+
+@router.get("/table-booking-history")
+def table_booking_history(
+    system: str,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """The last 10 send attempts (success or failure) for this club/system,
+    newest first — powers the admin oversight "recent sends" log."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    rows = db.exec(
+        select(TableBookingNotification)
+        .where(TableBookingNotification.club_id == user.club_id)
+        .where(TableBookingNotification.system_id == config.id)
+        .order_by(TableBookingNotification.sent_at.desc())
+        .limit(10)
+    ).all()
+    return [
+        {
+            "week": r.week, "tables": r.tables, "headcount": r.headcount,
+            "status": r.status, "error": r.error, "sent_at": r.sent_at.isoformat(),
+        }
+        for r in rows
+    ]
 
 
 def _league_season_row(db: Session, s: LeagueSeason, current_id: Optional[int]) -> dict:

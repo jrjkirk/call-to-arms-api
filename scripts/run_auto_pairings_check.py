@@ -14,6 +14,7 @@ from database import engine, record_job_run, scoped, system_setting_slug as _slu
 from models import ClubSystem, Pairing, PublishState, Signup, SystemConfig
 from pairings_engine import generate
 from post_pairings_image import post_pairings_image_for
+from table_booking import maybe_send_table_booking
 from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
 
 JOB_NAME = "auto_pairings_check"
@@ -132,6 +133,8 @@ def main() -> None:
 
                         _upsert_setting(db, club_id, f"auto_pairings_{slug}_last_week", target_week)
                         db.commit()
+
+                        maybe_send_table_booking(db, club_id, system, target_week)
 
                         posted = post_pairings_image_for(db, system, target_week, club_id=club_id)
                         print(f"[{system} club={club_id}] DONE — pairings generated+published for {target_week}, image_posted={posted}")
