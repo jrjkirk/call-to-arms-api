@@ -1667,13 +1667,13 @@ def get_pairing_config(
 
 class PairingConfigBody(BaseModel):
     system: str
-    weight_mirror: float = 50.0
-    weight_rematch: float = 30.0
-    weight_vibe: float = 15.0
-    weight_experience: float = 8.0
-    weight_eta: float = 4.0
-    weight_scenario: float = 2.0
-    weight_points: float = 1.0
+    weight_mirror: float = 5.0
+    weight_rematch: float = 3.0
+    weight_vibe: float = 1.5
+    weight_experience: float = 0.8
+    weight_eta: float = 0.4
+    weight_scenario: float = 0.2
+    weight_points: float = 0.1
 
 
 @router.post("/pairing-config")

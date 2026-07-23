@@ -229,13 +229,16 @@ class PairingConfig(SQLModel, table=True):
     club_id: int = Field(foreign_key="clubs.id", index=True)
     system_id: int = Field(foreign_key="systems.id", index=True)
 
-    weight_mirror: float = 50.0
-    weight_rematch: float = 30.0
-    weight_vibe: float = 15.0
-    weight_experience: float = 8.0
-    weight_eta: float = 4.0
-    weight_scenario: float = 2.0
-    weight_points: float = 1.0
+    # 0-10 scale (arbitrary magnitude units — only the ratios between them
+    # matter, not the absolute range). Defaults approximate the original
+    # priority order at 1/10th the earlier 0-100-scale values.
+    weight_mirror: float = 5.0
+    weight_rematch: float = 3.0
+    weight_vibe: float = 1.5
+    weight_experience: float = 0.8
+    weight_eta: float = 0.4
+    weight_scenario: float = 0.2
+    weight_points: float = 0.1
 
 
 class User(SQLModel, table=True):
