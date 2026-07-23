@@ -1,0 +1,22 @@
+name: Table Booking Cutoff Check
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python scripts/run_table_booking_cutoff_check.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}

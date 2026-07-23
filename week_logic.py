@@ -121,6 +121,27 @@ def _is_auto_pairings_due(
     return fire_start <= now_uk < fire_end
 
 
+def _is_table_booking_cutoff_due(cutoff_day: str, cutoff_time: str, now_uk: datetime) -> bool:
+    """Return True if a cutoff-mode table-booking send should fire right now.
+
+    Unlike _is_auto_pairings_due, there's no last_week dedup parameter here —
+    table_booking.py's send_table_booking_notification() already guards
+    against a duplicate send for the same (club, system, week) by checking
+    TableBookingNotification, so this only needs the day/time fire window.
+    Same 90-minute window convention as the other due-checks, matching the
+    hourly GitHub Actions cron cadence.
+
+    now_uk must be a timezone-aware datetime in Europe/London.
+    """
+    day_int = _DAY_NAME_TO_INT.get(cutoff_day)
+    if day_int is None or now_uk.weekday() != day_int:
+        return False
+    h, m = map(int, cutoff_time.split(":"))
+    fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
+    fire_end = fire_start + timedelta(minutes=90)
+    return fire_start <= now_uk < fire_end
+
+
 def _is_call_to_arms_due(
     settings: dict,
     now_uk: datetime,
