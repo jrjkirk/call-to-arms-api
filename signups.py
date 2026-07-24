@@ -18,8 +18,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import get_session, resolve_webhook_url, scoped
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem
+from database import get_session, resolve_webhook_url, scoped, system_setting_slug, get_setting
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig
 from auth import admin_scopes, require_user
 from systems import SYSTEM_RULES
 
@@ -158,6 +158,40 @@ def _signup_count_phrase_for_system(system: str) -> str:
     if system == "Kill Team":
         return "KT signups this week"
     return f"{system} signups this week"
+
+
+def signup_cap(db: Session, club_id: int, system: str) -> dict:
+    """Per-(club, system) signup cap, stored in club_settings (no dedicated
+    table — mirrors auto-pairings). The cap is expressed in tables; the
+    player limit is tables × players-per-table, reusing the table-booking
+    config's players_per_table (fallback 2) so "table size" has one home.
+    max_players is None when the cap is disabled."""
+    slug = system_setting_slug(system)
+    enabled = (get_setting(db, club_id, f"signup_cap_{slug}_enabled", "false") or "false").lower() == "true"
+    try:
+        tables = int(get_setting(db, club_id, f"signup_cap_{slug}_tables", "0") or "0")
+    except ValueError:
+        tables = 0
+
+    players_per_table = 2
+    config = db.exec(select(SystemConfig).where(SystemConfig.legacy_system_name == system)).first()
+    if config is not None:
+        tb = db.exec(
+            select(TableBookingConfig).where(
+                TableBookingConfig.club_id == club_id,
+                TableBookingConfig.system_id == config.id,
+            )
+        ).first()
+        if tb is not None and tb.players_per_table:
+            players_per_table = tb.players_per_table
+
+    max_players = tables * players_per_table if (enabled and tables > 0) else None
+    return {
+        "enabled": enabled,
+        "tables": tables,
+        "players_per_table": players_per_table,
+        "max_players": max_players,
+    }
 
 
 def _signup_count(db: Session, system: str, week: str, club_id: int) -> int:
@@ -335,6 +369,18 @@ def submit_signup(
     ).all()
 
     created = not bool(existing)
+
+    # Signup cap: block a *new* signup once the session is full. Players
+    # editing their existing entry are always allowed through.
+    if created:
+        cap = signup_cap(db, user.club_id, body.system)
+        if cap["max_players"] is not None:
+            current = _signup_count(db, body.system, week, user.club_id)
+            if current >= cap["max_players"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This session is full ({cap['tables']} table{'s' if cap['tables'] != 1 else ''} · {cap['max_players']} players).",
+                )
     if existing:
         su = existing[0]
         for dup in existing[1:]:

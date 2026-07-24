@@ -27,6 +27,7 @@ from models import (
     User,
 )
 from week_logic import next_session_date
+from signups import signup_cap
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 
@@ -122,6 +123,7 @@ def analytics_overview(
         else:
             status = "none"
 
+        cap = signup_cap(db, user.club_id, system)
         out.append({
             "system": system,
             "slug": config.slug,
@@ -129,6 +131,7 @@ def analytics_overview(
             "next_session": week,
             "session_day": cs.session_day,
             "signups": signups,
+            "cap_max_players": cap["max_players"],  # None when no cap
             "pairing_count": pairing_count,
             "status": status,
         })

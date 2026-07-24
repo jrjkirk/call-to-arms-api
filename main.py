@@ -24,7 +24,7 @@ from services import (
     ACHIEVEMENT_DESCRIPTIONS,
 )
 from auth import router as auth_router, require_user, current_user
-from signups import router as signups_router, CANONICAL_VIBES, _get_system_config
+from signups import router as signups_router, CANONICAL_VIBES, _get_system_config, signup_cap
 from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
 from analytics import router as analytics_router
@@ -780,12 +780,21 @@ def signups_stats(system: str, week: str, user: User = Depends(require_user), se
     newcomers = sum(1 for s in signups if (s.experience or "").lower().startswith("new"))
     veterans = sum(1 for s in signups if (s.experience or "").lower().startswith("vet"))
 
+    cap = signup_cap(session, user.club_id, system)
+    already_signed_up = any(s.player_id == user.player_id for s in signups) if user.player_id else False
+
     return {
         "system": system,
         "week": week,
         "signed_up": total,
         "newcomers": newcomers,
         "veterans": veterans,
+        # Cap state so the signup form can show "full" and disable submit.
+        # `is_full` only blocks people not already signed up (they can still edit).
+        "cap_enabled": cap["max_players"] is not None,
+        "cap_max_players": cap["max_players"],
+        "cap_tables": cap["tables"] if cap["max_players"] is not None else None,
+        "is_full": cap["max_players"] is not None and total >= cap["max_players"] and not already_signed_up,
     }
 
 
@@ -935,6 +944,7 @@ def get_pairings(
             "game_type": game_type,
             "eta": eta,
             "points": points,
+            "table": p.table if not is_bye else None,
             "prearranged": p.prearranged,
         })
 
