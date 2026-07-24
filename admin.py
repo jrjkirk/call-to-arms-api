@@ -507,7 +507,6 @@ def _build_display_row(
     prearranged: bool,
     signups_by_id: dict,
     uses_points: bool,
-    table: Optional[str] = None,
 ) -> dict:
     a_su = signups_by_id.get(a_signup_id)
     b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
@@ -532,32 +531,7 @@ def _build_display_row(
         "eta": _eta_show(a_su, b_su),
         "points": _pts_show(a_su, b_su, uses_points),
         "prearranged": prearranged,
-        "table": table if b_signup_id else None,
     }
-
-
-def _assign_tables(db: Session, club_id: int, system: str, week: str) -> None:
-    """Number the non-BYE games for a week 1..n in row order, so a published
-    sheet tells players which table to head to. BYEs get no table. Manual
-    per-row overrides via the grid persist until the next generate re-runs this."""
-    rows = db.exec(
-        scoped(Pairing, club_id)
-        .where(Pairing.week == week)
-        .where(Pairing.system == system)
-        .order_by(Pairing.id)
-    ).all()
-    n = 0
-    for p in rows:
-        if p.b_signup_id is None:
-            if p.table is not None:
-                p.table = None
-                db.add(p)
-            continue
-        n += 1
-        if p.table != str(n):
-            p.table = str(n)
-            db.add(p)
-    db.commit()
 
 
 def _pairs_of(rows) -> list:
@@ -601,7 +575,6 @@ def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: b
             p.id, p.a_signup_id, p.b_signup_id,
             a_faction, b_faction,
             p.prearranged, signups_by_id, uses_points,
-            table=p.table,
         ))
     return result
 
@@ -840,7 +813,6 @@ class PairingSaveRow(BaseModel):
     type: Optional[str] = None
     eta: Optional[str] = None
     points: Optional[Any] = None
-    table: Optional[str] = None
 
 
 class PairingSaveBody(BaseModel):
@@ -933,8 +905,6 @@ def pairings_generate(
     # autoflush will sync deletes before generate queries
 
     new_pairings = generate(db, body.week, body.system, persist=True, club_id=user.club_id)
-
-    _assign_tables(db, user.club_id, body.system, body.week)
 
     # Include any prearranged rows so the summary reflects the whole week, not
     # just the freshly-generated pairs.
@@ -1054,10 +1024,6 @@ def pairings_save(
 
         p.a_faction = a_faction if p.a_signup_id else None
         p.b_faction = b_faction if p.b_signup_id else None
-
-        # Table label — BYEs never get a table; blank clears it.
-        table_val = (row.table or "").strip() or None
-        p.table = table_val if p.b_signup_id else None
 
         if a_su:
             a_su.faction = a_faction

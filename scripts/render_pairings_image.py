@@ -84,7 +84,6 @@ def _to_render_rows(display_rows: list[dict]) -> list[dict]:
             "Type": r.get("type"),
             "ETA": r.get("eta"),
             "Points": r.get("points"),
-            "Table": r.get("table"),
         })
     return out
 
@@ -220,10 +219,7 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
 
         # ---- Now draw everything, fitting names to the real space
         # available before VS on each side ----
-        # The left marker shows the assigned table number when set, otherwise
-        # falls back to the sequential row index.
-        marker = str(r.get("Table")) if r.get("Table") else f"{i + 1}"
-        ax.text(idx_x, cy, marker, color=name_color, fontsize=18, fontweight="bold",
+        ax.text(idx_x, cy, f"{i + 1}", color=name_color, fontsize=18, fontweight="bold",
                 ha="left", va="center", zorder=3)
 
         icon_a_path = _icon_png_path(r.get("Faction A"))

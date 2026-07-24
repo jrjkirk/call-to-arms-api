@@ -60,8 +60,16 @@ def build_match_preference(su: Signup) -> tuple:
 
 
 def previous_pairs_recent(
-    session: Session, system: str, current_week: str, max_weeks: int, club_id: int
+    session: Session, system: str, current_week: str, max_weeks: int, club_id: int,
+    exclude_week: Optional[str] = None,
 ) -> set:
+    """Set of {name, name} pairs played within `max_weeks` of current_week.
+
+    exclude_week omits a specific week entirely — used by the post-hoc quality
+    summary to avoid counting the week's own freshly-made pairings as
+    "rematches" of themselves. The matcher itself passes no exclusion (during
+    generation the current week's pairings don't exist yet), so its behaviour
+    is unchanged."""
     try:
         current_dt = datetime.strptime(current_week, "%d/%m/%Y")
     except ValueError:
@@ -84,6 +92,8 @@ def previous_pairs_recent(
 
     result: set = set()
     for pr in pairings:
+        if exclude_week is not None and pr.week == exclude_week:
+            continue
         try:
             pr_week_dt = datetime.strptime(pr.week, "%d/%m/%Y")
         except ValueError:
@@ -587,7 +597,9 @@ def summarize_pairings(
     recent_w = (pconfig.recent_weeks if pconfig and pconfig.recent_weeks is not None
                 else (config.recent_weeks if config else 3))
 
-    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
+    # Exclude the week being summarised so its own pairings aren't counted as
+    # rematches of themselves.
+    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id, exclude_week=week)
 
     ids = {a for a, _ in pairs} | {b for _, b in pairs if b is not None}
     rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(ids))).all() if ids else []

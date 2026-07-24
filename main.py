@@ -944,7 +944,6 @@ def get_pairings(
             "game_type": game_type,
             "eta": eta,
             "points": points,
-            "table": p.table if not is_bye else None,
             "prearranged": p.prearranged,
         })
 
