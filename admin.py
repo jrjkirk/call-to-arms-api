@@ -41,7 +41,7 @@ from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubS
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
-from pairings_engine import generate, _get_pairing_config
+from pairings_engine import generate, _get_pairing_config, summarize_pairings
 from systems import factions_for, icon_folder_for
 from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
@@ -533,6 +533,18 @@ def _build_display_row(
     }
 
 
+def _pairs_of(rows) -> list:
+    """(a_signup_id, b_signup_id|None) tuples from a mixed list of Pairing rows
+    and preview dicts — the shape pairings_engine.summarize_pairings expects."""
+    out = []
+    for r in rows:
+        if isinstance(r, Pairing):
+            out.append((r.a_signup_id, r.b_signup_id))
+        else:
+            out.append((r.get("a_signup_id"), r.get("b_signup_id")))
+    return out
+
+
 def _collect_signups_for_rows(rows, db: Session, club_id: int) -> dict:
     ids: set[int] = set()
     for r in rows:
@@ -820,7 +832,8 @@ def pairings_preview(
     display = _pairing_rows_to_display(prearranged, signups_by_id, uses_points) + \
               _dicts_to_display(proposed_dicts, signups_by_id, uses_points)
 
-    return {"rows": display, "preview": True}
+    summary = summarize_pairings(db, body.system, body.week, user.club_id, _pairs_of(all_rows))
+    return {"rows": display, "preview": True, "summary": summary}
 
 
 @router.post("/pairings/generate")
@@ -846,11 +859,23 @@ def pairings_generate(
 
     new_pairings = generate(db, body.week, body.system, persist=True, club_id=user.club_id)
 
+    # Include any prearranged rows so the summary reflects the whole week, not
+    # just the freshly-generated pairs.
+    prearranged = db.exec(
+        scoped(Pairing, user.club_id)
+        .where(Pairing.week == body.week)
+        .where(Pairing.system == body.system)
+        .where(Pairing.prearranged == True)
+    ).all()
+
     signups_by_id = _collect_signups_for_rows(new_pairings, db, user.club_id)
     config = _get_system_config(db, body.system)
     uses_points = config.uses_points if config else (body.system != "Kill Team")
     display = _pairing_rows_to_display(new_pairings, signups_by_id, uses_points)
-    return {"rows": display}
+    summary = summarize_pairings(
+        db, body.system, body.week, user.club_id, _pairs_of(list(new_pairings) + list(prearranged))
+    )
+    return {"rows": display, "summary": summary}
 
 
 @router.get("/pairings")
@@ -881,7 +906,8 @@ def pairings_get(
     config = _get_system_config(db, system)
     uses_points = config.uses_points if config else (system != "Kill Team")
     display = _pairing_rows_to_display(rows, signups_by_id, uses_points)
-    return {"rows": display, "published": published}
+    summary = summarize_pairings(db, system, week, user.club_id, _pairs_of(rows)) if rows else None
+    return {"rows": display, "published": published, "summary": summary}
 
 
 @router.post("/pairings/publish")
@@ -1498,6 +1524,119 @@ def admin_league_result_delete(
     _recalculate_ratings(db, user.club_id, system_id, season_id)
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Log league results straight from a week's published pairings — the pairings
+# already hold both players + factions, so the admin only supplies the outcome
+# (win/draw/loss + optional painting) instead of re-typing every field one game
+# at a time. Admin-scoped (unlike the player-facing POST /league/results, this
+# does NOT require the caller be a linked player). Per-result webhooks and
+# achievement announcements are deliberately skipped here — a bulk log
+# shouldn't fire N separate Discord posts.
+# ---------------------------------------------------------------------------
+
+class FromPairingsResultItem(BaseModel):
+    pairing_id: int
+    result: str                                  # a VALID_RESULTS value
+    player_1_painting_bonus: Optional[str] = None
+    player_2_painting_bonus: Optional[str] = None
+    game_type: str = "Competitive"
+
+
+class FromPairingsResultsBody(BaseModel):
+    system: str
+    week: str
+    results: list[FromPairingsResultItem]
+
+
+@router.post("/league/results/from-pairings")
+def admin_league_results_from_pairings(
+    body: FromPairingsResultsBody,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Create LeagueResult rows from a week's pairings in one shot. `result`'s
+    "Player 1"/"Player 2" map to the pairing's a-side/b-side respectively."""
+    _require_system_scope(body.system, user, db)
+
+    system_id = _resolve_system_id(db, user.club_id, body.system)
+    if system_id is None:
+        raise HTTPException(status_code=422, detail="No league is enabled for this club.")
+    season_id = _current_season_id(db, user.club_id, system_id)
+    if season_id is None:
+        raise HTTPException(status_code=422, detail="No league season is configured.")
+
+    result_date = datetime.utcnow().strftime("%d/%m/%Y")
+    created = 0
+    skipped: list[dict] = []
+
+    for item in body.results:
+        if item.result not in VALID_RESULTS:
+            raise HTTPException(status_code=422, detail=f"Invalid result: {item.result!r}")
+        if item.game_type not in VALID_GAME_TYPES:
+            raise HTTPException(status_code=422, detail="Game type must be Casual or Competitive.")
+        p1_painting = _normalise_optional(item.player_1_painting_bonus)
+        p2_painting = _normalise_optional(item.player_2_painting_bonus)
+        if p1_painting not in VALID_PAINTING or p2_painting not in VALID_PAINTING:
+            raise HTTPException(status_code=422, detail="Invalid painting bonus.")
+
+        pairing = db.get(Pairing, item.pairing_id)
+        if (pairing is None or pairing.club_id != user.club_id
+                or pairing.system != body.system or pairing.week != body.week):
+            skipped.append({"pairing_id": item.pairing_id, "reason": "not found"})
+            continue
+        if pairing.b_signup_id is None:
+            skipped.append({"pairing_id": item.pairing_id, "reason": "bye"})
+            continue
+
+        a_su = db.get(Signup, pairing.a_signup_id)
+        b_su = db.get(Signup, pairing.b_signup_id)
+        if a_su is None or b_su is None or a_su.player_id is None or b_su.player_id is None:
+            skipped.append({"pairing_id": item.pairing_id, "reason": "no linked player"})
+            continue
+        if a_su.player_id == b_su.player_id:
+            skipped.append({"pairing_id": item.pairing_id, "reason": "same player"})
+            continue
+
+        # Idempotency: skip if this exact pairing's players already have a result
+        # logged for this week/season (guards against a double-submit).
+        already = db.exec(
+            scoped(LeagueResult, user.club_id)
+            .where(LeagueResult.system_id == system_id)
+            .where(LeagueResult.season_id == season_id)
+            .where(LeagueResult.result_date == result_date)
+            .where(LeagueResult.player_1_id == a_su.player_id)
+            .where(LeagueResult.player_2_id == b_su.player_id)
+        ).first()
+        if already is not None:
+            skipped.append({"pairing_id": item.pairing_id, "reason": "already logged"})
+            continue
+
+        db.add(LeagueResult(
+            player_1_id=a_su.player_id,
+            player_1_name=a_su.player_name,
+            player_2_id=b_su.player_id,
+            player_2_name=b_su.player_name,
+            result=item.result,
+            result_date=result_date,
+            player_1_faction=_normalise_optional(pairing.a_faction or a_su.faction),
+            player_2_faction=_normalise_optional(pairing.b_faction or b_su.faction),
+            player_1_painting_bonus=p1_painting,
+            player_2_painting_bonus=p2_painting,
+            game_type=item.game_type,
+            club_id=user.club_id,
+            system_id=system_id,
+            season_id=season_id,
+        ))
+        created += 1
+
+    if created:
+        db.flush()  # assign ids so the replay includes the new rows
+        _recalculate_ratings(db, user.club_id, system_id, season_id)
+        db.commit()
+
+    return {"ok": True, "created": created, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

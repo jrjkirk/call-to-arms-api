@@ -566,3 +566,66 @@ def generate(
         session.commit()
 
     return out
+
+
+def summarize_pairings(
+    session: Session,
+    system: str,
+    week: str,
+    club_id: int,
+    pairs: list[tuple[int, Optional[int]]],
+) -> dict:
+    """At-a-glance quality read-out for a set of proposed/generated pairings —
+    how many games, BYEs, rematches (same two players paired inside the recent
+    history window), mirror matchups (same faction), the widest arrival-time
+    gap, and how many pairs have mismatched vibes. Recomputed from the output
+    pairs + existing history helpers; does not touch the matcher itself."""
+    config = _get_system_config(session, system)
+    recent_w = config.recent_weeks if config else 3
+
+    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
+
+    ids = {a for a, _ in pairs} | {b for _, b in pairs if b is not None}
+    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(ids))).all() if ids else []
+    su_by_id = {s.id: s for s in rows}
+
+    games = byes = rematches = mirrors = vibe_mismatches = 0
+    widest_eta_gap = 0
+
+    for a_id, b_id in pairs:
+        if b_id is None:
+            byes += 1
+            continue
+        games += 1
+        a = su_by_id.get(a_id)
+        b = su_by_id.get(b_id)
+        if a is None or b is None:
+            continue
+
+        a_key = _normalize_name(a.player_name).lower()
+        b_key = _normalize_name(b.player_name).lower()
+        if tuple(sorted([a_key, b_key])) in seen_recent:
+            rematches += 1
+
+        af = (a.faction or "").strip().lower()
+        bf = (b.faction or "").strip().lower()
+        if af and bf and af == bf:
+            mirrors += 1
+
+        am, bm = _eta_minutes(a.eta), _eta_minutes(b.eta)
+        if am is not None and bm is not None:
+            widest_eta_gap = max(widest_eta_gap, abs(am - bm))
+
+        av = (a.vibe or "").strip().lower()
+        bv = (b.vibe or "").strip().lower()
+        if av and bv and av != bv and "either" not in (av, bv) and "intro" not in (av, bv):
+            vibe_mismatches += 1
+
+    return {
+        "games": games,
+        "byes": byes,
+        "rematches": rematches,
+        "mirrors": mirrors,
+        "widest_eta_gap_mins": widest_eta_gap,
+        "vibe_mismatches": vibe_mismatches,
+    }
