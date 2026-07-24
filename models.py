@@ -240,6 +240,15 @@ class PairingConfig(SQLModel, table=True):
     weight_scenario: float = 0.2
     weight_points: float = 0.1
 
+    # Per-club override of the rematch lookback windows (weeks). NULL = fall
+    # back to the platform SystemConfig.recent_weeks / extended_weeks default.
+    # recent = hard-avoid rematch window; extended = soft-avoid window. These
+    # sit alongside the weights because "how far back counts as a rematch" is
+    # part of the same per-(club,system) pairing taste as "how much a rematch
+    # matters".
+    recent_weeks: Optional[int] = None
+    extended_weeks: Optional[int] = None
+
 
 class User(SQLModel, table=True):
     """An authenticated user. Links a Discord identity to a player_id (after claim)."""
@@ -310,6 +319,11 @@ class SystemConfig(SQLModel, table=True):
 
     allows_demo: bool = False
     has_intro_prepass: bool = False
+
+    # Whether this system offers players a "happy to be a standby / sit out if
+    # numbers are odd" option on the signup form. Was hardcoded to The Old
+    # World only; now a per-system catalogue capability (backfilled TOW=true).
+    uses_standby: bool = False
 
     # Platform-wide catalogue default: does this system generally support a
     # league. Distinct from the real per-club answer, ClubSystem.league_enabled

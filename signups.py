@@ -345,7 +345,7 @@ def submit_signup(
         su.eta = eta
         su.experience = experience
         su.vibe = vibe
-        su.standby_ok = bool(body.standby_ok)
+        su.standby_ok = bool(body.standby_ok) if config.uses_standby else False
         su.tnt_ok = False
         su.scenario = scenario
         su.can_demo = can_demo
@@ -356,7 +356,7 @@ def submit_signup(
             player_id=player.id, player_name=player.name,
             faction=faction, points=points, eta=eta,
             experience=experience, vibe=vibe,
-            standby_ok=bool(body.standby_ok), tnt_ok=False,
+            standby_ok=bool(body.standby_ok) if config.uses_standby else False, tnt_ok=False,
             scenario=scenario, can_demo=can_demo,
             club_id=user.club_id,
         )

@@ -449,8 +449,10 @@ def generate(
         )
     )
 
-    # 5. Recent / extended play history (windows per-system, via the catalogue)
-    recent_w, extended_w = config.recent_weeks, config.extended_weeks
+    # 5. Recent / extended play history windows. Per-club PairingConfig
+    #    override wins when set; otherwise the platform SystemConfig default.
+    recent_w = pconfig.recent_weeks if pconfig.recent_weeks is not None else config.recent_weeks
+    extended_w = pconfig.extended_weeks if pconfig.extended_weeks is not None else config.extended_weeks
 
     seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
     seen_extended = previous_pairs_recent(session, system, week, extended_w, club_id)
@@ -581,7 +583,9 @@ def summarize_pairings(
     gap, and how many pairs have mismatched vibes. Recomputed from the output
     pairs + existing history helpers; does not touch the matcher itself."""
     config = _get_system_config(session, system)
-    recent_w = config.recent_weeks if config else 3
+    pconfig = _get_pairing_config(session, club_id, config.id) if config else None
+    recent_w = (pconfig.recent_weeks if pconfig and pconfig.recent_weeks is not None
+                else (config.recent_weeks if config else 3))
 
     seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
 

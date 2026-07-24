@@ -1114,10 +1114,8 @@ def _system_config(db: Session, club_id: int, system: str) -> dict:
     _effective_vibe_config) rather than hardcoded per-system-name literals,
     so a club's own vibe customization is honored here too.
 
-    show_standby is the one field with no catalogue equivalent (it's True
-    only for The Old World today, which happens to coincide with
-    uses_scenarios — but that's not a designed relationship, so it's kept as
-    an explicit system-name check rather than derived from it)."""
+    show_standby now comes from the SystemConfig.uses_standby catalogue
+    capability (backfilled to The Old World, its original only home)."""
     config = _get_system_config(db, system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
@@ -1126,7 +1124,7 @@ def _system_config(db: Session, club_id: int, system: str) -> dict:
         "show_points": config.uses_points,
         "default_points": config.default_points,
         "show_scenario": config.uses_scenarios,
-        "show_standby": system == "The Old World",
+        "show_standby": config.uses_standby,
         "show_can_demo": config.allows_demo,
         "vibe_options": vibe_options,
         "vibe_fixed": vibe_options[0] if len(vibe_options) == 1 else None,
@@ -1305,10 +1303,7 @@ def admin_signup_create(
     else:
         scenario = None
     can_demo = bool(body.can_demo) if allows_demo else False
-    # standby_ok has no catalogue field (like show_standby in _system_config)
-    # — kept as an explicit check on today's only scenario-using system
-    # rather than assumed equal to uses_scenarios for a hypothetical future one.
-    standby_ok = bool(body.standby_ok) if body.system == "The Old World" else False
+    standby_ok = bool(body.standby_ok) if config.uses_standby else False
 
     su = Signup(
         week=week,
@@ -1780,6 +1775,8 @@ def _pairing_config_row(cfg: PairingConfig) -> dict:
         "weight_eta": cfg.weight_eta,
         "weight_scenario": cfg.weight_scenario,
         "weight_points": cfg.weight_points,
+        "recent_weeks": cfg.recent_weeks,
+        "extended_weeks": cfg.extended_weeks,
     }
 
 
@@ -1800,6 +1797,10 @@ def get_pairing_config(
     return {
         "uses_scenarios": config.uses_scenarios,
         "uses_points": config.uses_points,
+        # Platform defaults shown as placeholders when the club hasn't overridden
+        # the rematch windows.
+        "default_recent_weeks": config.recent_weeks,
+        "default_extended_weeks": config.extended_weeks,
         **_pairing_config_row(cfg),
     }
 
@@ -1813,6 +1814,9 @@ class PairingConfigBody(BaseModel):
     weight_eta: float = 0.4
     weight_scenario: float = 0.2
     weight_points: float = 0.1
+    # null = use the platform SystemConfig default window.
+    recent_weeks: Optional[int] = None
+    extended_weeks: Optional[int] = None
 
 
 @router.post("/pairing-config")
@@ -2511,6 +2515,7 @@ class SystemConfigCreateBody(BaseModel):
     scenario_options: Optional[list[str]] = None
     default_scenario: Optional[str] = None
     allows_demo: bool = False
+    uses_standby: bool = False
     has_intro_prepass: bool = False
     has_league: bool = False
     recent_weeks: int = 3
@@ -2539,6 +2544,7 @@ class SystemConfigEditBody(BaseModel):
     scenario_options: Optional[list[str]] = None
     default_scenario: Optional[str] = None
     allows_demo: bool = False
+    uses_standby: bool = False
     has_intro_prepass: bool = False
     has_league: bool = False
     recent_weeks: int = 3
