@@ -61,14 +61,14 @@ def verify() -> list[str]:
         cols_by_name = {row[0]: row[1] for row in cols}
         expected_cols = {
             "id", "club_id", "system", "creator_player_id", "creator_name",
-            "location", "game_at", "vibe", "faction", "points", "notes",
+            "game_at", "vibe", "faction", "points", "notes",
             "status", "taker_player_id", "taker_name", "taken_at",
             "created_at", "last_reminder_at", "updated_at",
         }
         missing = expected_cols - set(cols_by_name)
         if missing:
             problems.append(f"Missing columns: {missing}")
-        for not_null in ("club_id", "system", "creator_player_id", "creator_name", "location", "game_at", "status"):
+        for not_null in ("club_id", "system", "creator_player_id", "creator_name", "game_at", "status"):
             if cols_by_name.get(not_null) != "NO":
                 problems.append(f"{not_null} should be NOT NULL, is_nullable={cols_by_name.get(not_null)}")
 

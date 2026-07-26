@@ -735,7 +735,6 @@ class CallOut(SQLModel, table=True):
     creator_player_id: int = Field(foreign_key="players.id", index=True)
     creator_name: str
 
-    location: str
     # UK-local (Europe/London) naive datetime of the proposed game. Doubles as
     # the expiry point: once "now" passes game_at the call-out auto-expires.
     game_at: datetime

@@ -36,7 +36,6 @@ APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 _UK = ZoneInfo("Europe/London")
 
 # Cap free-text so a stray paste can't bloat a Discord message or the DB.
-_MAX_LOCATION = 200
 _MAX_NOTES = 500
 
 
@@ -50,7 +49,6 @@ class CallOutIn(SQLModel):
     """Request body for POST /call-outs. Creator identity comes from the
     session (the caller's player at the active club)."""
     system: str
-    location: str
     game_date: str          # YYYY-MM-DD (UK local)
     game_time: str          # HH:MM (UK local, 24h)
     vibe: Optional[str] = None
@@ -77,7 +75,6 @@ def _serialize(c: CallOut, my_player_id: Optional[int]) -> dict:
         "system": c.system,
         "creator_player_id": c.creator_player_id,
         "creator_name": c.creator_name,
-        "location": c.location,
         "game_at": c.game_at.isoformat(),
         "game_date": c.game_at.strftime("%Y-%m-%d"),
         "game_time": c.game_at.strftime("%H:%M"),
@@ -102,7 +99,7 @@ def _webhook_content(c: CallOut, header: str) -> str:
         detail_parts.append(f"🛡️ {c.points} pts")
     lines = [
         f"{header}",
-        f"📍 {c.location} • 🗓️ {_format_when(c.game_at)}",
+        f"🗓️ {_format_when(c.game_at)}",
     ]
     if detail_parts:
         lines.append(" • ".join(detail_parts))
@@ -147,11 +144,6 @@ def create_call_out(
 
     player = _require_linked_player(user, db, club_id)
 
-    location = (body.location or "").strip()
-    if not location:
-        raise HTTPException(status_code=422, detail="Please say where the game will be.")
-    location = location[:_MAX_LOCATION]
-
     game_at = _parse_game_at(body.game_date, body.game_time)
     if game_at <= now_uk_naive():
         raise HTTPException(status_code=422, detail="The game's date and time must be in the future.")
@@ -171,7 +163,6 @@ def create_call_out(
         system=body.system,
         creator_player_id=player.id,
         creator_name=player.name,
-        location=location,
         game_at=game_at,
         vibe=vibe,
         faction=faction,

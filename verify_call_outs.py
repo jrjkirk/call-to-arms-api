@@ -44,7 +44,7 @@ def main_flow():
     # 1. create as user 1
     as_user(USER1_ID)
     r = client.post("/call-outs", json={
-        "system": SYSTEM, "location": "Element Games, Stockport",
+        "system": SYSTEM,
         "game_date": future_date, "game_time": "18:30",
         "vibe": "Casual", "faction": "Empire of Man", "points": 2000,
         "notes": "verify script — safe to ignore",
@@ -82,7 +82,7 @@ def main_flow():
     # 6. cancel flow: create as user1, non-creator can't cancel, creator can
     as_user(USER1_ID)
     r = client.post("/call-outs", json={
-        "system": SYSTEM, "location": "Table 4",
+        "system": SYSTEM,
         "game_date": future_date, "game_time": "12:00", "faction": "Orc & Goblin Tribes",
     })
     co2 = r.json()
@@ -96,7 +96,7 @@ def main_flow():
 
     # 7. past-date rejected at create
     past = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    r = client.post("/call-outs", json={"system": SYSTEM, "location": "x", "game_date": past, "game_time": "18:30", "faction": "Empire of Man"})
+    r = client.post("/call-outs", json={"system": SYSTEM, "game_date": past, "game_time": "18:30", "faction": "Empire of Man"})
     check(r.status_code == 422, f"past-dated create -> 422 (got {r.status_code})")
 
 
