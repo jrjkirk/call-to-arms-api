@@ -712,3 +712,48 @@ class ClubRequest(SQLModel, table=True):
     reviewed_at: Optional[datetime] = None
     reviewed_by_user_id: Optional[int] = None
     reviewed_by_name: Optional[str] = None
+
+
+class CallOut(SQLModel, table=True):
+    """An ad-hoc "call to arms": a player who can't make regular club night
+    posts a standing, open request for a game at a specific place/date/time,
+    so it doesn't get buried in Discord chat. Per (club, system) — only that
+    club's players see it and only that system's Discord channel is notified
+    (system matches the legacy name string on Signup.system etc.).
+
+    Lifecycle (status): "open" until someone takes it up ("taken") or its
+    game_at passes ("expired"); the creator can "cancel" it. A daily reminder
+    is re-posted to Discord while it stays open (see
+    scripts/run_call_outs_check.py), throttled by last_reminder_at."""
+    __tablename__ = "call_outs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system: str = Field(index=True)
+
+    creator_player_id: int = Field(foreign_key="players.id", index=True)
+    creator_name: str
+
+    location: str
+    # UK-local (Europe/London) naive datetime of the proposed game. Doubles as
+    # the expiry point: once "now" passes game_at the call-out auto-expires.
+    game_at: datetime
+
+    vibe: Optional[str] = None       # game type / experience sought
+    faction: Optional[str] = None    # army being brought
+    points: Optional[int] = None
+    notes: Optional[str] = None
+
+    # "open" | "taken" | "expired" | "cancelled"
+    status: str = Field(default="open", index=True)
+    taker_player_id: Optional[int] = Field(default=None, foreign_key="players.id")
+    taker_name: Optional[str] = None
+    taken_at: Optional[datetime] = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Throttles the once-a-day Discord reminder. Seeded to creation time on
+    # insert so the first reminder lands ~24h after the initial post, not an
+    # hour later on the next cron tick.
+    last_reminder_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

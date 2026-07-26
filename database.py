@@ -79,6 +79,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
                                     # email config, admin CRUD in admin.py
     "table_booking_notifications", # audit trail + idempotency guard for
                                     # sent table-booking emails
+    "call_outs",       # ad-hoc "call to arms": player-posted open game
+                       # requests (create/take/cancel in call_outs.py, daily
+                       # reminder + auto-expire in run_call_outs_check.py)
 }
 
 engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)

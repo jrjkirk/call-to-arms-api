@@ -1,0 +1,26 @@
+name: Call-Outs Check
+
+# Hourly. For every open ad-hoc "call to arms" (call_outs table): posts a
+# daily reminder to the club+system's Discord channel while it stays open, and
+# auto-expires call-outs whose game time has passed. Club/system isolation is
+# inherent (each call-out carries its own club_id + system); the webhook is
+# resolved from the club_webhooks table, so no per-system webhook secrets.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python scripts/run_call_outs_check.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APP_PUBLIC_URL: ${{ secrets.APP_PUBLIC_URL }}

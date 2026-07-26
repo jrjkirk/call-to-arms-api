@@ -28,6 +28,7 @@ from signups import router as signups_router, CANONICAL_VIBES, _get_system_confi
 from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
 from analytics import router as analytics_router
+from call_outs import router as call_outs_router
 
 app = FastAPI()
 
@@ -56,6 +57,7 @@ app.include_router(signups_router)
 app.include_router(league_router)
 app.include_router(admin_router)
 app.include_router(analytics_router)
+app.include_router(call_outs_router)
 
 
 @app.get("/health")
