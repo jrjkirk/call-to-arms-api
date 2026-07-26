@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, or_, select
 
-from auth import require_user, current_user
-from database import get_session, resolve_request_club_id, resolve_webhook_url, scoped
+from auth import require_user, current_user, active_club_id
+from database import active_player_id_for, get_session, resolve_request_club_id, resolve_webhook_url, scoped
 from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, SystemConfig, User
 from services import announce_new_achievements
 
@@ -341,7 +341,7 @@ def list_factions(
     db: Session = Depends(get_session),
 ):
     """Optional-auth. A logged-in caller is always scoped to their own club
-    (user.club_id) and the `club`/Origin are ignored — this closes the leak
+    (club_id) and the `club`/Origin are ignored — this closes the leak
     where a logged-in user on the bare/default hostname (which resolves to
     "manchester") was served Manchester's faction list. Genuinely anonymous
     requests resolve via an explicit `club` param first, then the request's
@@ -377,14 +377,15 @@ def faction_stats(
     faction: str = Query(...),
     system: str | None = None,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
-    system_id = _resolve_system_id(db, user.club_id, system)
+    system_id = _resolve_system_id(db, club_id, system)
     if system_id is None:
         return {"faction": faction, "players": []}
 
     rows = db.exec(
-        scoped(LeagueResult, user.club_id)
+        scoped(LeagueResult, club_id)
         .where(LeagueResult.system_id == system_id)
         .where(
             or_(
@@ -456,20 +457,21 @@ class SubmitResultIn(BaseModel):
 def submit_result(
     body: SubmitResultIn,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
-    if user.player_id is None:
-        raise HTTPException(status_code=400, detail="No linked player profile — claim your profile first.")
+    if active_player_id_for(db, user, club_id) is None:
+        raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
 
     if body.player_1_id == body.player_2_id:
         raise HTTPException(status_code=422, detail="Players must be distinct.")
 
     p1 = db.get(Player, body.player_1_id)
-    if p1 is None or not p1.active or p1.club_id != user.club_id:
+    if p1 is None or not p1.active or p1.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player 1 not found or inactive.")
 
     p2 = db.get(Player, body.player_2_id)
-    if p2 is None or not p2.active or p2.club_id != user.club_id:
+    if p2 is None or not p2.active or p2.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player 2 not found or inactive.")
 
     if body.result not in VALID_RESULTS:
@@ -490,10 +492,10 @@ def submit_result(
 
     # Resolve which system's league this result belongs to, and its current
     # season.
-    system_id = _resolve_system_id(db, user.club_id, body.system)
+    system_id = _resolve_system_id(db, club_id, body.system)
     if system_id is None:
         raise HTTPException(status_code=422, detail="No league is enabled for this club.")
-    season_id = _current_season_id(db, user.club_id, system_id)
+    season_id = _current_season_id(db, club_id, system_id)
     if season_id is None:
         raise HTTPException(status_code=422, detail="No league season is configured.")
 
@@ -502,7 +504,7 @@ def submit_result(
     # Duplicate guard: match on every field. NULL == NULL must be handled explicitly
     # because SQL NULL comparisons use IS NULL, not =.
     dup_query = (
-        scoped(LeagueResult, user.club_id)
+        scoped(LeagueResult, club_id)
         .where(LeagueResult.system_id == system_id)
         .where(LeagueResult.season_id == season_id)
         .where(LeagueResult.player_1_id == body.player_1_id)
@@ -543,14 +545,14 @@ def submit_result(
         player_1_painting_bonus=p1_painting,
         player_2_painting_bonus=p2_painting,
         game_type=body.game_type,
-        club_id=user.club_id,
+        club_id=club_id,
         system_id=system_id,
         season_id=season_id,
     )
     db.add(row)
     db.flush()  # assign row.id within the transaction so the recalc includes this row
 
-    _recalculate_ratings(db, user.club_id, system_id, season_id)
+    _recalculate_ratings(db, club_id, system_id, season_id)
     db.commit()  # single commit for insert + full recalc
     db.refresh(row)
 

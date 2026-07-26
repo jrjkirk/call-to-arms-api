@@ -10,6 +10,26 @@ from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 
 
+# The 12 ONS ITL1 UK regions — the controlled vocabulary for Club.region, used
+# to group clubs under headers in the discovery dropdown. Kept in this exact
+# order (roughly N→S, then the devolved nations) so the dropdown reads sensibly.
+# Mirrored in the frontend (call-to-arms-web src/lib/regions.ts) — keep in sync.
+UK_REGIONS: list[str] = [
+    "North East",
+    "North West",
+    "Yorkshire & the Humber",
+    "East Midlands",
+    "West Midlands",
+    "East of England",
+    "London",
+    "South East",
+    "South West",
+    "Scotland",
+    "Wales",
+    "Northern Ireland",
+]
+
+
 class Player(SQLModel, table=True):
     __tablename__ = "players"
     __table_args__ = {"extend_existing": True}
@@ -23,6 +43,13 @@ class Player(SQLModel, table=True):
     admin_notes: Optional[str] = Field(default=None)
     announced_achievements: Optional[str] = Field(default=None)
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
+    # Multi-club "network" model (2026-07-25): a Discord account owns one Player
+    # per club it plays at, so ownership lives HERE (Player.user_id) rather than
+    # on User.player_id (which capped a user at one player, one club). NULL =
+    # an unclaimed roster entry a club pre-seeded. During the expand phase both
+    # links coexist and are kept consistent; User.player_id stays the source of
+    # truth for the user's *home*-club player until the call-site sweep lands.
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
 
 
 class Signup(SQLModel, table=True):
@@ -265,6 +292,12 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: datetime = Field(default_factory=datetime.utcnow)
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
+    # Multi-club network model (2026-07-25): the club a user lands on by
+    # default. "Soft" — it grants nothing (playing is open to every club), it
+    # just picks the default active club when no subdomain says otherwise.
+    # Backfilled from club_id. club_id itself is retained during the expand
+    # phase and stays authoritative until the active-club resolver sweep lands.
+    home_club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class AdminRole(SQLModel, table=True):
@@ -389,6 +422,12 @@ class Club(SQLModel, table=True):
     address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+
+    # UK region (2026-07-25, multi-club network). One of UK_REGIONS (the 12 ONS
+    # ITL1 regions), set by the club super-admin. Groups this club under a
+    # region header in the discovery dropdown. Nullable — a club with no region
+    # set just sorts under an "Other" heading rather than being hidden.
+    region: Optional[str] = None
 
 
 class ClubSystem(SQLModel, table=True):

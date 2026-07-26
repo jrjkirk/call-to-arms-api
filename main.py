@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
-from database import get_session, resolve_request_club_id, scoped
-from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, User, SystemConfig
+from database import active_player_id_for, get_session, resolve_request_club_id, scoped
+from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
 from systems import factions_for, icon_folder_for
 from services import (
@@ -23,7 +23,7 @@ from services import (
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
-from auth import router as auth_router, require_user, current_user
+from auth import router as auth_router, require_user, current_user, active_club_id
 from signups import router as signups_router, CANONICAL_VIBES, _get_system_config, signup_cap
 from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
@@ -148,7 +148,7 @@ def _system_dict(r: SystemConfig, club_system=None) -> dict:
 
 
 @app.get("/systems/mine")
-def list_my_systems(user: User = Depends(require_user), session: Session = Depends(get_session)):
+def list_my_systems(user: User = Depends(require_user), club_id: int = Depends(active_club_id), session: Session = Depends(get_session)):
     """Authenticated, club-scoped: the caller's own club's currently-enabled
     systems, in the same shape as GET /systems so the frontend can swap
     between the two feeds without special-casing. Unlike GET /systems
@@ -158,7 +158,7 @@ def list_my_systems(user: User = Depends(require_user), session: Session = Depen
     pairs = session.exec(
         select(SystemConfig, ClubSystem)
         .join(ClubSystem, ClubSystem.system_id == SystemConfig.id)
-        .where(ClubSystem.club_id == user.club_id)
+        .where(ClubSystem.club_id == club_id)
         .where(ClubSystem.enabled == True)
         .where(SystemConfig.active == True)
     ).all()
@@ -182,9 +182,18 @@ def list_clubs(session: Session = Depends(get_session)):
             "address": c.address,
             "latitude": c.latitude,
             "longitude": c.longitude,
+            "region": c.region,
         }
         for c in rows
     ]
+
+
+@app.get("/regions")
+def list_regions():
+    """The controlled vocabulary of UK regions (12 ONS ITL1 regions), for the
+    club-profile region <select> and the region-grouped discovery dropdown.
+    Public, static — no auth, no DB."""
+    return UK_REGIONS
 
 
 DEFAULT_ACCENT_COLOR = "#c9a14a"  # platform gold, used when a system admin hasn't set accent_color
@@ -194,6 +203,7 @@ DEFAULT_ACCENT_COLOR = "#c9a14a"  # platform gold, used when a system admin hasn
 def get_club(
     month: Optional[str] = None,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     session: Session = Depends(get_session),
 ):
     """Club landing page: profile, the systems carousel (this club's enabled
@@ -203,7 +213,7 @@ def get_club(
     system via accent_color.
 
     ?month=YYYY-MM selects the calendar month (default: current month)."""
-    club = session.get(Club, user.club_id)
+    club = session.get(Club, club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="Club not found")
 
@@ -387,15 +397,15 @@ def create_club_request(body: ClubRequestBody, session: Session = Depends(get_se
 
 
 @app.get("/players")
-def list_players(user: User = Depends(require_user), session: Session = Depends(get_session)):
+def list_players(user: User = Depends(require_user), club_id: int = Depends(active_club_id), session: Session = Depends(get_session)):
     players = session.exec(
-        scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
+        scoped(Player, club_id).where(Player.active == True).order_by(Player.name)
     ).all()
 
     signup_rows = session.exec(
         select(Signup.player_id, Signup.system)
         .where(Signup.player_id.isnot(None))
-        .where(Signup.club_id == user.club_id)
+        .where(Signup.club_id == club_id)
         .distinct()
     ).all()
 
@@ -419,14 +429,14 @@ def _parse_week(week: str) -> datetime:
 
 
 @app.get("/players/{player_id}")
-def get_player(player_id: int, user: User = Depends(require_user), session: Session = Depends(get_session)):
+def get_player(player_id: int, user: User = Depends(require_user), club_id: int = Depends(active_club_id), session: Session = Depends(get_session)):
     player = session.get(Player, player_id)
-    if player is None or player.club_id != user.club_id:
+    if player is None or player.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player not found")
 
     club = session.get(Club, player.club_id)
 
-    signups = fetch_player_signups(session, player_id, user.club_id)
+    signups = fetch_player_signups(session, player_id, club_id)
     sign_counts = signup_counts_per_system(signups)
     fac_usage = faction_usage_per_system(signups)
 
@@ -441,7 +451,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     league_rows = session.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
-        .where(ClubSystem.club_id == user.club_id, ClubSystem.league_enabled == True)
+        .where(ClubSystem.club_id == club_id, ClubSystem.league_enabled == True)
         .order_by(SystemConfig.id)
     ).all()
 
@@ -478,14 +488,14 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
         for _cs, sys_config in league_rows:
             sid = sys_config.id
             rating_row = session.exec(
-                scoped(LeagueRating, user.club_id)
+                scoped(LeagueRating, club_id)
                 .where(LeagueRating.player_id == player_id)
                 .where(LeagueRating.system_id == sid)
             ).first()
-            results = fetch_player_results(session, player_id, user.club_id, sid)
+            results = fetch_player_results(session, player_id, club_id, sid)
             record = compute_league_record(player_id, results)
             elo_history = build_elo_history(player_id, results)
-            first_winner = first_league_winner_id(session, user.club_id, sid)
+            first_winner = first_league_winner_id(session, club_id, sid)
 
             for a in compute_achievements(player_id, record, results, fac_usage, elo_history, first_winner):
                 if a not in seen_achievements:
@@ -502,7 +512,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
                 higher = session.exec(
                     select(LeagueRating)
                     .join(Player, Player.id == LeagueRating.player_id)
-                    .where(LeagueRating.club_id == user.club_id)
+                    .where(LeagueRating.club_id == club_id)
                     .where(LeagueRating.system_id == sid)
                     .where(Player.active == True)
                     .where(LeagueRating.rating > rating_row.rating)
@@ -525,9 +535,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
     ]
 
     # Discord identity
-    discord_user = session.exec(
-        scoped(User, user.club_id).where(User.player_id == player_id)
-    ).first()
+    discord_user = session.get(User, player.user_id) if player.user_id else None
     discord_info = (
         {"discord_name": discord_user.discord_name, "avatar_url": discord_user.avatar_url}
         if discord_user else None
@@ -563,7 +571,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
             continue
 
         pairings = session.exec(
-            scoped(Pairing, user.club_id)
+            scoped(Pairing, club_id)
             .where(Pairing.system == system)
             .where(
                 or_(
@@ -586,7 +594,7 @@ def get_player(player_id: int, user: User = Depends(require_user), session: Sess
         )
         missing = needed - set(signup_by_id.keys())
         if missing:
-            for s in session.exec(scoped(Signup, user.club_id).where(Signup.id.in_(missing))).all():
+            for s in session.exec(scoped(Signup, club_id).where(Signup.id.in_(missing))).all():
                 signup_by_id[s.id] = s
 
         games = []
@@ -745,25 +753,26 @@ def league_rankings(
     system: Optional[str] = None,
     season_id: Optional[int] = None,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     session: Session = Depends(get_session),
 ):
     """`system` selects which system's league (omit for the club's one
     league-enabled system, today's behaviour — see league._resolve_system_id).
     `season_id` selects which season's standings (omit for the current one);
     pass an archived season's id to view its frozen final standings."""
-    system_id = _resolve_system_id(session, user.club_id, system)
+    system_id = _resolve_system_id(session, club_id, system)
     if system_id is None:
         return []
-    resolved_season_id = season_id or _current_season_id(session, user.club_id, system_id)
+    resolved_season_id = season_id or _current_season_id(session, club_id, system_id)
     if resolved_season_id is None:
         return []
-    return _compute_league_rankings(session, user.club_id, system_id, resolved_season_id)
+    return _compute_league_rankings(session, club_id, system_id, resolved_season_id)
 
 
 @app.get("/signups/stats")
-def signups_stats(system: str, week: str, user: User = Depends(require_user), session: Session = Depends(get_session)):
+def signups_stats(system: str, week: str, user: User = Depends(require_user), club_id: int = Depends(active_club_id), session: Session = Depends(get_session)):
     rows = session.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .order_by(Signup.created_at.desc())
@@ -780,8 +789,9 @@ def signups_stats(system: str, week: str, user: User = Depends(require_user), se
     newcomers = sum(1 for s in signups if (s.experience or "").lower().startswith("new"))
     veterans = sum(1 for s in signups if (s.experience or "").lower().startswith("vet"))
 
-    cap = signup_cap(session, user.club_id, system)
-    already_signed_up = any(s.player_id == user.player_id for s in signups) if user.player_id else False
+    cap = signup_cap(session, club_id, system)
+    my_pid = active_player_id_for(session, user, club_id)
+    already_signed_up = any(s.player_id == my_pid for s in signups) if my_pid else False
 
     return {
         "system": system,
@@ -824,12 +834,12 @@ def get_week_id(
 ):
     """Optional-auth — the backend-authoritative target session date for a
     system, replacing the frontend's independent duplicate of this same date
-    logic (weekIdForSystem() in +page.server.ts). A logged-in caller is
-    always scoped to their own club (user.club_id); for anonymous requests,
-    the `club` param (SvelteKit's SSR loader calls this way — no browser
-    Origin exists server-to-server) takes precedence, then the request's
-    Origin header (real browser calls) — same pattern as GET /pairings and
-    GET /league/factions. See resolve_request_club_id."""
+    logic (weekIdForSystem() in +page.server.ts). Multi-club network model: a
+    logged-in caller is scoped to their ACTIVE club (subdomain, else home);
+    for anonymous requests, the `club` param (SvelteKit's SSR loader calls
+    this way — no browser Origin exists server-to-server) takes precedence,
+    then the request's Origin header (real browser calls) — same pattern as
+    GET /pairings and GET /league/factions. See resolve_request_club_id."""
     try:
         club_id = resolve_request_club_id(session, user, club, origin)
     except ValueError as e:
@@ -868,14 +878,14 @@ def get_pairings(
     user: Optional[User] = Depends(current_user),
     session: Session = Depends(get_session),
 ):
-    """Optional-auth. A logged-in caller is always scoped to their own club
-    (user.club_id) and the `club`/Origin are ignored — this closes the leak
-    where a Yorkshire user browsing the bare/default hostname (which resolves
-    to "manchester") was served Manchester's pairings. Genuinely anonymous
-    requests resolve via an explicit `club` param first (SSR loaders), then
-    the request's Origin header (real browser calls — subdomain-based
-    resolution, no param needed); with neither, an anonymous request falls
-    back to the fail-loud single-active-club stopgap. See
+    """Optional-auth. Multi-club network model: a logged-in caller is scoped
+    to their ACTIVE club — the subdomain they're on (Origin), falling back to
+    their home club on the bare/default hostname — so browsing
+    yorkshire.calltoarms.app/pairings shows Yorkshire's pairings. Genuinely
+    anonymous requests resolve via an explicit `club` param first (SSR
+    loaders), then the request's Origin header (real browser calls —
+    subdomain-based resolution, no param needed); with neither, an anonymous
+    request falls back to the fail-loud single-active-club stopgap. See
     resolve_request_club_id."""
     try:
         club_id = resolve_request_club_id(session, user, club, origin)

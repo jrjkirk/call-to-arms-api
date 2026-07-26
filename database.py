@@ -18,7 +18,7 @@ from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import NullPool
 
-from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, ScheduledJobRun, User
+from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, Player, ScheduledJobRun, User
 
 T = TypeVar("T")
 
@@ -176,6 +176,71 @@ def resolve_club_slug_from_origin(origin_header: str | None) -> str | None:
     return None
 
 
+def resolve_active_club_slug_from_origin(origin_header: str | None) -> str | None:
+    """Like resolve_club_slug_from_origin, but for the AUTHENTICATED
+    active-club path — the multi-club "network" model (2026-07-25) where a
+    logged-in user can act at any club, chosen by which subdomain they're on.
+
+    Crucial difference: the bare/www domain returns None here, NOT
+    "manchester". For an authenticated request the bare domain means "no
+    explicit club chosen" → the resolver falls back to the user's own soft
+    home club. Only a genuine `X.calltoarms.app` subdomain counts as the user
+    deliberately choosing to act at club X. (resolve_club_slug_from_origin
+    keeps its manchester-default for the anonymous public pages, which have no
+    user home club to fall back to — that behavior is unchanged.)"""
+    if not origin_header:
+        return None
+    try:
+        host = (urlparse(origin_header).hostname or "").lower()
+    except ValueError:
+        return None
+    if not host or host == _PRIMARY_DOMAIN or host == f"www.{_PRIMARY_DOMAIN}":
+        return None
+    suffix = f".{_PRIMARY_DOMAIN}"
+    if host.endswith(suffix):
+        return host[: -len(suffix)] or None
+    return None
+
+
+def resolve_active_club_id(
+    db: Session, user: User, origin_header: str | None = None, club_slug: str | None = None
+) -> int:
+    """The active club for an authenticated request in the multi-club network
+    model: the club whose subdomain the user is browsing, else their soft home
+    club. Playing is open to every club, so — unlike resolve_request_club_id,
+    which predates this model and forces user.club_id — we deliberately honor
+    the subdomain. Authorization is a separate concern: admin endpoints still
+    gate on admin_roles for whatever club this resolves to, so honoring the
+    subdomain grants a travelling player no admin rights at the host club.
+
+    An explicit `club_slug` (rare — tooling/SSR) wins over the Origin. An
+    unknown/inactive slug is ignored (falls back to home) rather than raising,
+    since a stale subdomain shouldn't 500 a logged-in user's whole session."""
+    slug = club_slug or resolve_active_club_slug_from_origin(origin_header)
+    if slug is not None:
+        club = db.exec(select(Club).where(Club.slug == slug, Club.active == True)).first()
+        if club is not None:
+            return club.id
+    # Fall back to the soft home club, then the legacy registration club.
+    return user.home_club_id or user.club_id
+
+
+def active_player_id_for(db: Session, user: User, club_id: int) -> Optional[int]:
+    """The id of the Player this user owns at a given club (their identity
+    *there*), or None if they have no player at that club yet — in which case
+    the frontend shows the claim/create-a-profile flow, exactly as it does
+    today for a brand-new user. Multi-club network model: a user owns one
+    Player per club (Player.user_id), so "my player" is now club-relative."""
+    row = db.exec(
+        select(Player).where(
+            Player.user_id == user.id,
+            Player.club_id == club_id,
+            Player.active == True,
+        )
+    ).first()
+    return row.id if row else None
+
+
 def resolve_public_club_id(db: Session, club_slug: str | None, origin_header: str | None = None) -> int:
     """The sanctioned way for the three genuinely public, unauthenticated
     endpoints (GET /pairings, GET /league/factions, GET /week-id) to
@@ -210,13 +275,15 @@ def resolve_request_club_id(
     """Resolve which club a request to the otherwise-public pairings pages
     (GET /pairings, GET /week-id, GET /league/factions) should be scoped to.
 
-    If the request carries a valid authenticated session, that user's own
-    club (user.club_id) is authoritative and the slug/Origin are ignored
-    entirely. This closes the cross-club leak where a logged-in user
-    browsing via the bare/default hostname (which resolves to "manchester")
-    would otherwise be served another club's published data — e.g. a
-    Yorkshire super admin seeing Manchester's Old World pairings, a system
-    Yorkshire doesn't even run.
+    Multi-club network model (2026-07-25): for an authenticated session the
+    active club is resolved from the subdomain the user is on (Origin), falling
+    back to their soft home club — see resolve_active_club_id. This deliberately
+    REVERSES the pre-network behavior (which forced user.club_id and ignored the
+    Origin): playing is open at every club, so a logged-in user browsing
+    yorkshire.calltoarms.app/pairings should see Yorkshire's pairings, not their
+    home club's. The bare/default hostname still resolves to the user's home
+    club (resolve_active_club_slug_from_origin returns None there), so every
+    existing Manchester bookmark/QR link is unchanged.
 
     Only genuinely anonymous requests (no session) fall back to
     resolve_public_club_id (explicit slug, then Origin, then the
@@ -227,7 +294,7 @@ def resolve_request_club_id(
     resolve_public_club_id in the anonymous path, so existing 404/500
     handling at the call sites is unchanged."""
     if user is not None:
-        return user.club_id
+        return resolve_active_club_id(db, user, origin_header, club_slug)
     return resolve_public_club_id(db, club_slug, origin_header)
 
 

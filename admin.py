@@ -37,7 +37,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, User
+from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -3404,6 +3404,7 @@ class ClubProfileBody(BaseModel):
     address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    region: Optional[str] = None
 
 
 def _club_profile_dict(club: Club) -> dict:
@@ -3416,6 +3417,7 @@ def _club_profile_dict(club: Club) -> dict:
         "address": club.address,
         "latitude": club.latitude,
         "longitude": club.longitude,
+        "region": club.region,
     }
 
 
@@ -3449,6 +3451,11 @@ def _apply_club_profile_update(club: Club, body: ClubProfileBody, db: Session) -
         club.latitude = body.latitude
     if "longitude" in provided:
         club.longitude = body.longitude
+    if "region" in provided:
+        region = (body.region or "").strip() or None
+        if region is not None and region not in UK_REGIONS:
+            raise HTTPException(status_code=422, detail=f"Invalid region: {region!r}")
+        club.region = region
     db.add(club)
     db.commit()
     db.refresh(club)

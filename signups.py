@@ -18,9 +18,9 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import get_session, resolve_webhook_url, scoped, system_setting_slug, get_setting
+from database import active_player_id_for, get_session, resolve_webhook_url, scoped, system_setting_slug, get_setting
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig
-from auth import admin_scopes, require_user
+from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
 
 router = APIRouter(prefix="/signups", tags=["signups"])
@@ -132,10 +132,14 @@ def _require_system_enabled(db: Session, club_id: int, system: str) -> None:
         )
 
 
-def _require_linked_player(user: User, db: Session) -> Player:
-    if user.player_id is None:
-        raise HTTPException(status_code=400, detail="No linked player profile — claim your profile first.")
-    player = db.get(Player, user.player_id)
+def _require_linked_player(user: User, db: Session, club_id: int) -> Player:
+    """The caller's player AT THE ACTIVE CLUB (multi-club network model). A user
+    with no player at this club is told to claim/create one here — even if they
+    have a player at another club."""
+    pid = active_player_id_for(db, user, club_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
+    player = db.get(Player, pid)
     if player is None or not player.active:
         raise HTTPException(status_code=400, detail="Linked player profile not found.")
     return player
@@ -293,15 +297,16 @@ def my_signup(
     system: str,
     week: str,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
     """Return the user's signup for this exact week ('current') and their most
     recent signup for this system across any week ('last', used for prefill)."""
-    player = _require_linked_player(user, db)
+    player = _require_linked_player(user, db, club_id)
     week = _validate_week(week)
 
     current = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.system == system)
         .where(Signup.week == week)
         .where(Signup.player_id == player.id)
@@ -309,7 +314,7 @@ def my_signup(
     ).first()
 
     last = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.system == system)
         .where(Signup.player_id == player.id)
         .order_by(Signup.id.desc())
@@ -322,15 +327,16 @@ def my_signup(
 def submit_signup(
     body: SignupIn,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
-    player = _require_linked_player(user, db)
+    player = _require_linked_player(user, db, club_id)
 
     config = _get_system_config(db, body.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
 
-    _require_system_enabled(db, user.club_id, body.system)
+    _require_system_enabled(db, club_id, body.system)
 
     week = _validate_week(body.week)
 
@@ -342,7 +348,7 @@ def submit_signup(
     experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
 
     # Catalogue-driven config. See SystemConfig in models.py for field meanings.
-    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, club_id, config)
     vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
     if config.uses_points:
         points = max(0, min(int(body.points or config.default_points), config.max_points))
@@ -361,7 +367,7 @@ def submit_signup(
 
     # Upsert: update the newest existing row, delete older duplicates
     existing = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
         .where(Signup.player_id == player.id)
@@ -373,9 +379,9 @@ def submit_signup(
     # Signup cap: block a *new* signup once the session is full. Players
     # editing their existing entry are always allowed through.
     if created:
-        cap = signup_cap(db, user.club_id, body.system)
+        cap = signup_cap(db, club_id, body.system)
         if cap["max_players"] is not None:
-            current = _signup_count(db, body.system, week, user.club_id)
+            current = _signup_count(db, body.system, week, club_id)
             if current >= cap["max_players"]:
                 raise HTTPException(
                     status_code=409,
@@ -404,7 +410,7 @@ def submit_signup(
             experience=experience, vibe=vibe,
             standby_ok=bool(body.standby_ok) if config.uses_standby else False, tnt_ok=False,
             scenario=scenario, can_demo=can_demo,
-            club_id=user.club_id,
+            club_id=club_id,
         )
         db.add(su)
 
@@ -412,7 +418,7 @@ def submit_signup(
     db.refresh(su)
 
     if created:
-        _post_discord_signup(db, player.name, faction, vibe, body.system, week, user.club_id)
+        _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id)
 
     return {"ok": True, "created": created, "signup": su}
 
@@ -422,13 +428,14 @@ def drop_signup(
     system: str,
     week: str,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
-    player = _require_linked_player(user, db)
+    player = _require_linked_player(user, db, club_id)
     week = _validate_week(week)
 
     gate = db.exec(
-        scoped(PublishState, user.club_id)
+        scoped(PublishState, club_id)
         .where(PublishState.week == week)
         .where(PublishState.system == system)
     ).first()
@@ -436,7 +443,7 @@ def drop_signup(
     if gate and gate.published:
         # Post-publish drop: reroute opponent to a BYE pairing, delete our pairing + signup
         rows = db.exec(
-            scoped(Signup, user.club_id)
+            scoped(Signup, club_id)
             .where(Signup.week == week)
             .where(Signup.system == system)
             .where(Signup.player_id == player.id)
@@ -447,7 +454,7 @@ def drop_signup(
         my_ids = {s.id for s in rows}
 
         pairing = db.exec(
-            scoped(Pairing, user.club_id)
+            scoped(Pairing, club_id)
             .where(Pairing.week == week)
             .where(Pairing.system == system)
             .where((Pairing.a_signup_id.in_(my_ids)) | (Pairing.b_signup_id.in_(my_ids)))
@@ -468,7 +475,7 @@ def drop_signup(
                         a_signup_id=opponent_signup_id, b_signup_id=None,
                         status="pending", prearranged=False,
                         a_faction=opponent_signup.faction, b_faction=None,
-                        club_id=user.club_id,
+                        club_id=club_id,
                     ))
             db.delete(pairing)
 
@@ -477,7 +484,7 @@ def drop_signup(
 
         db.commit()
 
-        all_byes = _get_all_byes(db, system, week, user.club_id)
+        all_byes = _get_all_byes(db, system, week, club_id)
         newly_displaced_names = [opponent_name] if opponent_name else []
         for bye in all_byes:
             if bye["player_name"] in newly_displaced_names:
@@ -488,13 +495,13 @@ def drop_signup(
             all_byes=all_byes,
             app_url=APP_PUBLIC_URL,
         )
-        _post_webhook(db, user.club_id, system, content)
+        _post_webhook(db, club_id, system, content)
 
         return {"ok": True, "dropped": True, "published": True}
 
     # Pre-publish drop path (unchanged)
     rows = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == system)
         .where(Signup.player_id == player.id)
@@ -508,7 +515,7 @@ def drop_signup(
 
     # Delete any prearranged pairing involving the dropper; opponent's signup stays
     prearranged = db.exec(
-        scoped(Pairing, user.club_id)
+        scoped(Pairing, club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == system)
         .where(Pairing.prearranged == True)
@@ -522,7 +529,7 @@ def drop_signup(
 
     db.commit()
 
-    _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, user.club_id)
+    _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id)
 
     return {"ok": True, "dropped": True}
 
@@ -531,6 +538,7 @@ def drop_signup(
 def submit_prearranged(
     body: PrearrangedGameIn,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
     # 1. System and week
@@ -538,7 +546,7 @@ def submit_prearranged(
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
 
-    _require_system_enabled(db, user.club_id, body.system)
+    _require_system_enabled(db, club_id, body.system)
 
     week = _validate_week(body.week)
 
@@ -548,10 +556,10 @@ def submit_prearranged(
 
     # 3. Both players must exist, be active, and belong to the caller's club
     pa = db.get(Player, body.player_a_id)
-    if pa is None or not pa.active or pa.club_id != user.club_id:
+    if pa is None or not pa.active or pa.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player A not found.")
     pb = db.get(Player, body.player_b_id)
-    if pb is None or not pb.active or pb.club_id != user.club_id:
+    if pb is None or not pb.active or pb.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player B not found.")
 
     # 4. Both factions must be set
@@ -562,7 +570,7 @@ def submit_prearranged(
 
     # 5. Conflict check: neither player may already be signed up this week/system
     conflicts = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
         .where(Signup.player_id.in_([body.player_a_id, body.player_b_id]))
@@ -578,7 +586,7 @@ def submit_prearranged(
     # sentinel is None, not 0 like submit_signup — a pre-existing difference
     # between the two endpoints (Kill Team isn't points-based either way),
     # preserved deliberately rather than normalized, per user decision.
-    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, user.club_id, config)
+    eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, club_id, config)
     vibe = body.vibe if body.vibe in (eff_vibe_options or []) else eff_default_vibe
     if config.uses_points:
         points = max(0, min(int(body.points or config.default_points), config.max_points))
@@ -595,7 +603,7 @@ def submit_prearranged(
         experience="New", vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
-        club_id=user.club_id,
+        club_id=club_id,
     )
     su_b = Signup(
         week=week, system=body.system,
@@ -604,7 +612,7 @@ def submit_prearranged(
         experience="New", vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
-        club_id=user.club_id,
+        club_id=club_id,
     )
     db.add(su_a)
     db.add(su_b)
@@ -616,7 +624,7 @@ def submit_prearranged(
         status="pending",
         a_faction=faction_a, b_faction=faction_b,
         prearranged=True,
-        club_id=user.club_id,
+        club_id=club_id,
     )
     db.add(pairing)
     db.commit()
@@ -625,7 +633,7 @@ def submit_prearranged(
     db.refresh(pairing)
 
     try:
-        count = _signup_count(db, body.system, week, user.club_id)
+        count = _signup_count(db, body.system, week, club_id)
         phrase = _signup_count_phrase_for_system(body.system)
         detail_parts = [f"🎭 {vibe}"]
         if eta:
@@ -639,7 +647,7 @@ def submit_prearranged(
             f"{detail_line}\n"
             f"📊 {phrase}: {count}"
         )
-        _post_webhook(db, user.club_id, body.system, content)
+        _post_webhook(db, club_id, body.system, content)
     except Exception:
         pass
 
@@ -650,13 +658,14 @@ def submit_prearranged(
 def swap_signups(
     body: SwapIn,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
     week = _validate_week(body.week)
 
     # 1. Pairings must be published
     gate = db.exec(
-        scoped(PublishState, user.club_id)
+        scoped(PublishState, club_id)
         .where(PublishState.week == week)
         .where(PublishState.system == body.system)
     ).first()
@@ -666,16 +675,16 @@ def swap_signups(
     # 2. Resolve player X.  Admins may supply player_1_id to act on behalf of
     #    any signed-up player; regular players are always player X themselves.
     if body.player_1_id is not None:
-        if body.system not in admin_scopes(user, db):
+        if body.system not in admin_scopes(user, db, club_id):
             raise HTTPException(status_code=403, detail=f"Admin access for '{body.system}' required.")
         x_player_id = body.player_1_id
     else:
-        player = _require_linked_player(user, db)
+        player = _require_linked_player(user, db, club_id)
         x_player_id = player.id
 
     # 3. Find X signup
     x_signup = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
         .where(Signup.player_id == x_player_id)
@@ -691,7 +700,7 @@ def swap_signups(
 
     # 4. Find Y (target player) signup
     y_signup = db.exec(
-        scoped(Signup, user.club_id)
+        scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
         .where(Signup.player_id == body.opponent_player_id)
@@ -702,7 +711,7 @@ def swap_signups(
 
     # 5. Find X's current pairing; capture X's old opponent signup_id
     x_pairing = db.exec(
-        scoped(Pairing, user.club_id)
+        scoped(Pairing, club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == body.system)
         .where((Pairing.a_signup_id == x_signup.id) | (Pairing.b_signup_id == x_signup.id))
@@ -717,7 +726,7 @@ def swap_signups(
 
     # 6. Find Y's current pairing; capture Y's old opponent signup_id
     y_pairing = db.exec(
-        scoped(Pairing, user.club_id)
+        scoped(Pairing, club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == body.system)
         .where((Pairing.a_signup_id == y_signup.id) | (Pairing.b_signup_id == y_signup.id))
@@ -750,7 +759,7 @@ def swap_signups(
         a_signup_id=x_signup.id, b_signup_id=y_signup.id,
         status="pending", prearranged=True,
         a_faction=x_signup.faction, b_faction=y_signup.faction,
-        club_id=user.club_id,
+        club_id=club_id,
     ))
 
     # 11. Create BYE pairings for each displaced real player
@@ -760,7 +769,7 @@ def swap_signups(
             a_signup_id=z_signup_id, b_signup_id=None,
             status="pending", prearranged=False,
             a_faction=z_signup.faction, b_faction=None,
-            club_id=user.club_id,
+            club_id=club_id,
         ))
     if w_signup is not None:
         db.add(Pairing(
@@ -768,7 +777,7 @@ def swap_signups(
             a_signup_id=w_signup_id, b_signup_id=None,
             status="pending", prearranged=False,
             a_faction=w_signup.faction, b_faction=None,
-            club_id=user.club_id,
+            club_id=club_id,
         ))
 
     # 12. Commit
@@ -783,7 +792,7 @@ def swap_signups(
     if w_signup is not None:
         displaced.append({"player_id": w_signup.player_id, "player_name": w_signup.player_name})
 
-    all_byes = _get_all_byes(db, body.system, week, user.club_id)
+    all_byes = _get_all_byes(db, body.system, week, club_id)
     z_name = z_signup.player_name if z_signup is not None else None
     w_name = w_signup.player_name if w_signup is not None else None
     newly_displaced_names = [name for name in [z_name, w_name] if name]
@@ -796,7 +805,7 @@ def swap_signups(
         all_byes=all_byes,
         app_url=APP_PUBLIC_URL,
     )
-    _post_webhook(db, user.club_id, body.system, content)
+    _post_webhook(db, club_id, body.system, content)
 
     # 14. Return
     return {
@@ -816,12 +825,13 @@ def get_unpaired(
     system: str,
     week: str,
     user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
     week = _validate_week(week)
 
     gate = db.exec(
-        scoped(PublishState, user.club_id)
+        scoped(PublishState, club_id)
         .where(PublishState.week == week)
         .where(PublishState.system == system)
     ).first()
@@ -829,7 +839,7 @@ def get_unpaired(
         return []
 
     bye_pairings = db.exec(
-        scoped(Pairing, user.club_id)
+        scoped(Pairing, club_id)
         .where(Pairing.week == week)
         .where(Pairing.system == system)
         .where(Pairing.b_signup_id.is_(None))

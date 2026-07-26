@@ -44,7 +44,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from database import get_session, scoped
+from database import active_player_id_for, get_session, resolve_active_club_id, scoped
 from models import Club, ClubSystem, SystemConfig, User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
@@ -165,6 +165,19 @@ def require_user(user: Optional[User] = Depends(current_user)) -> User:
     return user
 
 
+def active_club_id(
+    request: Request,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+) -> int:
+    """Dependency: the club this authenticated request is acting in
+    (multi-club network model). Resolved from the subdomain the user is on,
+    falling back to their soft home club. Use this instead of `user.club_id`
+    for club-scoped reads/writes so a user can play at any club they visit —
+    admin authorization stays separate (admin_roles for the resolved club)."""
+    return resolve_active_club_id(db, user, request.headers.get("origin"))
+
+
 @router.get("/discord/login")
 def discord_login(request: Request):
     """Step 1: send the browser to Discord's authorize page."""
@@ -281,25 +294,43 @@ async def discord_callback(
 
 
 @router.get("/me")
-def me(user: Optional[User] = Depends(current_user), db: Session = Depends(get_session)):
-    """Frontend calls this to ask "who am I logged in as?"."""
+def me(
+    request: Request,
+    user: Optional[User] = Depends(current_user),
+    db: Session = Depends(get_session),
+):
+    """Frontend calls this to ask "who am I logged in as?".
+
+    Multi-club network model: "player" and "claim_candidates" are relative to
+    the ACTIVE club (the subdomain the user is on, else their home club), not a
+    single global player. A user with no player *at this club* gets the
+    claim/create flow here even if they have a player at another club."""
     if user is None:
         return {"authenticated": False}
 
-    linked_player = None
-    if user.player_id:
-        linked_player = db.get(Player, user.player_id)
+    active_club = resolve_active_club_id(db, user, request.headers.get("origin"))
+    my_player_id = active_player_id_for(db, user, active_club)
+
+    linked_player = db.get(Player, my_player_id) if my_player_id else None
 
     candidates = []
-    if user.player_id is None:
+    if my_player_id is None:
+        # Only players at the active club that nobody owns yet are claimable.
         candidates = db.exec(
-            scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
+            scoped(Player, active_club)
+            .where(Player.active == True, Player.user_id.is_(None))
+            .order_by(Player.name)
         ).all()
+
+    club = db.get(Club, active_club)
 
     return {
         "authenticated": True,
         "user": user,
         "player": linked_player,
+        "active_club": (
+            {"id": club.id, "slug": club.slug, "name": club.name} if club else None
+        ),
         "claim_candidates": [
             {"id": p.id, "name": p.name, "default_faction": p.default_faction}
             for p in candidates
@@ -345,19 +376,22 @@ def complete_signup(
             avatar_url=pending.get("avatar_url"),
             player_id=None,
             club_id=club.id,
+            home_club_id=club.id,  # the club they picked is their soft home
         )
         db.add(user)
         db.commit()
         db.refresh(user)
 
-    linked_player = None
-    if user.player_id:
-        linked_player = db.get(Player, user.player_id)
+    # Brand-new identity: active club == the club they just picked (== home).
+    my_player_id = active_player_id_for(db, user, club.id)
+    linked_player = db.get(Player, my_player_id) if my_player_id else None
 
     candidates = []
-    if user.player_id is None:
+    if my_player_id is None:
         candidates = db.exec(
-            scoped(Player, user.club_id).where(Player.active == True).order_by(Player.name)
+            scoped(Player, club.id)
+            .where(Player.active == True, Player.user_id.is_(None))
+            .order_by(Player.name)
         ).all()
 
     response.set_cookie(
@@ -384,25 +418,32 @@ def complete_signup(
 @router.post("/claim/{player_id}")
 def claim_player(
     player_id: int,
+    club_id: int = Depends(active_club_id),
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """User picks an existing player from the dropdown — link them."""
-    if user.player_id is not None:
-        raise HTTPException(status_code=400, detail="You already have a linked player profile")
-
-    other = db.exec(select(User).where(User.player_id == player_id)).first()
-    if other is not None:
-        raise HTTPException(status_code=400, detail="That player is already claimed by another user")
+    """User picks an existing player from the dropdown — link them, at the
+    ACTIVE club. Multi-club network model: a user can own one player per club,
+    so the "already linked" check is per-club, and ownership is recorded on
+    Player.user_id (not the single User.player_id)."""
+    if active_player_id_for(db, user, club_id) is not None:
+        raise HTTPException(status_code=400, detail="You already have a linked player profile at this club")
 
     player = db.get(Player, player_id)
-    if player is None or not player.active or player.club_id != user.club_id:
+    if player is None or not player.active or player.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player not found")
+    if player.user_id is not None:
+        raise HTTPException(status_code=400, detail="That player is already claimed by another user")
 
-    user.player_id = player_id
-    db.add(user)
+    player.user_id = user.id
+    db.add(player)
+    # Expand-phase dual-write: keep the legacy User.player_id link in sync for
+    # the user's home club, so not-yet-converted code paths (signups/main/admin
+    # still read user.player_id) keep working until the full sweep lands.
+    if club_id == user.club_id and user.player_id is None:
+        user.player_id = player.id
+        db.add(user)
     db.commit()
-    db.refresh(user)
     return {"ok": True, "player_id": player_id}
 
 
@@ -414,28 +455,37 @@ class CreateProfileRequest(BaseModel):
 @router.post("/create-profile")
 def create_profile(
     body: CreateProfileRequest,
+    club_id: int = Depends(active_club_id),
     user: User = Depends(require_user),
     db: Session = Depends(get_session),
 ):
-    """Create a brand-new player row and link it to the current user.
-
-    Used for people who have never played before (no existing row to claim).
+    """Create a brand-new player row at the ACTIVE club and link it to the
+    current user (Player.user_id). Used for people with no existing row to
+    claim. Multi-club network model: a user can create one player per club.
     """
-    if user.player_id is not None:
-        raise HTTPException(status_code=400, detail="You already have a linked player profile")
+    if active_player_id_for(db, user, club_id) is not None:
+        raise HTTPException(status_code=400, detail="You already have a linked player profile at this club")
 
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Name cannot be blank")
 
-    player = Player(name=name, default_faction=body.default_faction or None, active=True, club_id=user.club_id)
+    player = Player(
+        name=name,
+        default_faction=body.default_faction or None,
+        active=True,
+        club_id=club_id,
+        user_id=user.id,
+    )
     db.add(player)
-    db.flush()  # populate player.id before linking
+    db.flush()  # populate player.id before the legacy back-link
 
-    user.player_id = player.id
-    db.add(user)
+    # Expand-phase dual-write (see claim_player) — home club only.
+    if club_id == user.club_id and user.player_id is None:
+        user.player_id = player.id
+        db.add(user)
     db.commit()
-    db.refresh(user)
+    db.refresh(player)
     return {"ok": True, "player_id": player.id}
 
 
@@ -490,24 +540,40 @@ def club_runnable_scopes(club_id: int, db: Session) -> set[str]:
     return {sc.legacy_system_name for _, sc in rows}
 
 
-def admin_scopes(user: Optional[User], db: Session) -> set[str]:
-    """Return the set of scopes the user can administer.
+def admin_scopes(user: Optional[User], db: Session, club_id: Optional[int] = None) -> set[str]:
+    """Return the set of scopes the user can administer AT A GIVEN CLUB.
 
-    Super-admins get whatever their own club actually runs (see
-    club_runnable_scopes) — not every scope that exists platform-wide.
-    Regular users get whatever admin_roles rows they hold. Unauthenticated
-    callers get the empty set.
+    `club_id` defaults to the user's own registration club (backward
+    compatible with every caller that predates the multi-club network model).
+    Pass an explicit club_id — e.g. the active club from the subdomain — to
+    ask "what may this user administer *here*".
+
+    Super-admin is a home-club power: it grants that club's runnable scopes
+    ONLY when the club being asked about is the user's own club. At any other
+    club a super-admin has exactly the admin_roles they were explicitly granted
+    there (normally none) — so a super-admin of one club is a plain player at
+    every other club, never an admin-by-accident of the whole network.
+    Regular users get whatever admin_roles rows they hold for that club.
     """
     if user is None:
         return set()
-    if user.is_super_admin:
-        return club_runnable_scopes(user.club_id, db)
-    rows = db.exec(scoped(AdminRole, user.club_id).where(AdminRole.user_id == user.id)).all()
+    cid = club_id if club_id is not None else user.club_id
+    if user.is_super_admin and cid == user.club_id:
+        return club_runnable_scopes(cid, db)
+    rows = db.exec(scoped(AdminRole, cid).where(AdminRole.user_id == user.id)).all()
     return {r.scope for r in rows}
 
 
 def require_super_admin(user: User = Depends(require_user)) -> User:
-    """Dependency: raises 403 unless the caller is a super-admin."""
+    """Dependency: raises 403 unless the caller is a super-admin.
+
+    Admin is intentionally HOME-club-scoped in the multi-club network model:
+    every admin endpoint's data query is scoped(X, user.club_id), so a
+    super-admin can only ever administer their own club regardless of which
+    subdomain they're on — there is no path to another club's data. A
+    travelling player (no super-admin flag, no roles) is denied everywhere.
+    Making admin active-club-aware is a deliberate non-goal (it would only
+    matter if a club granted a *visitor* admin rights — out of scope)."""
     if not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Super-admin access required.")
     return user
@@ -525,7 +591,11 @@ def require_platform_admin(user: User = Depends(require_user)) -> User:
 
 
 def require_scope(scope: str):
-    """Factory: returns a dependency that 403s unless the caller holds that scope."""
+    """Factory: returns a dependency that 403s unless the caller holds that
+    scope. Home-club-scoped like require_super_admin — admin_scopes defaults to
+    the caller's own club, and every gated endpoint's data query is
+    scoped(X, user.club_id), so admin acts only on the caller's own club. See
+    require_super_admin for why admin stays home-scoped in the network model."""
     def _dep(user: User = Depends(require_user), db: Session = Depends(get_session)) -> User:
         if scope not in admin_scopes(user, db):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
