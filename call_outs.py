@@ -178,7 +178,7 @@ def create_call_out(
     db.refresh(call_out)
 
     try:
-        _post_webhook(db, club_id, body.system, _webhook_content(call_out, "📣 **Call Out!** A player is looking for a game"))
+        _post_webhook(db, club_id, body.system, _webhook_content(call_out, f"📣 **Call Out!** {call_out.creator_name} is looking for a game"))
     except Exception:
         pass
 

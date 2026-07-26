@@ -53,7 +53,7 @@ def main() -> None:
                 if c.last_reminder_at is None or (now - c.last_reminder_at) >= REMINDER_INTERVAL:
                     _post_webhook(
                         db, c.club_id, c.system,
-                        _webhook_content(c, "⏳ **Still looking for a game** — open Call Out"),
+                        _webhook_content(c, f"⏳ **Still looking for a game** — {c.creator_name} has an open Call Out"),
                     )
                     c.last_reminder_at = now
                     c.updated_at = now
