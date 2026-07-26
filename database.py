@@ -143,7 +143,10 @@ def resolve_single_active_club_id(db: Session) -> int:
 # domain (and anything else this can't parse a subdomain from) has always
 # meant Manchester, preserving every existing bookmark/QR-code link.
 _PRIMARY_DOMAIN = "calltoarms.app"
-_DEFAULT_CLUB_SLUG = "manchester"
+# The club the bare/www/default domain resolves to. Renamed manchester->egnwgc
+# 2026-07-26 (club slugs rebranded to egnwgc / theoutpost); the DB slug must
+# match this. Mirrors call-to-arms-web src/lib/clubSlug.ts DEFAULT_CLUB_SLUG.
+_DEFAULT_CLUB_SLUG = "egnwgc"
 
 
 def resolve_club_slug_from_origin(origin_header: str | None) -> str | None:
