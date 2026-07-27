@@ -86,6 +86,51 @@ def admin_me(
     }
 
 
+@router.get("/onboarding")
+def onboarding_status(
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """First-run checklist state for the caller's own club — each item is a
+    boolean derived from real data, so it ticks itself off as the admin does
+    the setup. Powers the admin onboarding checklist. Home-club scoped, like
+    every other admin read (a visiting admin has no scopes elsewhere)."""
+    club_id = user.club_id
+    club = db.get(Club, club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found.")
+
+    systems_enabled = db.exec(
+        scoped(ClubSystem, club_id).where(ClubSystem.enabled == True)
+    ).first() is not None
+    webhook_set = db.exec(scoped(ClubWebhook, club_id)).first() is not None
+    pairings_published = db.exec(
+        scoped(PublishState, club_id).where(PublishState.published == True)
+    ).first() is not None
+
+    other_super_admins = db.exec(
+        select(User)
+        .where(User.club_id == club_id)
+        .where(User.is_super_admin == True)
+        .where(User.id != user.id)
+    ).first() is not None
+    any_scope_admin = db.exec(scoped(AdminRole, club_id)).first() is not None
+
+    items = {
+        "profile_blurb": bool((club.blurb or "").strip()),
+        "logo": bool(club.logo_url),
+        "systems_enabled": systems_enabled,
+        "discord_webhook": webhook_set,
+        "co_admin": other_super_admins or any_scope_admin,
+        "first_pairings_published": pairings_published,
+    }
+    return {
+        "club": {"id": club.id, "name": club.name, "slug": club.slug, "active": club.active},
+        "items": items,
+        "complete": all(items.values()),
+    }
+
+
 @router.get("/roles")
 def list_roles(
     user: User = Depends(require_super_admin),
@@ -3778,6 +3823,15 @@ def search_users(
     return result[:50]
 
 
+def _suggest_slug(name: str) -> str:
+    """Best-effort hostname-safe slug from a club name, to prefill the provision
+    form. The platform admin still confirms/edits it — it becomes the club's
+    <slug>.calltoarms.app subdomain, so it must be right before the club goes
+    live, but a sensible default saves typing."""
+    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return s or "club"
+
+
 def _club_request_dict(r: ClubRequest) -> dict:
     return {
         "id": r.id,
@@ -3790,6 +3844,8 @@ def _club_request_dict(r: ClubRequest) -> dict:
         "notes": r.notes,
         "reviewed_at": r.reviewed_at,
         "reviewed_by_name": r.reviewed_by_name,
+        "provisioned_club_id": r.provisioned_club_id,
+        "suggested_slug": _suggest_slug(r.club_name),
     }
 
 
@@ -3849,6 +3905,74 @@ def deny_club_request(
     db: Session = Depends(get_session),
 ):
     return _club_request_dict(_review_club_request(request_id, "denied", user, db))
+
+
+class ProvisionClubBody(BaseModel):
+    slug: str                       # confirmed/edited by the platform admin
+    region: Optional[str] = None    # optional; must be a UK_REGIONS value
+    active: bool = True
+
+
+@router.post("/platform/club-requests/{request_id}/provision")
+def provision_club_request(
+    request_id: int,
+    body: ProvisionClubBody,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """One-click onboarding: create the real Club straight from a request and
+    mark the request approved + linked, instead of the old flow (approve, then
+    hand-create the club via POST /admin/platform/clubs). Name, contact email,
+    and address come from the request; the platform admin supplies the slug
+    (subdomain) and an optional region.
+
+    Deliberately does NOT enable systems (schedules are club-specific — the new
+    admin sets those via the onboarding checklist) and does NOT appoint the
+    super-admin (that needs the requester to have logged in via Discord first;
+    surfaced as the next onboarding step). Idempotent guard: a request already
+    provisioned returns 409."""
+    req = db.get(ClubRequest, request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail="Club request not found.")
+    if req.provisioned_club_id is not None:
+        raise HTTPException(status_code=409, detail="This request has already been provisioned into a club.")
+
+    slug = body.slug.strip().lower()
+    if not _SLUG_RE.fullmatch(slug):
+        raise HTTPException(
+            status_code=422,
+            detail="Slug must be lowercase letters, digits, and hyphens, with no leading or trailing hyphen.",
+        )
+    if db.exec(select(Club).where(Club.slug == slug)).first():
+        raise HTTPException(status_code=409, detail="A club with this slug already exists.")
+
+    region = body.region.strip() if body.region else None
+    if region is not None and region not in UK_REGIONS:
+        raise HTTPException(status_code=422, detail="region must be one of the known UK regions.")
+
+    club = Club(
+        name=req.club_name,
+        slug=slug,
+        contact_email=req.requester_email,
+        address=req.club_location,
+        region=region,
+        active=body.active,
+    )
+    db.add(club)
+    db.flush()
+
+    req.status = "approved"
+    req.reviewed_at = datetime.utcnow()
+    req.reviewed_by_user_id = user.id
+    req.reviewed_by_name = user.discord_name
+    req.provisioned_club_id = club.id
+    db.add(req)
+
+    log_audit(db, user, "club.provision", "club", club.id, f"{club.name!r} (slug={club.slug}) from request {req.id}")
+    db.commit()
+    db.refresh(club)
+    db.refresh(req)
+    return {"club": club, "request": _club_request_dict(req)}
 
 
 class ClubSystemCarouselBody(BaseModel):

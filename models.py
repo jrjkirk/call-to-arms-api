@@ -712,6 +712,10 @@ class ClubRequest(SQLModel, table=True):
     reviewed_at: Optional[datetime] = None
     reviewed_by_user_id: Optional[int] = None
     reviewed_by_name: Optional[str] = None
+    # Set when a platform admin provisions the request into a real Club (one
+    # click: create the club from this request + mark it approved). NULL =
+    # approved/denied/pending but no club created yet. Prevents double-provision.
+    provisioned_club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
 
 class CallOut(SQLModel, table=True):
