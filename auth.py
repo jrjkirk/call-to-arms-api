@@ -324,10 +324,17 @@ def me(
 
     club = db.get(Club, active_club)
 
+    # Does this user have a player at ANY club yet? Used by the frontend to send
+    # a brand-new player to the club finder rather than a default club subdomain.
+    has_club = db.exec(
+        select(Player).where(Player.user_id == user.id, Player.active == True)
+    ).first() is not None
+
     return {
         "authenticated": True,
         "user": user,
         "player": linked_player,
+        "has_club": has_club,
         "active_club": (
             {"id": club.id, "slug": club.slug, "name": club.name} if club else None
         ),
