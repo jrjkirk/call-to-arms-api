@@ -11,11 +11,12 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from auth import (
+    active_club_id,
     admin_scopes,
     club_runnable_scopes,
     current_user,
@@ -25,7 +26,7 @@ from auth import (
     require_user,
     valid_scopes,
 )
-from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit
+from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -64,24 +65,39 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 def _require_any_admin(
     user: User = Depends(require_user),
+    active: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ) -> User:
-    """403 unless the caller has at least one admin scope (includes super-admins)."""
-    if not admin_scopes(user, db):
+    """403 unless the caller has at least one admin scope at their OWN club and
+    is acting in it (active club == user.club_id). Home-club-scoped like
+    require_super_admin — see there for why the active-club check matters."""
+    if active != user.club_id or not admin_scopes(user, db):
         raise HTTPException(status_code=403, detail="Admin access required.")
     return user
 
 
 @router.get("/me")
 def admin_me(
+    request: Request,
     user: Optional[User] = Depends(current_user),
     db: Session = Depends(get_session),
 ):
-    """Return the caller's admin status. Always 200; unauthenticated = no access."""
+    """Return the caller's admin status. Always 200; unauthenticated = no access.
+
+    Home-club scoped: club-admin powers (super-admin + scopes) apply only while
+    the caller is acting in their own club (active club, from the subdomain, ==
+    user.club_id). On another club's subdomain they report as a plain player —
+    this is what stops the admin panel showing/editing the home club's data
+    while browsing a different club. is_platform_admin is cross-club and stays."""
+    if user is None:
+        return {"is_super_admin": False, "is_platform_admin": False, "scopes": []}
+    active = resolve_active_club_id(db, user, request.headers.get("origin"))
+    if active != user.club_id:
+        return {"is_super_admin": False, "is_platform_admin": user.is_platform_admin, "scopes": []}
     scopes = admin_scopes(user, db)
     return {
-        "is_super_admin": user.is_super_admin if user else False,
-        "is_platform_admin": user.is_platform_admin if user else False,
+        "is_super_admin": user.is_super_admin,
+        "is_platform_admin": user.is_platform_admin,
         "scopes": sorted(scopes),
     }
 

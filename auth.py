@@ -564,17 +564,20 @@ def admin_scopes(user: Optional[User], db: Session, club_id: Optional[int] = Non
     return {r.scope for r in rows}
 
 
-def require_super_admin(user: User = Depends(require_user)) -> User:
-    """Dependency: raises 403 unless the caller is a super-admin.
+def require_super_admin(
+    user: User = Depends(require_user),
+    active: int = Depends(active_club_id),
+) -> User:
+    """Dependency: raises 403 unless the caller is a super-admin acting IN THEIR
+    OWN club.
 
-    Admin is intentionally HOME-club-scoped in the multi-club network model:
-    every admin endpoint's data query is scoped(X, user.club_id), so a
-    super-admin can only ever administer their own club regardless of which
-    subdomain they're on — there is no path to another club's data. A
-    travelling player (no super-admin flag, no roles) is denied everywhere.
-    Making admin active-club-aware is a deliberate non-goal (it would only
-    matter if a club granted a *visitor* admin rights — out of scope)."""
-    if not user.is_super_admin:
+    Admin is HOME-club-scoped: every admin data query is scoped(X,
+    user.club_id), so we must also ensure the caller is actually acting in that
+    club (active club, from the subdomain, == user.club_id). Otherwise a
+    super-admin browsing another club's subdomain would see/act on their own
+    club's data while appearing to be in the other club — confusing and unsafe.
+    On a foreign subdomain a super-admin is a plain player, so this 403s."""
+    if not (user.is_super_admin and active == user.club_id):
         raise HTTPException(status_code=403, detail="Super-admin access required.")
     return user
 
@@ -592,12 +595,17 @@ def require_platform_admin(user: User = Depends(require_user)) -> User:
 
 def require_scope(scope: str):
     """Factory: returns a dependency that 403s unless the caller holds that
-    scope. Home-club-scoped like require_super_admin — admin_scopes defaults to
-    the caller's own club, and every gated endpoint's data query is
-    scoped(X, user.club_id), so admin acts only on the caller's own club. See
-    require_super_admin for why admin stays home-scoped in the network model."""
-    def _dep(user: User = Depends(require_user), db: Session = Depends(get_session)) -> User:
-        if scope not in admin_scopes(user, db):
+    scope AT THEIR OWN club while acting in it. Home-club-scoped like
+    require_super_admin: admin_scopes defaults to the caller's own club and the
+    data query is scoped(X, user.club_id), so we also require the active club
+    (subdomain) to equal user.club_id — otherwise admin on a foreign subdomain
+    would act on home-club data. See require_super_admin."""
+    def _dep(
+        user: User = Depends(require_user),
+        db: Session = Depends(get_session),
+        active: int = Depends(active_club_id),
+    ) -> User:
+        if active != user.club_id or scope not in admin_scopes(user, db):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
         return user
     return _dep
