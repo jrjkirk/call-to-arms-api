@@ -68,11 +68,18 @@ class SwapIn(SQLModel):
 
 
 class PrearrangedGameIn(SQLModel):
-    """Request body for POST /signups/prearranged."""
+    """Request body for POST /signups/prearranged.
+
+    Player B may be a real club member (player_b_id set) OR a guest / +1 who
+    isn't on the system (player_b_id None + guest_b_name given). A guest has no
+    Player row: their Signup is created with player_id NULL, so they never
+    appear in the roster, leaderboard, or the auto-pairing pool.
+    """
     system: str
     week: str
     player_a_id: int
-    player_b_id: int
+    player_b_id: Optional[int] = None
+    guest_b_name: Optional[str] = None
     faction_a: Optional[str] = None
     faction_b: Optional[str] = None
     eta: Optional[str] = None
@@ -550,17 +557,30 @@ def submit_prearranged(
 
     week = _validate_week(body.week)
 
-    # 2. Players must differ
-    if body.player_a_id == body.player_b_id:
-        raise HTTPException(status_code=422, detail="Player A and Player B must be different.")
-
-    # 3. Both players must exist, be active, and belong to the caller's club
+    # 2. Player A must be a real, active member of the caller's club.
     pa = db.get(Player, body.player_a_id)
     if pa is None or not pa.active or pa.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player A not found.")
-    pb = db.get(Player, body.player_b_id)
-    if pb is None or not pb.active or pb.club_id != club_id:
-        raise HTTPException(status_code=404, detail="Player B not found.")
+
+    # 3. Player B is either a real club member, or a guest / +1 (no profile).
+    #    A guest has no Player row: player_b_id is None and guest_b_name is set.
+    is_guest_b = body.player_b_id is None
+    if is_guest_b:
+        guest_name = (body.guest_b_name or "").strip()
+        if not guest_name:
+            raise HTTPException(status_code=422, detail="Please enter the guest's name.")
+        guest_name = guest_name[:80]
+        pb = None
+        pb_player_id = None
+        pb_name = guest_name
+    else:
+        if body.player_a_id == body.player_b_id:
+            raise HTTPException(status_code=422, detail="Player A and Player B must be different.")
+        pb = db.get(Player, body.player_b_id)
+        if pb is None or not pb.active or pb.club_id != club_id:
+            raise HTTPException(status_code=404, detail="Player B not found.")
+        pb_player_id = pb.id
+        pb_name = pb.name
 
     # 4. Both factions must be set
     faction_a = body.faction_a if body.faction_a not in (None, "", "— None —") else None
@@ -568,12 +588,14 @@ def submit_prearranged(
     if faction_a is None or faction_b is None:
         raise HTTPException(status_code=422, detail="Please pick a faction for both players.")
 
-    # 5. Conflict check: neither player may already be signed up this week/system
+    # 5. Conflict check: no real player may already be signed up this week/system.
+    #    A guest has no player_id, so there's nothing to conflict on for that side.
+    real_ids = [body.player_a_id] + ([] if is_guest_b else [body.player_b_id])
     conflicts = db.exec(
         scoped(Signup, club_id)
         .where(Signup.week == week)
         .where(Signup.system == body.system)
-        .where(Signup.player_id.in_([body.player_a_id, body.player_b_id]))
+        .where(Signup.player_id.in_(real_ids))
     ).all()
     if conflicts:
         names = sorted({s.player_name for s in conflicts})
@@ -607,7 +629,7 @@ def submit_prearranged(
     )
     su_b = Signup(
         week=week, system=body.system,
-        player_id=pb.id, player_name=pb.name,
+        player_id=pb_player_id, player_name=pb_name,
         faction=faction_b, points=points, eta=eta,
         experience="New", vibe=vibe,
         standby_ok=False, tnt_ok=False,
@@ -641,9 +663,10 @@ def submit_prearranged(
         if points is not None:
             detail_parts.append(f"🛡️ {points} pts")
         detail_line = " • ".join(detail_parts)
+        b_label = f"{pb_name} (+1)" if is_guest_b else pb_name
         content = (
             f"🤝 **Pre-Arranged Game**\n"
-            f"⚔️ **{pa.name}** ({faction_a}) vs **{pb.name}** ({faction_b})\n"
+            f"⚔️ **{pa.name}** ({faction_a}) vs **{b_label}** ({faction_b})\n"
             f"{detail_line}\n"
             f"📊 {phrase}: {count}"
         )
