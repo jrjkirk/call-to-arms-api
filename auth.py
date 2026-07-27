@@ -558,28 +558,60 @@ def admin_scopes(user: Optional[User], db: Session, club_id: Optional[int] = Non
     if user is None:
         return set()
     cid = club_id if club_id is not None else user.club_id
+    # Platform admins are implicit super-admins of EVERY club — full runnable
+    # scopes wherever they act. This is not stored as a role and not tied to a
+    # club, so a platform admin never appears in a club's super-admin list and
+    # is never removed when that club appoints/removes its own admins.
+    if user.is_platform_admin:
+        return club_runnable_scopes(cid, db)
     if user.is_super_admin and cid == user.club_id:
         return club_runnable_scopes(cid, db)
     rows = db.exec(scoped(AdminRole, cid).where(AdminRole.user_id == user.id)).all()
     return {r.scope for r in rows}
 
 
+def _rebase_admin(user: User, active_club: int, db: Session) -> User:
+    """Re-base an already-authorized admin's user object onto the club they're
+    acting in (the active club from the subdomain), so every downstream
+    scoped(X, user.club_id) read and club_id=user.club_id write in the endpoint
+    targets THAT club. This is what lets a platform admin administer whatever
+    club they switch to, while a club's own super-admin stays on their own club
+    (for them active always == their club, or they'd have been 403'd).
+
+    A platform admin is additionally marked is_super_admin in-memory, so the
+    handful of endpoints that gate on the raw `user.is_super_admin` flag (rather
+    than admin_scopes) treat them as the super-admin they effectively are here.
+    A real super-admin is unchanged; a scope-admin is NOT elevated.
+
+    Detached from the session first so these overrides are request-only and
+    never persisted: User has no ORM relationships (safe to detach) and no admin
+    endpoint re-adds or re-fetches the caller (verified), so nothing flushes the
+    changed fields back to the DB. Crucially this only touches the in-memory
+    caller object — DB queries about OTHER users (e.g. a club's super-admin
+    list) read the real columns, so a platform admin stays hidden there."""
+    db.expunge(user)
+    user.club_id = active_club
+    if user.is_platform_admin:
+        user.is_super_admin = True
+    return user
+
+
 def require_super_admin(
     user: User = Depends(require_user),
     active: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
 ) -> User:
-    """Dependency: raises 403 unless the caller is a super-admin acting IN THEIR
-    OWN club.
+    """Dependency: raises 403 unless the caller may act as a super-admin in the
+    club they're currently in (the active club, from the subdomain).
 
-    Admin is HOME-club-scoped: every admin data query is scoped(X,
-    user.club_id), so we must also ensure the caller is actually acting in that
-    club (active club, from the subdomain, == user.club_id). Otherwise a
-    super-admin browsing another club's subdomain would see/act on their own
-    club's data while appearing to be in the other club — confusing and unsafe.
-    On a foreign subdomain a super-admin is a plain player, so this 403s."""
-    if not (user.is_super_admin and active == user.club_id):
+    A platform admin is an implicit super-admin of every club, so passes
+    anywhere. A club's own super-admin passes only in their own club (active ==
+    user.club_id) — on another club's subdomain they're a plain player. The
+    authorized caller is then re-based onto the active club so the endpoint's
+    scoped(X, user.club_id) queries act on the club being administered."""
+    if not (user.is_platform_admin or (user.is_super_admin and active == user.club_id)):
         raise HTTPException(status_code=403, detail="Super-admin access required.")
-    return user
+    return _rebase_admin(user, active, db)
 
 
 def require_platform_admin(user: User = Depends(require_user)) -> User:
@@ -595,17 +627,17 @@ def require_platform_admin(user: User = Depends(require_user)) -> User:
 
 def require_scope(scope: str):
     """Factory: returns a dependency that 403s unless the caller holds that
-    scope AT THEIR OWN club while acting in it. Home-club-scoped like
-    require_super_admin: admin_scopes defaults to the caller's own club and the
-    data query is scoped(X, user.club_id), so we also require the active club
-    (subdomain) to equal user.club_id — otherwise admin on a foreign subdomain
-    would act on home-club data. See require_super_admin."""
+    scope in the club they're currently in (the active club, from the
+    subdomain). A platform admin holds every scope everywhere; a club's own
+    scope-admin holds theirs only in their own club. The authorized caller is
+    re-based onto the active club so the endpoint acts on it. See
+    require_super_admin."""
     def _dep(
         user: User = Depends(require_user),
         db: Session = Depends(get_session),
         active: int = Depends(active_club_id),
     ) -> User:
-        if active != user.club_id or scope not in admin_scopes(user, db):
+        if scope not in admin_scopes(user, db, active):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
-        return user
+        return _rebase_admin(user, active, db)
     return _dep

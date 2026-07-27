@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from auth import (
+    _rebase_admin,
     active_club_id,
     admin_scopes,
     club_runnable_scopes,
@@ -68,12 +69,17 @@ def _require_any_admin(
     active: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ) -> User:
-    """403 unless the caller has at least one admin scope at their OWN club and
-    is acting in it (active club == user.club_id). Home-club-scoped like
-    require_super_admin — see there for why the active-club check matters."""
-    if active != user.club_id or not admin_scopes(user, db):
+    """403 unless the caller can administer the club they're currently in — any
+    scope at the active club (a platform admin qualifies at every club; a club's
+    own admin only in their own club). The authorized caller is re-based onto
+    the active club so the endpoint's scoped(X, user.club_id) queries act on it.
+
+    This is the base gate for every club-admin endpoint. Endpoints that need a
+    finer check still call _require_system_scope(system, user, db) on top — that
+    now sees the re-based user, so it authorizes against the active club too."""
+    if not admin_scopes(user, db, active):
         raise HTTPException(status_code=403, detail="Admin access required.")
-    return user
+    return _rebase_admin(user, active, db)
 
 
 @router.get("/me")
@@ -82,21 +88,21 @@ def admin_me(
     user: Optional[User] = Depends(current_user),
     db: Session = Depends(get_session),
 ):
-    """Return the caller's admin status. Always 200; unauthenticated = no access.
-
-    Home-club scoped: club-admin powers (super-admin + scopes) apply only while
-    the caller is acting in their own club (active club, from the subdomain, ==
-    user.club_id). On another club's subdomain they report as a plain player —
-    this is what stops the admin panel showing/editing the home club's data
-    while browsing a different club. is_platform_admin is cross-club and stays."""
+    """Return the caller's admin status for the club they're currently in.
+    Always 200; unauthenticated = no access. Evaluated at the active club (from
+    the subdomain): a platform admin is a super-admin of every club they visit;
+    a club's own super-admin only in their own club (on a foreign subdomain they
+    report as a plain player). is_platform_admin is cross-club and always
+    reflects the flag."""
     if user is None:
         return {"is_super_admin": False, "is_platform_admin": False, "scopes": []}
     active = resolve_active_club_id(db, user, request.headers.get("origin"))
-    if active != user.club_id:
-        return {"is_super_admin": False, "is_platform_admin": user.is_platform_admin, "scopes": []}
-    scopes = admin_scopes(user, db)
+    # Scopes are evaluated AT the active club: a platform admin gets full scopes
+    # at whatever club they're on; a club's own super-admin only in their club.
+    scopes = admin_scopes(user, db, active)
+    is_super = user.is_platform_admin or (user.is_super_admin and active == user.club_id)
     return {
-        "is_super_admin": user.is_super_admin,
+        "is_super_admin": is_super,
         "is_platform_admin": user.is_platform_admin,
         "scopes": sorted(scopes),
     }
@@ -287,7 +293,7 @@ def remove_role(
 @router.get("/players")
 def admin_players(
     scope: Optional[str] = None,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Scoped read (scope provided) or global super-admin read (scope omitted).
@@ -483,7 +489,7 @@ def remove_block(
 @router.get("/history")
 def admin_history(
     scope: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Recent game history for a scope. 403 unless caller holds that scope.
@@ -672,7 +678,7 @@ class AutoPairingsSettingsBody(BaseModel):
 @router.get("/auto-pairings-settings")
 def get_auto_pairings_settings(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(system, user, db)
@@ -689,7 +695,7 @@ def get_auto_pairings_settings(
 @router.post("/auto-pairings-settings")
 def post_auto_pairings_settings(
     body: AutoPairingsSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(body.system, user, db)
@@ -714,7 +720,7 @@ class SignupCapSettingsBody(BaseModel):
 @router.get("/signup-cap-settings")
 def get_signup_cap_settings(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Per-(club, system) signup cap: enable toggle + table limit. The player
@@ -732,7 +738,7 @@ def get_signup_cap_settings(
 @router.post("/signup-cap-settings")
 def post_signup_cap_settings(
     body: SignupCapSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(body.system, user, db)
@@ -764,7 +770,7 @@ class CallToArmsSettingsBody(BaseModel):
 @router.get("/call-to-arms-settings")
 def get_call_to_arms_settings(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Per-club, per-system call-to-arms schedule. Mirrors
@@ -804,7 +810,7 @@ def get_call_to_arms_settings(
 @router.post("/call-to-arms-settings")
 def post_call_to_arms_settings(
     body: CallToArmsSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(body.system, user, db)
@@ -886,7 +892,7 @@ class PairingSaveBody(BaseModel):
 def pairings_signup_list(
     system: str,
     week: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """De-duped signup list for a week/system — used by the admin grid dropdowns."""
@@ -913,7 +919,7 @@ def pairings_signup_list(
 @router.post("/pairings/preview")
 def pairings_preview(
     body: PairingsWeekBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """DRY RUN — compute proposed pairings without writing to the DB.
@@ -947,7 +953,7 @@ def pairings_preview(
 @router.post("/pairings/generate")
 def pairings_generate(
     body: PairingsWeekBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Delete existing pending (non-prearranged) pairings, then generate and persist new ones."""
@@ -990,7 +996,7 @@ def pairings_generate(
 def pairings_get(
     system: str,
     week: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Return all saved pairings for a week/system, plus publish state."""
@@ -1021,7 +1027,7 @@ def pairings_get(
 @router.post("/pairings/publish")
 def pairings_publish(
     body: PublishBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Upsert PublishState.published for a week/system."""
@@ -1052,7 +1058,7 @@ def pairings_publish(
 @router.post("/pairings/save")
 def pairings_save(
     body: PairingSaveBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Write grid edits back to Pairing rows and their underlying Signup rows."""
@@ -1135,7 +1141,7 @@ def pairings_save(
 @router.delete("/pairings")
 def pairings_delete(
     body: DeletePairingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Delete specific pairings by ID, scoped to this week/system."""
@@ -1159,7 +1165,7 @@ def pairings_delete(
 @router.post("/pairings/post-discord")
 def pairings_post_discord(
     body: PairingsWeekBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Trigger the GitHub Actions workflow that screenshots the public
@@ -1243,7 +1249,7 @@ def _system_config(db: Session, club_id: int, system: str) -> dict:
 def admin_signups_list(
     system: str,
     week: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """All signups for a week/system, ordered by player_name, with per-system field config."""
@@ -1277,7 +1283,7 @@ class AdminSignupPatch(BaseModel):
 def admin_signup_patch(
     signup_id: int,
     body: AdminSignupPatch,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Partial update of a signup row.
@@ -1357,7 +1363,7 @@ class AdminSignupCreate(BaseModel):
 @router.post("/signups", status_code=201)
 def admin_signup_create(
     body: AdminSignupCreate,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Add a signup on behalf of a player (admin correction / manual entry).
@@ -1438,7 +1444,7 @@ def admin_signup_create(
 @router.delete("/signups/{signup_id}")
 def admin_signup_delete(
     signup_id: int,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Force-drop a signup, bypassing the PublishState check that blocks player self-drops.
@@ -1499,7 +1505,7 @@ def _league_result_row(r: LeagueResult) -> dict:
 def admin_league_results(
     system: str,
     season_id: Optional[int] = None,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """One system's league results, newest first (display order; recalc
@@ -1543,7 +1549,7 @@ class AdminLeagueResultPatch(BaseModel):
 def admin_league_result_patch(
     result_id: int,
     body: AdminLeagueResultPatch,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Partial update of a league result, followed by a full ratings replay."""
@@ -1611,7 +1617,7 @@ def admin_league_result_patch(
 @router.delete("/league/results/{result_id}")
 def admin_league_result_delete(
     result_id: int,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Delete a league result and replay ratings from scratch."""
@@ -1656,7 +1662,7 @@ class FromPairingsResultsBody(BaseModel):
 @router.post("/league/results/from-pairings")
 def admin_league_results_from_pairings(
     body: FromPairingsResultsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Create LeagueResult rows from a week's pairings in one shot. `result`'s
@@ -1765,7 +1771,7 @@ def _league_config_row(cfg: LeagueConfig) -> dict:
 @router.get("/league-config")
 def get_league_config(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """This club's league_enabled flag + scoring config for one system.
@@ -1791,7 +1797,7 @@ class LeagueSettingsBody(BaseModel):
 @router.post("/league-settings")
 def update_league_settings(
     body: LeagueSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Enable/disable this club's league for one system (mirrors
@@ -1832,7 +1838,7 @@ class LeagueConfigBody(BaseModel):
 @router.post("/league-config")
 def save_league_config(
     body: LeagueConfigBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Upsert this club's scoring config for one system's league, then replay
@@ -1891,7 +1897,7 @@ def _pairing_config_row(cfg: PairingConfig) -> dict:
 @router.get("/pairing-config")
 def get_pairing_config(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """This club's pairing weighting config for one system. Returns the
@@ -1930,7 +1936,7 @@ class PairingConfigBody(BaseModel):
 @router.post("/pairing-config")
 def save_pairing_config(
     body: PairingConfigBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Upsert this club's pairing weighting config for one system. Takes
@@ -1997,7 +2003,7 @@ def _table_booking_config_row(cfg: Optional[TableBookingConfig]) -> dict:
 @router.get("/table-booking-settings")
 def get_table_booking_settings(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """This club's table_booking_enabled flag + venue config for one system.
@@ -2030,7 +2036,7 @@ class TableBookingSettingsBody(BaseModel):
 @router.post("/table-booking-settings")
 def update_table_booking_settings(
     body: TableBookingSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Enable/disable venue table-booking emails for one system (mirrors
@@ -2068,7 +2074,7 @@ class TableBookingConfigBody(BaseModel):
 @router.post("/table-booking-config")
 def save_table_booking_config(
     body: TableBookingConfigBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Upsert this club's venue table-booking config for one system."""
@@ -2133,7 +2139,7 @@ class TableBookingPreviewBody(BaseModel):
 @router.post("/table-booking/preview")
 def preview_table_booking(
     body: TableBookingPreviewBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Dry run: compute tables/headcount and render the email for one
@@ -2160,7 +2166,7 @@ def preview_table_booking(
 @router.post("/table-booking/send")
 def send_table_booking(
     body: TableBookingPreviewBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Explicit manual send — always executes (allow_duplicate=True), unlike
@@ -2185,7 +2191,7 @@ def send_table_booking(
 @router.get("/table-booking-history")
 def table_booking_history(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """The last 10 send attempts (success or failure) for this club/system,
@@ -2224,7 +2230,7 @@ def _league_season_row(db: Session, s: LeagueSeason, current_id: Optional[int]) 
 @router.get("/league-seasons")
 def list_league_seasons(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """This club's seasons for one system's league, newest first, each
@@ -2253,7 +2259,7 @@ class LeagueSeasonCreateBody(BaseModel):
 @router.post("/league-seasons")
 def create_league_season(
     body: LeagueSeasonCreateBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Start a new season for one system's league. Ratings reset — the new
@@ -3297,7 +3303,7 @@ def _mission_or_404(mission_id: int, user: User, db: Session) -> tuple[Mission, 
 @router.get("/missions")
 def list_missions(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """The caller's own club's mission pool for one system, plus the two
@@ -3328,7 +3334,7 @@ def create_mission(
     name: Optional[str] = Form(None),
     secondary_objectives: Optional[str] = Form(None),
     image: UploadFile = File(...),
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Upload one mission image + metadata. club_id always comes from the
@@ -3383,7 +3389,7 @@ class MissionPatch(BaseModel):
 def update_mission(
     mission_id: int,
     body: MissionPatch,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Partial update of a mission's metadata (not its image — to change the
@@ -3405,7 +3411,7 @@ def update_mission(
 @router.delete("/missions/{mission_id}")
 def delete_mission(
     mission_id: int,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Delete a mission row and best-effort delete its stored image."""
@@ -3426,7 +3432,7 @@ class MissionsSettingsBody(BaseModel):
 @router.post("/missions-settings")
 def update_missions_settings(
     body: MissionsSettingsBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Set the two per-club-system mission toggles on the caller's ClubSystem
@@ -4003,7 +4009,7 @@ _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 @router.post("/club-systems/carousel")
 def update_carousel_card(
     body: ClubSystemCarouselBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """That system's own admin edits its Club-page carousel card (blurb,
@@ -4043,7 +4049,7 @@ def update_carousel_card(
 def upload_carousel_photo(
     system: str = Form(...),
     image: UploadFile = File(...),
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(system, user, db)
@@ -4089,7 +4095,7 @@ def upload_carousel_photo(
 @router.delete("/club-systems/carousel/photo")
 def delete_carousel_photo(
     system: str,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     _require_system_scope(system, user, db)
@@ -4127,7 +4133,7 @@ def _event_row(ev: ClubEvent) -> dict:
 @router.get("/club/events")
 def list_club_events(
     system: Optional[str] = None,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """List this club's events. ?system=<legacy name> filters to one
@@ -4178,7 +4184,7 @@ def _resolve_event_system_id(body_system: Optional[str], user: User, db: Session
 @router.post("/club/events", status_code=201)
 def create_club_event(
     body: ClubEventBody,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     system_id = _resolve_event_system_id(body.system, user, db)
@@ -4225,7 +4231,7 @@ class ClubEventPatch(BaseModel):
 def update_club_event(
     event_id: int,
     body: ClubEventPatch,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     ev = _event_or_404(event_id, user, db)
@@ -4251,7 +4257,7 @@ def update_club_event(
 @router.delete("/club/events/{event_id}")
 def delete_club_event(
     event_id: int,
-    user: User = Depends(require_user),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     ev = _event_or_404(event_id, user, db)
