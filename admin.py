@@ -13,6 +13,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from auth import (
@@ -3983,6 +3984,59 @@ def provision_club_request(
     db.refresh(club)
     db.refresh(req)
     return {"club": club, "request": _club_request_dict(req)}
+
+
+@router.get("/platform/clubs-health")
+def platform_clubs_health(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Per-club health signals for the platform dashboard, so a stuck or dormant
+    club is visible at a glance. All aggregates are grouped queries (a fixed
+    handful regardless of how many clubs there are), not per-club N+1."""
+    clubs = db.exec(select(Club).order_by(Club.name)).all()
+
+    def _counts(rows) -> dict[int, int]:
+        return {r[0]: r[1] for r in rows}
+
+    def _ids(rows) -> set[int]:
+        return {r[0] for r in rows}
+
+    systems = _counts(db.exec(
+        select(ClubSystem.club_id, func.count()).where(ClubSystem.enabled == True).group_by(ClubSystem.club_id)
+    ).all())
+    super_admins = _counts(db.exec(
+        select(User.club_id, func.count()).where(User.is_super_admin == True).group_by(User.club_id)
+    ).all())
+    scope_admins = _ids(db.exec(select(AdminRole.club_id).distinct()).all())
+    webhooks = _ids(db.exec(select(ClubWebhook.club_id).distinct()).all())
+    players = _counts(db.exec(
+        select(Player.club_id, func.count()).where(Player.active == True).group_by(Player.club_id)
+    ).all())
+    last_signup = {r[0]: r[1] for r in db.exec(
+        select(Signup.club_id, func.max(Signup.created_at)).group_by(Signup.club_id)
+    ).all()}
+    published = _ids(db.exec(
+        select(PublishState.club_id).where(PublishState.published == True).distinct()
+    ).all())
+
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "slug": c.slug,
+            "active": c.active,
+            "region": c.region,
+            "systems_enabled": systems.get(c.id, 0),
+            "super_admins": super_admins.get(c.id, 0),
+            "has_scope_admin": c.id in scope_admins,
+            "webhook": c.id in webhooks,
+            "players": players.get(c.id, 0),
+            "last_signup_at": last_signup.get(c.id),
+            "pairings_published": c.id in published,
+        }
+        for c in clubs
+    ]
 
 
 class ClubSystemCarouselBody(BaseModel):
