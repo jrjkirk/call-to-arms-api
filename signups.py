@@ -663,7 +663,7 @@ def submit_prearranged(
         if points is not None:
             detail_parts.append(f"🛡️ {points} pts")
         detail_line = " • ".join(detail_parts)
-        b_label = f"{pb_name} (+1)" if is_guest_b else pb_name
+        b_label = f"{pb_name} (guest)" if is_guest_b else pb_name
         content = (
             f"🤝 **Pre-Arranged Game**\n"
             f"⚔️ **{pa.name}** ({faction_a}) vs **{b_label}** ({faction_b})\n"
