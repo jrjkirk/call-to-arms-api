@@ -641,3 +641,20 @@ def require_scope(scope: str):
             raise HTTPException(status_code=403, detail=f"Admin access for '{scope}' required.")
         return _rebase_admin(user, active, db)
     return _dep
+
+
+def require_admin(
+    user: User = Depends(require_user),
+    active: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+) -> User:
+    """Dependency: raises 403 unless the caller can administer the club they're
+    currently in (any scope at the active club — a platform admin qualifies at
+    every club). The authorized caller is re-based onto the active club so the
+    endpoint's scoped(X, user.club_id) queries act on it. The shared base gate
+    for club-admin endpoints across modules (admin.py aliases it as
+    _require_any_admin; analytics.py uses it directly). Endpoints needing a
+    finer check still call their own per-system scope check on top."""
+    if not admin_scopes(user, db, active):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return _rebase_admin(user, active, db)

@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
-from auth import require_user, admin_scopes, valid_scopes
+from auth import require_admin, admin_scopes, valid_scopes
 from database import get_session, scoped
 from models import (
     ClubSystem,
@@ -67,7 +67,7 @@ def _system_config(db: Session, system: str) -> Optional[SystemConfig]:
 
 @router.get("/overview")
 def analytics_overview(
-    user: User = Depends(require_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_session),
 ):
     """Per-system "situation" for each system the caller administers: this
@@ -144,7 +144,7 @@ def analytics_overview(
 def signups_over_time(
     system: str,
     weeks: int = 16,
-    user: User = Depends(require_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_session),
 ):
     """De-duped signup headcount per session week for one system, oldest to
@@ -177,7 +177,7 @@ def signups_over_time(
 def games_over_time(
     system: str,
     weeks: int = 16,
-    user: User = Depends(require_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_session),
 ):
     """Number of real games (pairings with two players; BYEs excluded) run
@@ -211,7 +211,7 @@ def games_over_time(
 def faction_popularity(
     system: str,
     top: int = 12,
-    user: User = Depends(require_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_session),
 ):
     """How often each faction has been fielded for one system, counting one
@@ -246,7 +246,7 @@ def faction_popularity(
 def rating_distribution(
     system: str,
     bucket: int = 50,
-    user: User = Depends(require_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_session),
 ):
     """Histogram of current league ratings for one system (all seasons'

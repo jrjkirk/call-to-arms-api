@@ -22,6 +22,7 @@ from auth import (
     club_runnable_scopes,
     current_user,
     get_session,
+    require_admin,
     require_platform_admin,
     require_super_admin,
     require_user,
@@ -64,22 +65,11 @@ GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-image.yml"
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def _require_any_admin(
-    user: User = Depends(require_user),
-    active: int = Depends(active_club_id),
-    db: Session = Depends(get_session),
-) -> User:
-    """403 unless the caller can administer the club they're currently in — any
-    scope at the active club (a platform admin qualifies at every club; a club's
-    own admin only in their own club). The authorized caller is re-based onto
-    the active club so the endpoint's scoped(X, user.club_id) queries act on it.
-
-    This is the base gate for every club-admin endpoint. Endpoints that need a
-    finer check still call _require_system_scope(system, user, db) on top — that
-    now sees the re-based user, so it authorizes against the active club too."""
-    if not admin_scopes(user, db, active):
-        raise HTTPException(status_code=403, detail="Admin access required.")
-    return _rebase_admin(user, active, db)
+# Base gate for every club-admin endpoint here: any admin scope at the ACTIVE
+# club, then re-base the caller onto it (see auth.require_admin). Endpoints that
+# need a finer check still call _require_system_scope(system, user, db) on top —
+# it sees the re-based user, so it authorizes against the active club too.
+_require_any_admin = require_admin
 
 
 @router.get("/me")
@@ -113,10 +103,10 @@ def onboarding_status(
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """First-run checklist state for the caller's own club — each item is a
-    boolean derived from real data, so it ticks itself off as the admin does
-    the setup. Powers the admin onboarding checklist. Home-club scoped, like
-    every other admin read (a visiting admin has no scopes elsewhere)."""
+    """First-run checklist state for the club the caller is currently
+    administering (the active club — the caller is re-based onto it by the gate).
+    Each item is a boolean derived from real data, so it ticks itself off as the
+    admin does the setup."""
     club_id = user.club_id
     club = db.get(Club, club_id)
     if club is None:
@@ -130,12 +120,10 @@ def onboarding_status(
         scoped(PublishState, club_id).where(PublishState.published == True)
     ).first() is not None
 
-    other_super_admins = db.exec(
-        select(User)
-        .where(User.club_id == club_id)
-        .where(User.is_super_admin == True)
-        .where(User.id != user.id)
-    ).first() is not None
+    # "co_admin" = has this club delegated any per-game-system admin (an
+    # AdminRole scope grant). Deliberately does NOT count super-admins — the
+    # step is about handing a specific system to a lieutenant, so a club with
+    # only its founding super-admin(s) and no scope grants reads as not-yet-done.
     any_scope_admin = db.exec(scoped(AdminRole, club_id)).first() is not None
 
     items = {
@@ -143,7 +131,7 @@ def onboarding_status(
         "logo": bool(club.logo_url),
         "systems_enabled": systems_enabled,
         "discord_webhook": webhook_set,
-        "co_admin": other_super_admins or any_scope_admin,
+        "co_admin": any_scope_admin,
         "first_pairings_published": pairings_published,
     }
     return {
