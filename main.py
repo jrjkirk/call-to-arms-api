@@ -119,10 +119,10 @@ def list_systems(response: Response, club: Optional[str] = None, session: Sessio
                 select(ClubSystem).where(ClubSystem.club_id == club_row.id)
             ).all():
                 overrides[cs.system_id] = cs
-    return [_system_dict(r, overrides.get(r.id)) for r in rows]
+    return [_system_dict(r, overrides.get(r.id), club_scoped=bool(club)) for r in rows]
 
 
-def _system_dict(r: SystemConfig, club_system=None) -> dict:
+def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -> dict:
     vibe_options = r.vibe_options
     default_vibe = r.default_vibe
     if club_system is not None and club_system.vibe_options:
@@ -149,9 +149,15 @@ def _system_dict(r: SystemConfig, club_system=None) -> dict:
         "allows_demo": r.allows_demo,
         # Per-club reality when club context is available (does THIS club run
         # a league for this system — ClubSystem.league_enabled, the source of
-        # truth since the modular-leagues work); falls back to the platform
-        # catalogue flag only for the fully-unscoped call (no club to ask).
-        "has_league": bool(club_system.league_enabled) if club_system is not None else r.has_league,
+        # truth since the modular-leagues work). If the call is club-scoped but
+        # the club doesn't run this system at all (no ClubSystem row), it has no
+        # league for it → False; a fully-unscoped call falls back to the
+        # platform catalogue flag. This is what keeps the Leagues tab and its
+        # system list from showing another system a club doesn't even run.
+        "has_league": (
+            bool(club_system.league_enabled) if club_system is not None
+            else (False if club_scoped else r.has_league)
+        ),
         # System *rules* — sourced from the hardcoded per-system modules in
         # systems/, keyed by legacy_system_name, NOT from the (dead)
         # SystemConfig.faction_list / icon_folder DB columns. None for any
