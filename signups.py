@@ -22,6 +22,7 @@ from database import active_player_id_for, get_session, resolve_webhook_url, sco
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
+from observability import capture
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
@@ -227,9 +228,12 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     if not url:
         return
     try:
-        httpx.post(url, json={"content": content}, timeout=5.0)
-    except Exception:
-        pass
+        resp = httpx.post(url, json={"content": content}, timeout=5.0)
+        resp.raise_for_status()
+    except Exception as e:
+        # Never break the request, but do surface a broken club webhook to
+        # Sentry instead of silently swallowing it (no-op if Sentry is off).
+        capture(e, kind="discord_webhook", club_id=club_id, system=system)
 
 
 def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int) -> None:

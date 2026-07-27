@@ -10,6 +10,11 @@ from sqlmodel import Session, select, or_
 from database import active_player_id_for, get_session, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
+from observability import init_sentry
+
+# Report unhandled API errors to Sentry (no-op unless SENTRY_DSN is set). Must
+# run before the app is created so the SDK can instrument it.
+init_sentry("api")
 from systems import factions_for, icon_folder_for
 from services import (
     compute_league_record,
