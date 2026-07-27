@@ -11,7 +11,9 @@ primary_region = "lhr"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  # Keep one machine always running so the first request after an idle spell
+  # (e.g. the first signup on a quiet club night) doesn't pay a cold-start wake.
+  min_machines_running = 1
 
 [[vm]]
   cpu_kind = "shared"

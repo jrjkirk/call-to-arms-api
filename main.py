@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime, timedelta
 from typing import Optional
 import httpx
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select, or_
@@ -65,13 +65,24 @@ def health():
     return {"status": "ok"}
 
 
+# Public, unauthenticated reads that are either global or keyed entirely by
+# their query string, so a shared browser/CDN cache can never leak one club's
+# private data to another. Short TTLs keep admin edits (vibes, banner, new
+# clubs) visibly fresh while cutting repeat round-trips on every page load.
+# Deliberately NOT applied to /club or /pairings — those vary by active club
+# (Origin/subdomain) and auth, where a shared cache key would be unsafe.
+_PUBLIC_CACHE = "public, max-age=60, stale-while-revalidate=300"
+_STATIC_CACHE = "public, max-age=3600, stale-while-revalidate=86400"
+
+
 @app.get("/platform-banner")
-def get_platform_banner(session: Session = Depends(get_session)):
+def get_platform_banner(response: Response, session: Session = Depends(get_session)):
     """Public read of the site-wide announcement banner, for the frontend
     to show at the top of every page (any club, logged in or not). Only
     ever returns the banner when active — an inactive/never-set banner
     looks identical to the frontend (active: False), so there's no need
     for a separate "does a banner exist" signal."""
+    response.headers["Cache-Control"] = _PUBLIC_CACHE
     banner = session.get(PlatformBanner, 1)
     if banner is None or not banner.active:
         return {"active": False, "message": "", "severity": "info"}
@@ -79,7 +90,7 @@ def get_platform_banner(session: Session = Depends(get_session)):
 
 
 @app.get("/systems")
-def list_systems(club: Optional[str] = None, session: Session = Depends(get_session)):
+def list_systems(response: Response, club: Optional[str] = None, session: Session = Depends(get_session)):
     """Public read of the systems-as-data catalogue (Phase 0), for the
     frontend to fetch signup-form config (vibes/scenarios/points) instead of
     keeping its own hardcoded copies. No auth required — this is the same
@@ -96,6 +107,7 @@ def list_systems(club: Optional[str] = None, session: Session = Depends(get_sess
     internally. This endpoint is a brand-new read path with no prior
     behavior to preserve, so it's always on.
     """
+    response.headers["Cache-Control"] = _PUBLIC_CACHE
     rows = session.exec(
         select(SystemConfig).where(SystemConfig.active == True)
     ).all()
@@ -168,11 +180,12 @@ def list_my_systems(user: User = Depends(require_user), club_id: int = Depends(a
 
 
 @app.get("/clubs")
-def list_clubs(session: Session = Depends(get_session)):
+def list_clubs(response: Response, session: Session = Depends(get_session)):
     """Public read of active clubs, for the frontend's club-picker at
     signup, and the multi-club map on the logged-out hero (which uses
     latitude/longitude — clubs without coordinates just don't get a pin).
     No auth required — same tone/structure as GET /systems."""
+    response.headers["Cache-Control"] = _PUBLIC_CACHE
     rows = session.exec(
         select(Club).where(Club.active == True)
     ).all()
@@ -191,10 +204,11 @@ def list_clubs(session: Session = Depends(get_session)):
 
 
 @app.get("/regions")
-def list_regions():
+def list_regions(response: Response):
     """The controlled vocabulary of UK regions (12 ONS ITL1 regions), for the
     club-profile region <select> and the region-grouped discovery dropdown.
     Public, static — no auth, no DB."""
+    response.headers["Cache-Control"] = _STATIC_CACHE
     return UK_REGIONS
 
 
