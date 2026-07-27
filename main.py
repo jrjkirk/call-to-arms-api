@@ -195,6 +195,25 @@ def list_clubs(response: Response, session: Session = Depends(get_session)):
     rows = session.exec(
         select(Club).where(Club.active == True)
     ).all()
+
+    # Each club's enabled systems, for the club-finder's "filter by system"
+    # (map pins + list). One grouped query over all active clubs, not per-club.
+    sys_by_club: dict[int, list[dict]] = {}
+    club_ids = [c.id for c in rows]
+    if club_ids:
+        pairs = session.exec(
+            select(ClubSystem, SystemConfig)
+            .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+            .where(ClubSystem.club_id.in_(club_ids))
+            .where(ClubSystem.enabled == True)
+            .where(SystemConfig.active == True)
+            .order_by(SystemConfig.name)
+        ).all()
+        for cs, sc in pairs:
+            sys_by_club.setdefault(cs.club_id, []).append(
+                {"slug": sc.slug, "name": sc.name, "legacy_system_name": sc.legacy_system_name}
+            )
+
     return [
         {
             "id": c.id,
@@ -204,6 +223,7 @@ def list_clubs(response: Response, session: Session = Depends(get_session)):
             "latitude": c.latitude,
             "longitude": c.longitude,
             "region": c.region,
+            "systems": sys_by_club.get(c.id, []),
         }
         for c in rows
     ]
