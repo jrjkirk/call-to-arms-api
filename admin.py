@@ -4000,7 +4000,8 @@ def platform_clubs_health(
         return {r[0]: r[1] for r in rows}
 
     def _ids(rows) -> set[int]:
-        return {r[0] for r in rows}
+        # session.exec() on a single-column select yields scalars, not rows.
+        return set(rows)
 
     systems = _counts(db.exec(
         select(ClubSystem.club_id, func.count()).where(ClubSystem.enabled == True).group_by(ClubSystem.club_id)
