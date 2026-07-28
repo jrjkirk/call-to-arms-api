@@ -10,11 +10,7 @@ from sqlmodel import Session, select, or_
 from database import active_player_id_for, get_session, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
-from observability import init_sentry
-
-# Report unhandled API errors to Sentry (no-op unless SENTRY_DSN is set). Must
-# run before the app is created so the SDK can instrument it.
-init_sentry("api")
+from observability import report_exception
 from systems import factions_for, icon_folder_for
 from services import (
     compute_league_record,
@@ -36,6 +32,20 @@ from analytics import router as analytics_router
 from call_outs import router as call_outs_router
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def _report_unhandled_errors(request, call_next):
+    """Alert on unhandled 500-level errors (to Discord, if ALERTS_WEBHOOK_URL is
+    set), then let Starlette return its normal 500 — reporting never changes the
+    response. Expected HTTPExceptions (4xx) are handled upstream and never reach
+    here, so only genuine bugs are reported."""
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        report_exception(exc, method=request.method, path=request.url.path)
+        raise
+
 
 app.add_middleware(
     CORSMiddleware,

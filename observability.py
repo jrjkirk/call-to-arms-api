@@ -1,65 +1,63 @@
-"""Optional Sentry error reporting.
+"""Lightweight error alerting to a Discord channel.
 
-A complete no-op unless the SENTRY_DSN env var is set, so local dev and any
-environment without the secret behave exactly as before (nothing is sent,
-nothing is imported eagerly). Once a DSN is configured (Fly secret for the API,
-GitHub secret for the crons), unhandled exceptions in the API and the scheduled
-scripts are reported automatically, plus any error we explicitly capture() —
-notably the Discord-webhook posts that are otherwise silently swallowed.
+Free and self-contained — no third-party service. A complete no-op unless
+ALERTS_WEBHOOK_URL is set, so local dev and any environment without the secret
+behave exactly as before. When set, unhandled API errors and otherwise-swallowed
+failures (notably broken club Discord webhooks) post to that channel.
 
-Set up: create a Sentry project, then
-    fly secrets set SENTRY_DSN=<dsn> -a call-to-arms-api      # API
-and add SENTRY_DSN to the GitHub repo secrets                 # crons
+Set up: make a private #alerts channel, add a Discord webhook to it, then
+    fly secrets set ALERTS_WEBHOOK_URL=<webhook-url> -a call-to-arms-api
+
+Identical alerts are throttled (once per window) so a repeating error can't
+spam the channel. Throttle state is in-process — fine here since prod runs a
+single always-on machine; at worst a duplicate alert after a redeploy/restart.
 """
 import os
+import time
+import traceback
 
-_initialised = False
+_WINDOW_SECONDS = 600  # don't repeat the same alert within 10 minutes
+_last_sent: dict[str, float] = {}
 
 
-def init_sentry(component: str) -> None:
-    """Initialise Sentry if SENTRY_DSN is set; otherwise do nothing. Safe to
-    call more than once. `component` tags events as "api" or "cron"."""
-    global _initialised
-    if _initialised:
+def _post(content: str) -> None:
+    url = os.environ.get("ALERTS_WEBHOOK_URL")
+    if not url:
         return
-    dsn = os.environ.get("SENTRY_DSN")
-    if not dsn:
+    try:
+        import httpx
+
+        httpx.post(url, json={"content": content[:1900]}, timeout=5.0)
+    except Exception:
+        # Alerting must never itself break anything.
+        pass
+
+
+def report(title: str, detail: str = "", **context) -> None:
+    """Post an alert, throttling identical ones (same title + context)."""
+    if not os.environ.get("ALERTS_WEBHOOK_URL"):
         return
-
-    import sentry_sdk
-
-    sentry_sdk.init(
-        dsn=dsn,
-        environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-        # Errors only — no performance tracing, to keep quota and noise down.
-        traces_sample_rate=0.0,
-        # Never attach cookies / headers / client IP (would include the
-        # cta_session auth cookie); we also drop request body/cookies below.
-        send_default_pii=False,
-        before_send=_scrub,
-    )
-    sentry_sdk.set_tag("component", component)
-    _initialised = True
-
-
-def _scrub(event, hint):
-    """Defensively strip request body + cookies from events — they can carry
-    player names / the session cookie, which we never want to ship."""
-    req = event.get("request")
-    if isinstance(req, dict):
-        req.pop("data", None)
-        req.pop("cookies", None)
-    return event
-
-
-def capture(exc: BaseException, **tags) -> None:
-    """Report an otherwise-swallowed exception (e.g. a failed Discord webhook),
-    with optional tags. No-op when Sentry isn't configured."""
-    if not _initialised:
+    sig = title + "|" + "|".join(f"{k}={v}" for k, v in sorted(context.items()))
+    now = time.time()
+    last = _last_sent.get(sig)
+    if last is not None and now - last < _WINDOW_SECONDS:
         return
-    import sentry_sdk
+    _last_sent[sig] = now
 
-    with sentry_sdk.new_scope() as scope:
-        for k, v in tags.items():
-            scope.set_tag(k, v)
-        sentry_sdk.capture_exception(exc)
+    content = f"🚨 **{title}**"
+    if context:
+        content += "\n" + " ".join(f"`{k}={v}`" for k, v in context.items())
+    if detail:
+        content += f"\n```\n{detail[:1500]}\n```"
+    _post(content)
+
+
+def capture(exc: BaseException, **context) -> None:
+    """Report a caught, otherwise-swallowed exception (e.g. a failed webhook)."""
+    report(f"{type(exc).__name__}: {exc}", **context)
+
+
+def report_exception(exc: BaseException, **context) -> None:
+    """Report an unhandled exception, with a short traceback for debugging."""
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    report(f"Unhandled {type(exc).__name__}: {exc}", detail=tb, **context)
