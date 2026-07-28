@@ -130,6 +130,9 @@ def onboarding_status(
     items = {
         "profile_blurb": bool((club.blurb or "").strip()),
         "logo": bool(club.logo_url),
+        # The public Discord invite shown front-and-centre on the club page —
+        # distinct from discord_webhook (the app's posting webhook) below.
+        "discord_link": bool(club.discord_url),
         "systems_enabled": systems_enabled,
         "discord_webhook": webhook_set,
         "co_admin": any_scope_admin,
