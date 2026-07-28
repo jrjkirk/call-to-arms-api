@@ -515,11 +515,11 @@ def generate(
                 other = candidates[j]
                 if other.key in used:
                     continue
-                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config)
+                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config, pconfig)
                 if best_dist is None or d < best_dist:
                     best_dist = d
                     best_j = j
-                    if d[:8] == (0, 0, 0, 0, 0, 0, 0, 0):
+                    if d == (0, 0, 0):
                         break
 
         if best_j is not None:

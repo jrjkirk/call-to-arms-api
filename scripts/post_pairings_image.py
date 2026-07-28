@@ -59,6 +59,10 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         files={"file": ("pairings.png", buf, "image/png")},
         timeout=30,
     )
+    # Surface a broken/misconfigured webhook (404/401/413…) instead of claiming
+    # success — the caller records it as a job error rather than silently
+    # "posting" nothing.
+    resp.raise_for_status()
     print(f"Posted pairings image for {system!r} {week!r} ({resp.status_code}).")
     return True
 
