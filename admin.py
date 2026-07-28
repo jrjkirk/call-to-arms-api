@@ -41,7 +41,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
+from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
@@ -96,6 +96,9 @@ def admin_me(
         "is_super_admin": is_super,
         "is_platform_admin": user.is_platform_admin,
         "scopes": sorted(scopes),
+        # Global support/community Discord link (platform-admin set), shown on
+        # the admin page so any admin can reach the support server.
+        "community_discord_url": _community_discord_url(db),
     }
 
 
@@ -3723,6 +3726,49 @@ def set_platform_banner(
     db.commit()
     db.refresh(banner)
     return _banner_dict(banner)
+
+
+# Community/support Discord link — a single global URL (platform-admin set),
+# shown on every club's admin page so admins can reach the support server.
+_COMMUNITY_DISCORD_KEY = "community_discord_url"
+
+
+def _community_discord_url(db: Session) -> Optional[str]:
+    row = db.get(AppSetting, _COMMUNITY_DISCORD_KEY)
+    return row.value if row else None
+
+
+class CommunityDiscordBody(BaseModel):
+    url: Optional[str] = None
+
+
+@router.get("/platform/community-discord")
+def get_community_discord(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    return {"url": _community_discord_url(db)}
+
+
+@router.post("/platform/community-discord")
+def set_community_discord(
+    body: CommunityDiscordBody,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    url = (body.url or "").strip() or None
+    if url is not None and not (url.startswith("https://") or url.startswith("http://")):
+        raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
+    row = db.get(AppSetting, _COMMUNITY_DISCORD_KEY)
+    if row is None:
+        row = AppSetting(key=_COMMUNITY_DISCORD_KEY, value=url)
+    else:
+        row.value = url
+        row.updated_at = datetime.utcnow()
+    db.add(row)
+    log_audit(db, user, "community_discord.update", "app_setting", None, f"url={url!r}")
+    db.commit()
+    return {"url": url}
 
 
 # Every scheduled job that calls record_job_run() — kept as one list so the
