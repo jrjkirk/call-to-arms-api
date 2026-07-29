@@ -11,7 +11,7 @@ from database import active_player_id_for, get_session, resolve_request_club_id,
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
-from systems import factions_for, icon_folder_for
+from systems import factions_for, faction_groups_for, icon_folder_for
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -178,6 +178,9 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
         # SystemConfig.faction_list / icon_folder DB columns. None for any
         # catalogue system without a hardcoded ruleset yet.
         "faction_list": factions_for(r.legacy_system_name),
+        # Grouped factions ([{label, factions}]) for systems that define them
+        # (Middle Earth's Good/Evil), else null → frontend renders the flat list.
+        "faction_groups": faction_groups_for(r.legacy_system_name),
         "icon_folder": icon_folder_for(r.legacy_system_name),
     }
 

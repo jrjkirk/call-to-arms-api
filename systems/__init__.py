@@ -18,9 +18,9 @@ module here (e.g. a newly-added one) simply has no hardcoded ruleset yet;
 the accessors return None so callers can fall back cleanly.
 """
 
-from . import age_of_sigmar, horus_heresy, kill_team, old_world, warhammer_40k
+from . import age_of_sigmar, horus_heresy, kill_team, middle_earth, old_world, warhammer_40k
 
-_MODULES = (old_world, horus_heresy, kill_team, age_of_sigmar, warhammer_40k)
+_MODULES = (old_world, horus_heresy, kill_team, age_of_sigmar, warhammer_40k, middle_earth)
 
 # legacy_system_name -> rules module
 SYSTEM_RULES = {m.LEGACY_SYSTEM_NAME: m for m in _MODULES}
@@ -36,6 +36,18 @@ def factions_for(legacy_system_name: str):
     """The system's hardcoded faction list (a fresh copy), or None."""
     module = SYSTEM_RULES.get(legacy_system_name)
     return list(module.FACTIONS) if module else None
+
+
+def faction_groups_for(legacy_system_name: str):
+    """Grouped faction lists ([{"label", "factions"}, ...]) for systems whose
+    module defines FACTION_GROUPS (e.g. Middle Earth's Good/Evil), else None.
+    Lets the frontend render <optgroup>s; systems without groups fall back to
+    the flat faction_list."""
+    module = SYSTEM_RULES.get(legacy_system_name)
+    groups = getattr(module, "FACTION_GROUPS", None) if module else None
+    if not groups:
+        return None
+    return [{"label": label, "factions": list(factions)} for label, factions in groups]
 
 
 def icon_folder_for(legacy_system_name: str):
