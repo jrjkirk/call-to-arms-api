@@ -27,6 +27,7 @@ from signups import (
     _require_system_enabled,
     _effective_vibe_config,
     _require_linked_player,
+    require_discord_member,
     _post_webhook,
 )
 
@@ -143,6 +144,7 @@ def create_call_out(
     _require_system_enabled(db, club_id, body.system)
 
     player = _require_linked_player(user, db, club_id)
+    require_discord_member(db, player, club_id)
 
     game_at = _parse_game_at(body.game_date, body.game_time)
     if game_at <= now_uk_naive():
@@ -205,6 +207,7 @@ def take_call_out(
     db: Session = Depends(get_session),
 ):
     taker = _require_linked_player(user, db, club_id)
+    require_discord_member(db, taker, club_id)
     c = _get_owned_call_out(db, call_out_id, club_id)
 
     if c.status != "open":

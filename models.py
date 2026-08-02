@@ -50,6 +50,12 @@ class Player(SQLModel, table=True):
     # links coexist and are kept consistent; User.player_id stays the source of
     # truth for the user's *home*-club player until the call-site sweep lands.
     user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    # Discord-guild gate (2026-08-02): stamped the first time this player is
+    # confirmed to be a member of their club's Discord server, and never
+    # cleared. Acts as the cache that keeps the gate to ONE Discord API call
+    # per player for their entire life — every later signup just reads this
+    # column. NULL means "not yet checked", not "not a member".
+    discord_verified_at: Optional[datetime] = Field(default=None)
 
 
 class Signup(SQLModel, table=True):
@@ -428,6 +434,18 @@ class Club(SQLModel, table=True):
     # region header in the discovery dropdown. Nullable — a club with no region
     # set just sorts under an "Other" heading rather than being hidden.
     region: Optional[str] = None
+
+    # Discord-guild gate (2026-08-02). The club's Discord server ("guild")
+    # snowflake id. NULL = the gate is OFF for this club, whatever the mode
+    # setting says — so the feature is inert until a club deliberately sets
+    # this. Usually auto-derived from discord_url (an invite code resolves to
+    # its guild), with a manual admin field as the fallback for clubs whose
+    # Discord is run by someone outside the app's admin team.
+    # NOT a secret: a guild id grants nothing on its own — the bot can only
+    # read a guild it has been separately invited into. Stored as text
+    # because snowflakes exceed a 32-bit int and are only ever compared, not
+    # arithmetic'd.
+    discord_guild_id: Optional[str] = None
 
 
 class ClubSystem(SQLModel, table=True):

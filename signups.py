@@ -19,7 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import active_player_id_for, get_session, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club
+import discord_guild
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
 from observability import capture
@@ -151,6 +152,100 @@ def _require_linked_player(user: User, db: Session, club_id: int) -> Player:
     if player is None or not player.active:
         raise HTTPException(status_code=400, detail="Linked player profile not found.")
     return player
+
+
+def is_first_signup(db: Session, player_id: Optional[int], club_id: int, system: Optional[str] = None) -> bool:
+    """Has this player never signed up before — at this club, or for this
+    system if one is given?
+
+    Shared detection point. Three separate features want this same question:
+    the Discord gate below (only new faces are checked), new-player visibility
+    for admins, and a "new challenger" flourish on a first signup post. Keep
+    them on one implementation so they can never disagree about who counts as
+    new. Guests (player_id None) are never "first" — they have no history to
+    have, and nothing downstream should treat them as a new member.
+    """
+    if player_id is None:
+        return False
+    q = scoped(Signup, club_id).where(Signup.player_id == player_id)
+    if system is not None:
+        q = q.where(Signup.system == system)
+    return db.exec(q).first() is None
+
+
+def _discord_gate_mode(db: Session, club_id: int) -> str:
+    """'off' | 'monitor' | 'enforce' for this club. Defaults to 'off' so the
+    gate is inert everywhere until a club deliberately turns it on."""
+    mode = (get_setting(db, club_id, "discord_gate_mode", "off") or "off").strip().lower()
+    return mode if mode in {"off", "monitor", "enforce"} else "off"
+
+
+def require_discord_member(db: Session, player: Player, club_id: int) -> None:
+    """Gate the commit-to-play actions on being in the club's Discord server.
+
+    The point isn't identity-checking for its own sake: pairings, drops and
+    call-outs are all announced in that Discord, so someone outside it can't
+    find out they've been paired. Being in the server is what makes the rest
+    of the app work for them.
+
+    Runs at most ONE Discord API call per player, ever — a verified player
+    short-circuits on a single column read, which is why this is safe to put
+    on the hot signup path. Fails open at every step: no guild id, no bot
+    token, an unclaimed/guest player, or an undetermined answer all let the
+    caller through.
+    """
+    if player.discord_verified_at is not None:
+        return  # already verified — the overwhelmingly common path
+
+    club = db.get(Club, club_id)
+    if club is None or not club.discord_guild_id:
+        return  # no server configured: gate off for this club
+
+    mode = _discord_gate_mode(db, club_id)
+    if mode == "off":
+        return
+
+    # No Discord identity to check: unclaimed roster entries and admin-created
+    # players. An admin vouching for someone must never be blocked by this.
+    if player.user_id is None:
+        return
+    account = db.get(User, player.user_id)
+    if account is None or not account.discord_id:
+        return
+
+    member = discord_guild.is_guild_member(club.discord_guild_id, account.discord_id)
+
+    if member is True:
+        player.discord_verified_at = datetime.utcnow()
+        db.add(player)
+        db.commit()
+        return
+
+    if member is None:
+        return  # undetermined — fail open (already reported by discord_guild)
+
+    if mode == "monitor":
+        # Deliberately allowed. Monitor mode exists so a club can see who
+        # WOULD be blocked before anyone actually is; logged rather than
+        # alerted so a busy signup night doesn't spam the alerts channel.
+        print(
+            f"[discord_gate] MONITOR would block player={player.id} "
+            f"({player.name!r}) club={club_id} guild={club.discord_guild_id}"
+        )
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "discord_membership_required",
+            "message": (
+                f"Join {club.name}'s Discord to sign up — that's where pairings "
+                f"and reminders get posted."
+            ),
+            "club_name": club.name,
+            "discord_url": club.discord_url,
+        },
+    )
 
 
 def _validate_week(week: str) -> str:
@@ -361,6 +456,7 @@ def submit_signup(
     db: Session = Depends(get_session),
 ):
     player = _require_linked_player(user, db, club_id)
+    require_discord_member(db, player, club_id)
 
     config = _get_system_config(db, body.system)
     if config is None:
@@ -578,6 +674,15 @@ def submit_prearranged(
         raise HTTPException(status_code=422, detail="Unknown system.")
 
     _require_system_enabled(db, club_id, body.system)
+
+    # The gate applies to the CALLER, not to player_a/player_b — a caller with
+    # no player at this club is left alone, matching this endpoint's existing
+    # (deliberately loose) handling of who may arrange a game.
+    caller_player_id = active_player_id_for(db, user, club_id)
+    if caller_player_id is not None:
+        caller_player = db.get(Player, caller_player_id)
+        if caller_player is not None:
+            require_discord_member(db, caller_player, club_id)
 
     week = _validate_week(body.week)
 
