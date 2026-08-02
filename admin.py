@@ -4382,41 +4382,61 @@ class DiscordGateBody(BaseModel):
 _GATE_MODES = {"off", "monitor", "enforce"}
 
 
-def _discord_gate_state(club: Club, db: Session) -> dict:
-    """Everything the admin panel needs to render the gate section, including
-    which half of setup is missing and why enforcement may not be available."""
-    identity = discord_guild.bot_identity()
-    bot_configured = identity is not None
+def _connected_guild_name(guild_id: Optional[str], guilds: Optional[list]) -> Optional[str]:
+    """The guild's name if the bot is in it, else None. Read from the list we
+    already fetched rather than a second lookup."""
+    if not guild_id or guilds is None:
+        return None
+    for g in guilds:
+        if g.get("id") == guild_id:
+            return g.get("name")
+    return None
 
-    guild_id = club.discord_guild_id
-    name = discord_guild.guild_name(guild_id) if (guild_id and bot_configured) else None
+
+def _discord_gate_state(guild_id: Optional[str], club_discord_url: Optional[str], mode: str) -> dict:
+    """Everything the admin panel needs to render the gate section.
+
+    Takes plain values, not a live Club/Session, because callers MUST release
+    their database connection before calling this — it makes external HTTP
+    calls to Discord, and this endpoint is loaded as part of the admin page's
+    ~40-request parallel burst. Holding a Supabase pooler connection open
+    across that latency is what turns a burst into dropped connections.
+
+    One Discord call in the normal case: `bot_guilds()` answers "is the bot
+    configured", "which servers is it in", and "what is ours called" at once.
+    (It pages at 200 guilds — far beyond this platform's scale, and the club
+    picker would be unusable long before that anyway.)
+    """
+    guilds = discord_guild.bot_guilds()
+    bot_configured = guilds is not None
+
+    name = _connected_guild_name(guild_id, guilds)
     connected = name is not None
 
     # Only offer a suggestion when nothing is set yet — never nag an admin who
     # has deliberately pointed the gate at a different server than the invite.
+    # Costs a second call, but only in the not-yet-configured state.
     suggested = None
-    if not guild_id:
-        suggested = discord_guild.resolve_invite_guild_id(club.discord_url)
-
-    guilds = discord_guild.bot_guilds() if bot_configured else None
+    if not guild_id and bot_configured:
+        suggested = discord_guild.resolve_invite_guild_id(club_discord_url)
 
     return {
         "bot_configured": bot_configured,
-        "bot_username": identity.get("username") if identity else None,
+        "bot_username": None,
         "bot_invite_url": (
             discord_guild.bot_invite_url(DISCORD_CLIENT_ID) if DISCORD_CLIENT_ID else None
         ),
         "guild_id": guild_id,
         "guild_name": name,
         "connected": connected,
-        "mode": _discord_gate_mode(db, club.id),
+        "mode": mode,
         # Enforcement is refused unless the check can actually run. A club
         # sitting on "enforce" with no working connection would fail open on
         # every signup while the UI claimed the gate was on — false
         # reassurance is worse than being plainly off.
         "can_enforce": connected,
         "suggested_guild_id": suggested,
-        "club_discord_url": club.discord_url,
+        "club_discord_url": club_discord_url,
         "available_guilds": guilds,
     }
 
@@ -4429,7 +4449,13 @@ def get_discord_gate(
     club = db.get(Club, user.club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="Club not found")
-    return _discord_gate_state(club, db)
+    guild_id, club_discord_url = club.discord_guild_id, club.discord_url
+    mode = _discord_gate_mode(db, club.id)
+    # Release the pooler connection before any Discord call. The engine uses
+    # NullPool, so every request is a real new connection to Supabase's
+    # transaction pooler and there are only so many to go round.
+    db.close()
+    return _discord_gate_state(guild_id, club_discord_url, mode)
 
 
 @router.post("/discord-gate")
@@ -4475,7 +4501,7 @@ def set_discord_gate(
                     status_code=422,
                     detail="Set your club's Discord server before turning the gate on.",
                 )
-            if discord_guild.guild_name(club.discord_guild_id) is None:
+            if _connected_guild_name(club.discord_guild_id, discord_guild.bot_guilds()) is None:
                 raise HTTPException(
                     status_code=422,
                     detail=(
@@ -4488,4 +4514,7 @@ def set_discord_gate(
         log_audit(db, user, "discord_gate_mode", target_type="club",
                   target_id=club.id, detail=f"mode={mode}")
 
-    return _discord_gate_state(club, db)
+    guild_id, club_discord_url = club.discord_guild_id, club.discord_url
+    mode_now = _discord_gate_mode(db, club.id)
+    db.close()  # release before the Discord calls, same as the GET path
+    return _discord_gate_state(guild_id, club_discord_url, mode_now)
