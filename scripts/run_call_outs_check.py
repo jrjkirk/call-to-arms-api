@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from sqlmodel import Session, select
 
-from database import engine, record_job_run
+from database import engine, name_with_mention, record_job_run
 from models import CallOut
 from call_outs import now_uk_naive, _webhook_content
 from signups import _post_webhook
@@ -53,7 +53,11 @@ def main() -> None:
                 if c.last_reminder_at is None or (now - c.last_reminder_at) >= REMINDER_INTERVAL:
                     _post_webhook(
                         db, c.club_id, c.system,
-                        _webhook_content(c, f"⏳ **Still looking for a game** — {c.creator_name} has an open Call Out"),
+                        _webhook_content(
+                            c,
+                            f"⏳ **Still looking for a game** — "
+                            f"{name_with_mention(db, c.creator_name, c.creator_player_id)} has an open Call Out",
+                        ),
                     )
                     c.last_reminder_at = now
                     c.updated_at = now

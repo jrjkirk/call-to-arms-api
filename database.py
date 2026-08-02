@@ -122,6 +122,50 @@ def resolve_webhook_url(
     return row.url if row else None
 
 
+def discord_mentions_for_player_ids(
+    db: Session, player_ids: list[int]
+) -> dict[int, str]:
+    """Map player_id -> a Discord mention string (`<@discord_id>`) for every
+    player that is linked to a Discord account.
+
+    Players with no linked account are simply absent from the result, so
+    callers fall back to the plain name — that covers pre-seeded roster
+    entries nobody has claimed and guest/+1 signups (which have no player
+    row at all). Ownership is read from `Player.user_id`, the network-model
+    link, not the legacy `User.player_id` (which only ever covered a user's
+    home club).
+    """
+    ids = [pid for pid in player_ids if pid]
+    if not ids:
+        return {}
+    players = db.exec(
+        select(Player).where(Player.id.in_(ids)).where(Player.user_id.is_not(None))
+    ).all()
+    user_ids = {p.user_id for p in players}
+    if not user_ids:
+        return {}
+    users = db.exec(select(User).where(User.id.in_(user_ids))).all()
+    discord_by_user_id = {u.id: u.discord_id for u in users if u.discord_id}
+    return {
+        p.id: f"<@{discord_by_user_id[p.user_id]}>"
+        for p in players
+        if p.user_id in discord_by_user_id
+    }
+
+
+def name_with_mention(db: Session, player_name: str, player_id: Optional[int]) -> str:
+    """`**Name** (<@discord_id>)` when the player is linked to a Discord
+    account, plain `**Name**` otherwise (unclaimed roster entries, guests).
+
+    The shared format for every Discord post that names a player — signups,
+    drops, byes and call-outs — so a tag always reads the same way.
+    """
+    if player_id is None:
+        return f"**{player_name}**"
+    mention = discord_mentions_for_player_ids(db, [player_id]).get(player_id)
+    return f"**{player_name}** ({mention})" if mention else f"**{player_name}**"
+
+
 def resolve_single_active_club_id(db: Session) -> int:
     """Resolve the one active club, for callers with no other way to know
     which club they're serving (no authenticated user, no subdomain

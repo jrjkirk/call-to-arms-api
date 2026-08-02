@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import active_player_id_for, get_session, resolve_webhook_url, scoped, system_setting_slug, get_setting
+from database import active_player_id_for, get_session, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
@@ -228,7 +228,15 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     if not url:
         return
     try:
-        resp = httpx.post(url, json={"content": content}, timeout=5.0)
+        resp = httpx.post(
+            url,
+            # allowed_mentions restricts pings to explicit user mentions we
+            # build ourselves. Without it Discord parses the whole message,
+            # so a player whose name contained "@everyone" would ping the
+            # server every time they signed up.
+            json={"content": content, "allowed_mentions": {"parse": ["users"]}},
+            timeout=5.0,
+        )
         resp.raise_for_status()
     except Exception as e:
         # Never break the request, but do surface a broken club webhook to
@@ -236,20 +244,22 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
         capture(e, kind="discord_webhook", club_id=club_id, system=system)
 
 
-def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int) -> None:
+def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int, player_id: Optional[int] = None) -> None:
     faction_label = faction or "Unknown faction"
     vibe_label = vibe or "Unknown vibe"
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
-    _post_webhook(db, club_id, system, f"📝 **{player_name}** signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+    who = name_with_mention(db, player_name, player_id)
+    _post_webhook(db, club_id, system, f"📝 {who} signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
 
 
-def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int) -> None:
+def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int, player_id: Optional[int] = None) -> None:
     faction_label = faction or "Unknown faction"
     vibe_label = vibe or "Unknown vibe"
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
-    _post_webhook(db, club_id, system, f"❌ **{player_name}** dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+    who = name_with_mention(db, player_name, player_id)
+    _post_webhook(db, club_id, system, f"❌ {who} dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
 
 
 def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dict]:
@@ -278,6 +288,7 @@ def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dic
         if su:
             result.append({
                 "player_name": su.player_name,
+                "player_id": su.player_id,
                 "signup_id": p.a_signup_id,
                 "is_new": False,
             })
@@ -286,18 +297,26 @@ def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dic
 
 
 def _build_bye_discord_message(
+    db: Session,
     header: str,
     newly_displaced_names: list[str],
     all_byes: list[dict],
     app_url: str,
 ) -> str:
-    """Build a consistent Discord message for swap/drop events."""
+    """Build a consistent Discord message for swap/drop events.
+
+    Players left without an opponent are tagged, in the same
+    `**Name** (<@id>)` format as the signup posts — this is the one message
+    that specifically needs to reach the affected player, not just the
+    channel.
+    """
     if not all_byes:
         return f"{header}\n\n➡️ {app_url}" if app_url else header
     lines = [header, "", "⚠️ The following players are now without an opponent this week:"]
     for bye in all_byes:
         suffix = " (existing bye)" if not bye["is_new"] else ""
-        lines.append(f"• {bye['player_name']}{suffix}")
+        who = name_with_mention(db, bye["player_name"], bye.get("player_id"))
+        lines.append(f"• {who}{suffix}")
     lines.append("")
     lines.append(f"Head to the app to re-arrange your game: {app_url}")
     return "\n".join(lines)
@@ -429,7 +448,7 @@ def submit_signup(
     db.refresh(su)
 
     if created:
-        _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id)
+        _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id, player_id=player.id)
 
     return {"ok": True, "created": created, "signup": su}
 
@@ -501,7 +520,8 @@ def drop_signup(
             if bye["player_name"] in newly_displaced_names:
                 bye["is_new"] = True
         content = _build_bye_discord_message(
-            header=f"❌ **{player.name}** has dropped out of this week's session.",
+            db,
+            header=f"❌ {name_with_mention(db, player.name, player.id)} has dropped out of this week's session.",
             newly_displaced_names=newly_displaced_names,
             all_byes=all_byes,
             app_url=APP_PUBLIC_URL,
@@ -540,7 +560,7 @@ def drop_signup(
 
     db.commit()
 
-    _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id)
+    _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id, player_id=player.id)
 
     return {"ok": True, "dropped": True}
 
@@ -827,7 +847,11 @@ def swap_signups(
         if bye["player_name"] in newly_displaced_names:
             bye["is_new"] = True
     content = _build_bye_discord_message(
-        header=f"🔀 **{x_name}** and **{y_name}** have re-arranged their games!",
+        db,
+        header=(
+            f"🔀 {name_with_mention(db, x_name, x_signup.player_id)} and "
+            f"{name_with_mention(db, y_name, y_signup.player_id)} have re-arranged their games!"
+        ),
         newly_displaced_names=newly_displaced_names,
         all_byes=all_byes,
         app_url=APP_PUBLIC_URL,

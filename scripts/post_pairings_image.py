@@ -16,10 +16,54 @@ import os
 import httpx
 from sqlmodel import Session, select
 
-from database import engine, resolve_webhook_url, scoped
+from database import discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
 from models import Club, ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
 from render_pairings_image import render_pairings_image
+
+
+# Discord hard-limits a message's content to 2000 characters. The pairings
+# image carries the actual information, so if a club ever fields enough
+# players to blow the budget we drop the overflow mentions rather than have
+# Discord reject the whole post (image included).
+_CONTENT_LIMIT = 1900
+
+
+def _mention_line(db: Session, rows: list, signups_by_id: dict) -> str:
+    """A space-separated `<@id>` list for everyone in this week's pairings,
+    in pairing order, so being tagged tells you that you're playing.
+
+    The pairings themselves are rendered into the PNG — a mention inside an
+    embed or an image can't notify anyone, so the tags have to ride in the
+    message content to actually ping. Players with no linked Discord account
+    (unclaimed roster entries, guests) are silently skipped; they still
+    appear by name in the image.
+    """
+    player_ids: list[int] = []
+    for r in rows:
+        for signup_id in (r.a_signup_id, r.b_signup_id):
+            if not signup_id:
+                continue
+            su = signups_by_id.get(signup_id)
+            if su is not None and su.player_id and su.player_id not in player_ids:
+                player_ids.append(su.player_id)
+
+    mentions_by_player = discord_mentions_for_player_ids(db, player_ids)
+    mentions = [mentions_by_player[pid] for pid in player_ids if pid in mentions_by_player]
+    if not mentions:
+        return ""
+
+    line = " ".join(mentions)
+    if len(line) > _CONTENT_LIMIT:
+        kept: list[str] = []
+        used = 0
+        for m in mentions:
+            if used + len(m) + 1 > _CONTENT_LIMIT:
+                break
+            kept.append(m)
+            used += len(m) + 1
+        line = " ".join(kept)
+    return line
 
 
 def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -> bool:
@@ -53,9 +97,20 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         return False
 
     content = f"📋 **{system} — Pairings for {week}**"
+    mention_line = _mention_line(db, rows, signups_by_id)
+    if mention_line:
+        content = f"{content}\n{mention_line}"
+
     resp = httpx.post(
         webhook_url,
-        data={"payload_json": json.dumps({"content": content})},
+        data={
+            "payload_json": json.dumps({
+                "content": content,
+                # Ping only the users we explicitly mention — never @everyone
+                # /@here/roles, whatever a player has called themselves.
+                "allowed_mentions": {"parse": ["users"]},
+            })
+        },
         files={"file": ("pairings.png", buf, "image/png")},
         timeout=30,
     )

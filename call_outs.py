@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import active_player_id_for, get_session, scoped
+from database import active_player_id_for, get_session, name_with_mention, scoped
 from models import CallOut, User
 from auth import active_club_id, require_user
 from signups import (
@@ -178,7 +178,10 @@ def create_call_out(
     db.refresh(call_out)
 
     try:
-        _post_webhook(db, club_id, body.system, _webhook_content(call_out, f"📣 **Call Out!** {call_out.creator_name} is looking for a game"))
+        _post_webhook(db, club_id, body.system, _webhook_content(
+            call_out,
+            f"📣 **Call Out!** {name_with_mention(db, call_out.creator_name, call_out.creator_player_id)} is looking for a game",
+        ))
     except Exception:
         pass
 
@@ -225,7 +228,10 @@ def take_call_out(
     db.refresh(c)
 
     try:
-        header = f"✅ **Call Out taken!** {taker.name} is playing {c.creator_name}"
+        header = (
+            f"✅ **Call Out taken!** {name_with_mention(db, taker.name, taker.id)} "
+            f"is playing {name_with_mention(db, c.creator_name, c.creator_player_id)}"
+        )
         _post_webhook(db, club_id, c.system, _webhook_content(c, header))
     except Exception:
         pass
