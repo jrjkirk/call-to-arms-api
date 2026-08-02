@@ -339,13 +339,30 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
         capture(e, kind="discord_webhook", club_id=club_id, system=system)
 
 
-def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int, player_id: Optional[int] = None) -> None:
+def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int, player_id: Optional[int] = None, first_ever: bool = False) -> None:
+    """Announce a signup. A player's FIRST ever signup for this system gets a
+    louder post — the club sees a new face arriving rather than another line
+    in the weekly list, which is the moment someone is most likely to get a
+    welcome. `first_ever` must be decided by the caller before the row is
+    written (see submit_signup)."""
     faction_label = faction or "Unknown faction"
     vibe_label = vibe or "Unknown vibe"
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
     who = name_with_mention(db, player_name, player_id)
-    _post_webhook(db, club_id, system, f"📝 {who} signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+
+    if first_ever:
+        content = (
+            f"🎉 **A NEW CHALLENGER APPROACHES!**\n"
+            f"{who} has joined the muster for their first game of {system} — "
+            f"⚔️ {faction_label} • 🎭 {vibe_label}\n"
+            f"📊 {phrase}: {count}\n"
+            f"👋 Give them a warm welcome!"
+        )
+    else:
+        content = f"📝 {who} signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}"
+
+    _post_webhook(db, club_id, system, content)
 
 
 def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vibe: Optional[str], system: str, week: str, club_id: int, player_id: Optional[int] = None) -> None:
@@ -502,6 +519,11 @@ def submit_signup(
 
     created = not bool(existing)
 
+    # Must be answered BEFORE the row is inserted below — once it exists, the
+    # player trivially has a signup for this system and would never read as
+    # new. Captured here and carried through to the Discord post.
+    first_ever = created and is_first_signup(db, player.id, club_id, body.system)
+
     # Signup cap: block a *new* signup once the session is full. Players
     # editing their existing entry are always allowed through.
     if created:
@@ -544,7 +566,7 @@ def submit_signup(
     db.refresh(su)
 
     if created:
-        _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id, player_id=player.id)
+        _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id, player_id=player.id, first_ever=first_ever)
 
     return {"ok": True, "created": created, "signup": su}
 
