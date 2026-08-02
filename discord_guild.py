@@ -122,6 +122,43 @@ def guild_name(guild_id: str) -> Optional[str]:
     return resp.json().get("name")
 
 
+def bot_identity() -> Optional[dict]:
+    """`{"id", "username"}` for the bot itself, or None if the token is
+    missing or rejected. Lets the admin panel distinguish "the platform has
+    no bot configured" from "your club hasn't added it yet" — two problems
+    with completely different owners."""
+    if not is_configured():
+        return None
+    try:
+        resp = httpx.get(
+            f"{DISCORD_API}/users/@me", headers=_headers(), timeout=_TIMEOUT
+        )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    d = resp.json()
+    return {"id": d.get("id"), "username": d.get("username")}
+
+
+def bot_guilds() -> Optional[list[dict]]:
+    """`[{"id", "name"}, ...]` for every guild the bot has been added to, or
+    None if undetermined. Powers the admin guild picker, so an admin chooses
+    their server by NAME instead of hunting for a snowflake in Developer
+    Mode — and it doubles as proof the bot was actually added."""
+    if not is_configured():
+        return None
+    try:
+        resp = httpx.get(
+            f"{DISCORD_API}/users/@me/guilds", headers=_headers(), timeout=_TIMEOUT
+        )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    return [{"id": g.get("id"), "name": g.get("name")} for g in resp.json()]
+
+
 def guild_id_from_url(url: Optional[str]) -> Optional[str]:
     """Pull a guild id straight out of a Discord channel URL, without any API
     call. Returns None for invite links (use resolve_invite_guild_id)."""

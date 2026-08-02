@@ -17,6 +17,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from auth import (
+    DISCORD_CLIENT_ID,
     _rebase_admin,
     active_club_id,
     admin_scopes,
@@ -29,6 +30,7 @@ from auth import (
     require_user,
     valid_scopes,
 )
+import discord_guild
 from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id
 from league import (
     VALID_GAME_TYPES,
@@ -50,6 +52,7 @@ from systems import factions_for, icon_folder_for
 from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
     CANONICAL_VIBES,
+    _discord_gate_mode,
     EXPERIENCE_OPTIONS,
     _effective_vibe_config,
     _get_system_config,
@@ -4356,3 +4359,133 @@ def delete_club_event(
     db.delete(ev)
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Discord membership gate — per-club configuration (Slab 2)
+#
+# Setup is deliberately split into two halves that different people may do,
+# at different times: choosing the SERVER (any app admin can, and it is
+# usually auto-derived from the club's existing invite link) and ADDING THE
+# BOT (needs Manage Server on the Discord, which at some clubs belongs to
+# someone outside the app's admin team entirely). Neither blocks the other,
+# and the status this endpoint reports has to make it obvious which half is
+# outstanding — otherwise an admin is left guessing whether the person they
+# messaged has done their bit.
+# ---------------------------------------------------------------------------
+
+class DiscordGateBody(BaseModel):
+    guild_id: Optional[str] = None
+    mode: Optional[str] = None
+
+
+_GATE_MODES = {"off", "monitor", "enforce"}
+
+
+def _discord_gate_state(club: Club, db: Session) -> dict:
+    """Everything the admin panel needs to render the gate section, including
+    which half of setup is missing and why enforcement may not be available."""
+    identity = discord_guild.bot_identity()
+    bot_configured = identity is not None
+
+    guild_id = club.discord_guild_id
+    name = discord_guild.guild_name(guild_id) if (guild_id and bot_configured) else None
+    connected = name is not None
+
+    # Only offer a suggestion when nothing is set yet — never nag an admin who
+    # has deliberately pointed the gate at a different server than the invite.
+    suggested = None
+    if not guild_id:
+        suggested = discord_guild.resolve_invite_guild_id(club.discord_url)
+
+    guilds = discord_guild.bot_guilds() if bot_configured else None
+
+    return {
+        "bot_configured": bot_configured,
+        "bot_username": identity.get("username") if identity else None,
+        "bot_invite_url": (
+            discord_guild.bot_invite_url(DISCORD_CLIENT_ID) if DISCORD_CLIENT_ID else None
+        ),
+        "guild_id": guild_id,
+        "guild_name": name,
+        "connected": connected,
+        "mode": _discord_gate_mode(db, club.id),
+        # Enforcement is refused unless the check can actually run. A club
+        # sitting on "enforce" with no working connection would fail open on
+        # every signup while the UI claimed the gate was on — false
+        # reassurance is worse than being plainly off.
+        "can_enforce": connected,
+        "suggested_guild_id": suggested,
+        "club_discord_url": club.discord_url,
+        "available_guilds": guilds,
+    }
+
+
+@router.get("/discord-gate")
+def get_discord_gate(
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+    return _discord_gate_state(club, db)
+
+
+@router.post("/discord-gate")
+def set_discord_gate(
+    body: DiscordGateBody,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+
+    if body.guild_id is not None:
+        raw = body.guild_id.strip()
+        if raw == "":
+            club.discord_guild_id = None
+        else:
+            # Accept a pasted invite or channel URL as readily as a raw
+            # snowflake — an admin who copies the link out of their browser
+            # shouldn't hit a validation error for it.
+            resolved = (
+                raw if raw.isdigit()
+                else (discord_guild.guild_id_from_url(raw)
+                      or discord_guild.resolve_invite_guild_id(raw))
+            )
+            if not resolved or not resolved.isdigit():
+                raise HTTPException(
+                    status_code=422,
+                    detail="Enter a Discord server ID (numbers only), or paste a server invite link.",
+                )
+            club.discord_guild_id = resolved
+        db.add(club)
+        db.commit()
+        db.refresh(club)
+
+    if body.mode is not None:
+        mode = body.mode.strip().lower()
+        if mode not in _GATE_MODES:
+            raise HTTPException(status_code=422, detail="Mode must be off, monitor or enforce.")
+        if mode != "off":
+            if not club.discord_guild_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Set your club's Discord server before turning the gate on.",
+                )
+            if discord_guild.guild_name(club.discord_guild_id) is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "The bot can't see that Discord server yet — it needs to be added "
+                        "by someone with Manage Server. Send them the invite link, then try again."
+                    ),
+                )
+        _upsert_setting(db, club.id, "discord_gate_mode", mode)
+        db.commit()
+        log_audit(db, user, "discord_gate_mode", target_type="club",
+                  target_id=club.id, detail=f"mode={mode}")
+
+    return _discord_gate_state(club, db)
