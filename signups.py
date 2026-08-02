@@ -792,10 +792,23 @@ def submit_prearranged(
         if points is not None:
             detail_parts.append(f"🛡️ {points} pts")
         detail_line = " • ".join(detail_parts)
-        b_label = f"{pb_name} (guest)" if is_guest_b else pb_name
+        # Tag both players, same "**Name** (<@id>)" format as the signup posts.
+        # A guest has no Player row, so name_with_mention falls back to the
+        # plain name and only the "(guest)" marker is added.
+        a_label = name_with_mention(db, pa.name, pa.id)
+        b_label = name_with_mention(db, pb_name, pb_player_id)
+        if is_guest_b:
+            b_label = f"{b_label} (guest)"
+        # One player per line: a mention already renders as a chip, so
+        # "**Name** (@tag) (Faction)" on one line read as two competing
+        # bracketed groups. Faction can legitimately be unset, in which case
+        # the dash is dropped rather than trailing an empty one.
+        a_line = f"{a_label} — {faction_a}" if faction_a else a_label
+        b_line = f"{b_label} — {faction_b}" if faction_b else b_label
         content = (
             f"🤝 **Pre-Arranged Game**\n"
-            f"⚔️ **{pa.name}** ({faction_a}) vs **{b_label}** ({faction_b})\n"
+            f"⚔️ {a_line}\n"
+            f"🆚 {b_line}\n"
             f"{detail_line}\n"
             f"📊 {phrase}: {count}"
         )
