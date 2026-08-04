@@ -27,7 +27,7 @@ def _post(content: str) -> None:
     try:
         import httpx
 
-        httpx.post(url, json={"content": content[:1900]}, timeout=5.0)
+        httpx.post(url, json={"content": content[:1900]}, timeout=httpx.Timeout(10.0, connect=5.0))
     except Exception:
         # Alerting must never itself break anything.
         pass

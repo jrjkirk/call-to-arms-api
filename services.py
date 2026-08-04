@@ -314,7 +314,7 @@ def post_discord_achievement(player_name: str, achievement: str, club_id: int, s
     if desc:
         lines.append(f"*{desc}*")
     try:
-        httpx.post(url, json={"content": "\n".join(lines)}, timeout=5.0)
+        httpx.post(url, json={"content": "\n".join(lines)}, timeout=httpx.Timeout(10.0, connect=5.0))
     except Exception:
         pass
 

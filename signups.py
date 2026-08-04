@@ -315,6 +315,14 @@ def _signup_count(db: Session, system: str, week: str, club_id: int) -> int:
     return len(seen)
 
 
+# Discord webhooks are occasionally slow. 5s was too tight and produced
+# ReadTimeouts on posts that had almost certainly landed; the weekly
+# call-to-arms post already used 10s and image posts 30s. Connect stays short
+# so a genuinely unreachable host still fails fast rather than stalling a
+# signup request for 10 seconds.
+_WEBHOOK_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
 def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     """Fire-and-forget Discord post. Never breaks the request on failure."""
     system_config = _get_system_config(db, system)
@@ -330,12 +338,22 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
             # so a player whose name contained "@everyone" would ping the
             # server every time they signed up.
             json={"content": content, "allowed_mentions": {"parse": ["users"]}},
-            timeout=5.0,
+            timeout=_WEBHOOK_TIMEOUT,
         )
         resp.raise_for_status()
+    except httpx.ReadTimeout:
+        # The request WAS sent and Discord almost certainly processed it — we
+        # just gave up waiting for the response. Deliberately not alerted:
+        # it's ambiguous rather than broken, there's nothing to act on, and
+        # retrying would risk double-posting. Logged so it's still traceable
+        # if posts ever do go missing.
+        print(
+            f"[webhook] read timeout after send (probably delivered) "
+            f"club={club_id} system={system!r}"
+        )
     except Exception as e:
-        # Never break the request, but do surface a broken club webhook to
-        # Sentry instead of silently swallowing it (no-op if Sentry is off).
+        # Everything else IS actionable — a revoked/deleted webhook (404), a
+        # bad URL (401), or an unreachable host. Surface those.
         capture(e, kind="discord_webhook", club_id=club_id, system=system)
 
 

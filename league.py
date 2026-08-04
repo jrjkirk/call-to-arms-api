@@ -285,7 +285,7 @@ def _post_league_webhook(db: Session, row: LeagueResult) -> None:
     ])
 
     try:
-        httpx.post(url, json={"content": content}, timeout=5.0)
+        httpx.post(url, json={"content": content}, timeout=httpx.Timeout(10.0, connect=5.0))
     except Exception:
         pass
 

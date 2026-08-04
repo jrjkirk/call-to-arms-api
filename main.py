@@ -408,7 +408,7 @@ def _post_club_request_webhook(req: ClubRequest) -> None:
         + "\nReview it in Platform Admin."
     )
     try:
-        httpx.post(DISCORD_CLUB_REQUESTS_WEBHOOK_URL, json={"content": content}, timeout=5.0)
+        httpx.post(DISCORD_CLUB_REQUESTS_WEBHOOK_URL, json={"content": content}, timeout=httpx.Timeout(10.0, connect=5.0))
     except Exception:
         pass
 
