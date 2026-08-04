@@ -168,6 +168,14 @@ Admin pairings endpoints (all in `admin.py`, all require caller to hold the syst
 - `POST /admin/pairings/post-discord` — plain-text post to system Discord webhook
 - `GET /admin/pairings/signup-list?system=&week=` — de-duped signup list for grid dropdowns
 
+## Known issues
+
+`KNOWN_ISSUES.md` records real, understood problems that were **deliberately
+left unfixed**, with the reasoning and the trigger that should make someone
+revisit each one. Read it before "fixing" something that looks broken — and
+before re-analysing a symptom listed there. Add to it when a problem is
+consciously accepted rather than solved.
+
 ## When things break
 
 **Crash loop on Fly.io:**
