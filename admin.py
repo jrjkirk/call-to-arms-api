@@ -4385,7 +4385,6 @@ class DiscordGateBody(BaseModel):
     mode: Optional[str] = None
 
 
-_GATE_MODES = {"off", "monitor", "enforce"}
 
 
 def _connected_guild_name(guild_id: Optional[str], guilds: Optional[list]) -> Optional[str]:
@@ -4696,27 +4695,21 @@ def set_discord_gate(
         db.refresh(club)
 
     if body.mode is not None:
-        mode = body.mode.strip().lower()
-        if mode not in _GATE_MODES:
-            raise HTTPException(status_code=422, detail="Mode must be off, monitor or enforce.")
-        if mode != "off":
-            if not club.discord_guild_id:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Set your club's Discord server before turning the gate on.",
-                )
-            if _connected_guild_name(club.discord_guild_id, discord_guild.bot_guilds()) is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "The bot can't see that Discord server yet — it needs to be added "
-                        "by someone with Manage Server. Send them the invite link, then try again."
-                    ),
-                )
-        _upsert_setting(db, club.id, "discord_gate_mode", mode)
-        log_audit(db, user, "discord_gate_mode", target_type="club",
-                  target_id=club.id, detail=f"mode={mode}")
-        db.commit()
+        # Refused outright, rather than accepted and quietly ignored. Every
+        # gated action now resolves through the PER-SYSTEM opt-in
+        # (ClubSystem.discord_gate_enabled), so a club-level mode can no longer
+        # switch anything on — and a club sitting on "enforce" while nothing is
+        # actually checked is precisely the false reassurance can_enforce exists
+        # to prevent. The club_settings key is left readable for the
+        # system=None fallback in signups.resolve_discord_gate, but nothing can
+        # set it any more.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The membership gate is set per game night, not per club. Open that "
+                "system's admin section and switch it on there."
+            ),
+        )
 
     guild_id, club_discord_url = club.discord_guild_id, club.discord_url
     mode_now = _discord_gate_mode(db, club.id)
