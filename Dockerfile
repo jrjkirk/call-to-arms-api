@@ -9,11 +9,10 @@ COPY . .
 
 EXPOSE 8080
 
-# --limit-concurrency bounds in-flight requests. A connection is held for a
-# request's whole lifetime (acquired in require_user's dependency resolution),
-# so unbounded concurrency means unbounded connection demand — which is exactly
-# how the admin page's ~60-request burst exhausted the pool. Excess requests get
-# a fast 503 the browser can retry, instead of every request in the burst
-# blocking 30s on the pool and then 500ing. Keep this BELOW database.py's pool
-# capacity; they are sized against each other.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--limit-concurrency", "32"]
+# --limit-concurrency is a SAFETY VALVE, not a throttle. It must sit well above
+# normal bursts: excess requests get a hard 503, so setting it near the pool
+# size turns ordinary load into user-visible failures (32 was measured rejecting
+# 87 of 120 requests). Requests are meant to queue briefly on the connection
+# pool instead — see database.py. This only trips in genuine overload, where a
+# fast 503 beats every request hanging.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--limit-concurrency", "64"]

@@ -113,18 +113,31 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # holds its connection while it is merely QUEUED for a thread, so 60 concurrent
 # requests want 60 connections no matter how few threads run at once.
 #
-# The pool is therefore NOT the place to bound this — a pool can only be sized
-# against a bounded number, and in-flight requests are bounded by the HTTP
-# server, not by us. uvicorn's --limit-concurrency (see Dockerfile) is what
-# bounds it; this pool is sized to sit just above that limit so a request that
-# the server admitted always finds a connection.
+# THE REAL CEILING IS SUPABASE'S, AND IT IS LOW. Measured against the prod
+# pooler from this machine, holding N connections simultaneously for 2s:
+#
+#     12 -> 24/24 clean        25 -> 48/50
+#     16 -> 32/32 clean        30 -> 56/60
+#     20 -> 39/40              100 -> 89/100
+#
+# Past ~16 the pooler starts dropping them, and the failure it returns is
+# exactly `SSL connection has been closed unexpectedly` — the error this whole
+# saga started with. So a BIGGER pool was never going to help: NullPool failed
+# by asking for ~40 at once, and a 40-capacity pool would fail the same way.
+# Total capacity must stay under that ceiling, full stop.
+#
+# What keeps requests from queueing behind 14 connections is not pool size but
+# not making 60 requests at once — the admin page now loads only the system
+# being viewed (see ensureSystemScope in the web repo). pool_timeout is
+# generous so a brief queue waits rather than 500s.
 #
 # One uvicorn process (no --workers), so this pool is the whole application's
-# footprint. If workers are ever added, divide capacity between them.
+# footprint. Scheduled scripts run as separate processes with their own pools,
+# hence leaving a couple of connections of headroom under 16.
 #
-# pool_size is the warm baseline kept open between bursts (player traffic never
-# needs more); overflow absorbs the admin page's fan-out and is closed on
-# return, so quiet periods don't hold idle connections.
+# pool_size is the warm baseline, deliberately most of the capacity: a reused
+# connection can't be refused, so minimising new-connection churn minimises
+# exposure to the drop.
 #
 # pool_pre_ping: pgbouncer and the network both drop idle connections, and a
 # pooled connection that died while idle would otherwise surface as a random
@@ -139,26 +152,22 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # max_overflow/pool_timeout outright — and `sqlite:///…` is now the local dev
 # and test path (the staging Postgres project no longer exists), so passing
 # these unconditionally breaks every local run.
-# Must stay >= uvicorn's --limit-concurrency in the Dockerfile. The server
-# refuses (503) beyond that many in-flight requests, so that — plus headroom
-# for the scheduled scripts that share this module — is the real ceiling on
-# concurrent checkouts.
-MAX_INFLIGHT_REQUESTS = 32
+# Measured safe ceiling on simultaneous connections to Supabase's pooler (see
+# above). Total capacity stays under it, with headroom for cron processes.
+SUPABASE_SAFE_CONNECTIONS = 16
 _POOL_WARM = 10
+_POOL_OVERFLOW = 4
 
 _POOL_KWARGS = (
     {
         "pool_size": _POOL_WARM,
-        # Capacity sits ABOVE the admitted-request ceiling, so any request the
-        # server accepted is guaranteed a connection. The +8 is headroom for
-        # in-process background work that doesn't go through the HTTP limiter.
-        "max_overflow": MAX_INFLIGHT_REQUESTS + 8 - _POOL_WARM,
+        "max_overflow": _POOL_OVERFLOW,
         "pool_pre_ping": True,
         "pool_recycle": 300,
-        # Belt and braces: capacity now matches the ceiling, so HTTP traffic
-        # shouldn't ever wait here. Generous rather than 10s so that if
-        # something does saturate it (a cron script sharing this engine), the
-        # request queues instead of 500ing.
+        # Requests WILL briefly queue here under a burst — that's the design,
+        # since capacity is capped by Supabase rather than by demand. Generous
+        # so a queue waits instead of 500ing; a burst of 40 short requests
+        # drains through 14 connections in well under a second.
         "pool_timeout": 30,
     }
     if DATABASE_URL.startswith(("postgresql", "postgres://"))
