@@ -20,6 +20,7 @@ from database import discord_mentions_for_player_ids, engine, resolve_webhook_ur
 from models import Club, ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
 from render_pairings_image import render_pairings_image
+from levels import levels_for_players
 
 
 # Discord hard-limits a message's content to 2000 characters. The pairings
@@ -89,7 +90,17 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
     ).all()
 
     signups_by_id = _collect_signups_for_rows(rows, db, club_id)
-    display_rows = _pairing_rows_to_display(rows, signups_by_id, system)
+
+    # uses_points was being passed `system` — a non-empty string, so always
+    # truthy. Harmless in practice (a system that doesn't use points has no
+    # points on its signups) but it meant the flag never did anything.
+    uses_points = bool(system_config.uses_points) if system_config else False
+
+    player_levels = levels_for_players(
+        db, club_id, system,
+        [s.player_id for s in signups_by_id.values() if s.player_id is not None],
+    )
+    display_rows = _pairing_rows_to_display(rows, signups_by_id, uses_points, player_levels)
 
     buf = render_pairings_image(display_rows, week, system)
     if buf is None:

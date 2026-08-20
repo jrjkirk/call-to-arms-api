@@ -80,9 +80,11 @@ def _to_render_rows(display_rows: list[dict]) -> list[dict]:
             "A": r.get("a_name"),
             "Faction A": r.get("a_faction"),
             "Exp A": r.get("a_experience"),
+            "Lvl A": r.get("a_level"),
             "B": r.get("b_name"),
             "Faction B": r.get("b_faction"),
             "Exp B": r.get("b_experience"),
+            "Lvl B": r.get("b_level"),
             "Type": r.get("type"),
             "ETA": r.get("eta"),
             "Points": r.get("points"),
@@ -126,6 +128,22 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
         "experienced": "#b8a878",
         "veteran": "#d08a50",
     }
+
+    # Level bands, mirroring levels.BANDS on the server so the image, the web
+    # card and the Discord ding all show the same colour for the same level.
+    band_colors = [
+        (60, "#ff8000"), (50, "#a335ee"), (40, "#e05fa8"), (30, "#8b7cf6"),
+        (20, "#4a9eda"), (10, "#17c3b2"), (1, "#3fb950"),
+    ]
+
+    def _level_tag(level: int | None) -> tuple[str, str] | None:
+        """(text, colour) for a level chip, or None when the level is unknown."""
+        if not level:
+            return None
+        for floor, colour in band_colors:
+            if level >= floor:
+                return f"Lv {level}", colour
+        return f"Lv {level}", band_colors[-1][1]
 
     def _exp_tag(value: str | None) -> tuple[str, str] | None:
         """(label, colour) for an experience tag, or None to draw nothing.
@@ -271,9 +289,16 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
         ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
                 style="italic", ha="left", va="center", zorder=3)
         exp_a = _exp_tag(r.get("Exp A"))
+        lvl_a = _level_tag(r.get("Lvl A"))
+        tag_x = name_a_x
+        if lvl_a:
+            label, colour = lvl_a
+            ax.text(tag_x, cy - 0.45, label, color=colour, fontsize=8,
+                    fontweight="bold", ha="left", va="center", zorder=3)
+            tag_x += 0.42
         if exp_a:
             label, colour = exp_a
-            ax.text(name_a_x, cy - 0.45, label, color=colour, fontsize=8,
+            ax.text(tag_x, cy - 0.45, label, color=colour, fontsize=8,
                     fontweight="bold", ha="left", va="center", zorder=3)
 
         for x_center, label, value, _w in meta_x_positions:
@@ -306,9 +331,16 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             ax.text(name_b_right, cy - 0.18, faction_b, color=faction_color, fontsize=11,
                     style="italic", ha="right", va="center", zorder=3)
             exp_b = _exp_tag(r.get("Exp B"))
+            lvl_b = _level_tag(r.get("Lvl B"))
+            tag_x_b = name_b_right
+            if lvl_b:
+                label, colour = lvl_b
+                ax.text(tag_x_b, cy - 0.45, label, color=colour, fontsize=8,
+                        fontweight="bold", ha="right", va="center", zorder=3)
+                tag_x_b -= 0.42
             if exp_b:
                 label, colour = exp_b
-                ax.text(name_b_right, cy - 0.45, label, color=colour, fontsize=8,
+                ax.text(tag_x_b, cy - 0.45, label, color=colour, fontsize=8,
                         fontweight="bold", ha="right", va="center", zorder=3)
 
         sep_top = card_top - 0.22

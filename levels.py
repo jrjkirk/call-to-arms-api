@@ -30,7 +30,7 @@ from sqlmodel import Session, select
 
 from database import name_with_mention, resolve_webhook_url
 from experience import games_played
-from models import PlayerLevelAnnouncement, Player, SystemConfig
+from models import Pairing, PlayerLevelAnnouncement, Player, Signup, SystemConfig
 from observability import capture
 
 LEVEL_CAP = 60
@@ -129,6 +129,43 @@ def progress(db: Session, club_id: int, player_id: Optional[int], system: str) -
         "games_to_next": 0 if at_cap else needed - into,
         "percent": 100 if at_cap else (round(into * 100 / needed) if needed else 0),
     }
+
+
+def levels_for_players(
+    db: Session, club_id: int, system: str, player_ids: list[int]
+) -> dict[int, int]:
+    """Level for many players at once, in one pass over the system's pairings.
+
+    The per-player helper is a query each, which is fine on a profile page but
+    an N+1 on a pairings list — and the pairings image is rendered by a cron,
+    where that multiplies by every player in the week.
+    """
+    ids = {pid for pid in player_ids if pid is not None}
+    if not ids:
+        return {}
+
+    # signup id -> player id, for this club and system only.
+    owner: dict[int, int] = {}
+    for sid, pid in db.exec(
+        select(Signup.id, Signup.player_id)
+        .where(Signup.club_id == club_id)
+        .where(Signup.system == system)
+        .where(Signup.player_id.is_not(None))
+    ).all():
+        owner[sid] = pid
+
+    counts: dict[int, int] = {pid: 0 for pid in ids}
+    for a, b in db.exec(
+        select(Pairing.a_signup_id, Pairing.b_signup_id)
+        .where(Pairing.club_id == club_id)
+        .where(Pairing.system == system)
+        .where(Pairing.b_signup_id.is_not(None))
+    ).all():
+        for sid in (a, b):
+            pid = owner.get(sid)
+            if pid in counts:
+                counts[pid] += 1
+    return {pid: level_for(n) for pid, n in counts.items()}
 
 
 def milestones_crossed(previous_level: int, current_level: int) -> list[int]:

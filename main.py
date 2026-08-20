@@ -9,6 +9,7 @@ from sqlmodel import Session, select, or_
 
 from database import active_player_id_for, get_session, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
+from levels import levels_for_players
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
 from systems import factions_for, faction_groups_for, icon_folder_for
@@ -984,6 +985,12 @@ def get_pairings(
 
     system_config = _get_system_config(session, system)
 
+    # One pass for everyone in the week, rather than a query per player.
+    player_levels = levels_for_players(
+        session, club_id, system,
+        [s.player_id for s in signups_by_id.values() if s.player_id is not None],
+    )
+
     matchups = []
     for p in prs:
         a = signups_by_id.get(p.a_signup_id)
@@ -1020,10 +1027,12 @@ def get_pairings(
             # matcher's experience weighting, but until now was invisible to
             # the people actually playing the game.
             "player_a_experience": a.experience if a else None,
+            "player_a_level": player_levels.get(a.player_id) if a else None,
             "player_b_name": b.player_name if b else None,
             "player_b_id": b.player_id if b else None,
             "player_b_faction": p.b_faction or (b.faction if b else None) if b else None,
             "player_b_experience": b.experience if b else None,
+            "player_b_level": player_levels.get(b.player_id) if b else None,
             "is_bye": is_bye,
             "game_type": game_type,
             "eta": eta,

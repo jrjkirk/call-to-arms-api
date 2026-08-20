@@ -574,6 +574,7 @@ def _build_display_row(
     prearranged: bool,
     signups_by_id: dict,
     uses_points: bool,
+    player_levels: Optional[dict] = None,
 ) -> dict:
     a_su = signups_by_id.get(a_signup_id)
     b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
@@ -595,11 +596,15 @@ def _build_display_row(
         # their own signup is visible to their opponent before the game, not
         # just to the matcher that used it to pair them.
         "a_experience": a_su.experience if a_su else None,
+        # Level for the posted image. None when not supplied, so the admin
+        # grid — which doesn't need it — pays for nothing.
+        "a_level": (player_levels or {}).get(a_su.player_id) if a_su else None,
         "b_signup_id": b_signup_id,
         "b_name": b_name,
         "b_faction": b_faction if (b_signup_id and b_faction is not None) else (b_su.faction if b_su else None),
         "b_vibe": b_vibe,
         "b_experience": b_su.experience if b_su else None,
+        "b_level": (player_levels or {}).get(b_su.player_id) if b_su else None,
         "type": _public_vibe_display(a_vibe, b_vibe),
         "eta": _eta_show(a_su, b_su),
         "points": _pts_show(a_su, b_su, uses_points),
@@ -637,7 +642,8 @@ def _collect_signups_for_rows(rows, db: Session, club_id: int) -> dict:
     return {s.id: s for s in rows_q}
 
 
-def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: bool) -> list:
+def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: bool,
+                             player_levels: Optional[dict] = None) -> list:
     result = []
     for p in pairings:
         a_faction = p.a_faction or (signups_by_id.get(p.a_signup_id, None) and signups_by_id[p.a_signup_id].faction)
@@ -647,7 +653,7 @@ def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: b
         result.append(_build_display_row(
             p.id, p.a_signup_id, p.b_signup_id,
             a_faction, b_faction,
-            p.prearranged, signups_by_id, uses_points,
+            p.prearranged, signups_by_id, uses_points, player_levels,
         ))
     return result
 
