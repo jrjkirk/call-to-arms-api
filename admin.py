@@ -45,6 +45,8 @@ from league import (
 )
 from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
+from observability import capture
+from levels import announce_level_ups
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate, _get_pairing_config, summarize_pairings
@@ -1056,6 +1058,15 @@ def pairings_publish(
     db.commit()
     if body.published:
         maybe_send_table_booking(db, user.club_id, body.system, body.week)
+        # Levels are derived from pairings, so publishing is the moment a
+        # week's games become official and someone's bar moves. Announcing
+        # here means the "ding" lands alongside the pairings post rather than
+        # at some arbitrary hour. Never raises — a webhook wobble must not
+        # fail the publish.
+        try:
+            announce_level_ups(db, user.club_id, body.system)
+        except Exception as e:
+            capture(e, kind="level_up_announce", system=body.system)
     return {"ok": True, "published": body.published}
 
 
@@ -2310,7 +2321,7 @@ def create_league_season(
 # ---------------------------------------------------------------------------
 
 # Shown (and creatable) for every system the club has enabled.
-WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms")
+WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms", "level_up")
 # Shown (and creatable) only for systems that ALSO have their league enabled
 # (ClubSystem.league_enabled) — these were club-wide (system_id always NULL)
 # before leagues themselves became per-system; a club running two leagues

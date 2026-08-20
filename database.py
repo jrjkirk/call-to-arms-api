@@ -47,6 +47,8 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # written by each system's own admin editing that
                        # system's Club-page carousel card and its per-system
                        # Discord server / gate mode
+    "player_level_announcements",  # per-(player, system) high-water mark of
+                       # the level already announced, so a "ding" fires once
     "player_experience_adjustments",  # per-(player, system) "games I played
                        # elsewhere", set by the player on the signup form and
                        # added to the count derived from pairings

@@ -567,6 +567,25 @@ class PlayerExperienceAdjustment(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class PlayerLevelAnnouncement(SQLModel, table=True):
+    """The highest level we've already announced for a (club, player, system).
+
+    Levels themselves are derived from pairings and need no storage — this
+    table exists only so the same "ding" isn't posted twice, and so switching
+    the feature on doesn't fire hundreds of announcements for levels players
+    reached months ago. The backfill seeds it to everyone's current level.
+    """
+    __tablename__ = "player_level_announcements"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    player_id: int = Field(foreign_key="players.id", index=True)
+    system: str = Field(index=True)
+    last_level: int = 1
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class PlayerDiscordVerification(SQLModel, table=True):
     """Per-(player, guild) proof that a player is in a given Discord server.
 

@@ -22,6 +22,7 @@ from database import active_player_id_for, get_session, name_with_mention, resol
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
 import discord_guild
 from experience import summary as experience_summary
+from levels import progress as level_progress
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
 from observability import capture
@@ -654,6 +655,24 @@ def set_my_experience_adjustment(
     db.commit()
 
     return experience_summary(db, club_id, player_id, body.system)
+
+
+@router.get("/level")
+def my_level(
+    system: str,
+    player_id: Optional[int] = None,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Level and progress for a player in one system.
+
+    Defaults to the caller; `player_id` reads someone else's, since levels are
+    public — they show on profiles and get announced in Discord, so there is
+    nothing to protect here.
+    """
+    target = player_id if player_id is not None else active_player_id_for(db, user, club_id)
+    return level_progress(db, club_id, target, system)
 
 
 @router.get("/mine")
