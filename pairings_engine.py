@@ -47,7 +47,15 @@ def build_match_preference(su: Signup) -> tuple:
     v = (su.vibe or "").strip().lower()
     vibe_w = 0 if v.startswith("casual") else 1
 
-    exp_map = {"new": 0, "some": 1, "veteran": 2, "experienced": 2}
+    # "Experienced" is the current name for the middle tier; "Some" is its
+    # retired name, still on ~287 historical signups. Both map to 1.
+    #
+    # This is a CORRECTION, not a change of behaviour. "experienced" was
+    # previously mapped to 2 — the Veteran weight — so when the middle tier was
+    # renamed, every mid-tier player would silently have started being matched
+    # as a veteran. 1 is where "Some" has always sat, so pairings come out as
+    # they did before the rename.
+    exp_map = {"new": 0, "some": 1, "experienced": 1, "veteran": 2}
     exp_w = 1
     exp_str = (su.experience or "").lower()
     for k, val in exp_map.items():

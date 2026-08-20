@@ -19,15 +19,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import active_player_id_for, get_session, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
 import discord_guild
+from experience import summary as experience_summary
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
 from observability import capture
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
-EXPERIENCE_OPTIONS = {"New", "Some", "Veteran"}
+# Values accepted when an ADMIN sets a signup's experience by hand (the pairing
+# grid and the add-signup form). Players no longer choose — theirs is derived
+# from games played, see experience.py. "Some" is the retired name for the
+# middle tier and stays accepted so historical rows and the admin grid's
+# existing dropdown keep validating.
+EXPERIENCE_OPTIONS = {"New", "Some", "Experienced", "Veteran"}
 
 # Historical snapshot of the pre-catalogue hardcoded per-system values. The
 # live request path no longer uses these — the SystemConfig catalogue is the
@@ -575,6 +581,81 @@ def _build_bye_discord_message(
     return "\n".join(lines)
 
 
+class ExperienceAdjustmentIn(SQLModel):
+    system: str
+    extra_games: int
+
+
+@router.get("/experience")
+def my_experience(
+    system: str,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """This player's standing in one system: games the club has paired them
+    for, games they've added themselves, the total, and the tier it lands in.
+
+    Read by the signup form to show the badge instead of asking. Returns the
+    New tier with zero games for a caller with no player at this club, rather
+    than 404 — the form wants something to render, not an error.
+    """
+    player_id = active_player_id_for(db, user, club_id)
+    return experience_summary(db, club_id, player_id, system)
+
+
+@router.post("/experience")
+def set_my_experience_adjustment(
+    body: ExperienceAdjustmentIn,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Record games this player has played elsewhere in this system.
+
+    Added to the club's count, never replacing it — so it can only ever move
+    someone UP a tier, and the tracked count keeps rising underneath. A player
+    may only set their own; there is no player_id in the body for that reason,
+    same rule as every other self-service write here.
+    """
+    player_id = active_player_id_for(db, user, club_id)
+    if player_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No linked player profile at this club — claim your profile first.",
+        )
+
+    extra = body.extra_games
+    if extra < 0:
+        raise HTTPException(status_code=422, detail="Games played elsewhere can't be negative.")
+    # A ceiling so a typo can't produce a nonsense profile. Well above any real
+    # club career, and the tiers top out at 20 anyway.
+    if extra > 1000:
+        raise HTTPException(status_code=422, detail="That's more games than we can credit — 1000 is the maximum.")
+
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+
+    row = db.exec(
+        select(PlayerExperienceAdjustment)
+        .where(PlayerExperienceAdjustment.club_id == club_id)
+        .where(PlayerExperienceAdjustment.player_id == player_id)
+        .where(PlayerExperienceAdjustment.system == body.system)
+    ).first()
+    if row is None:
+        row = PlayerExperienceAdjustment(
+            club_id=club_id, player_id=player_id, system=body.system, extra_games=extra
+        )
+    else:
+        row.extra_games = extra
+        row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+
+    return experience_summary(db, club_id, player_id, body.system)
+
+
 @router.get("/mine")
 def my_signup(
     system: str,
@@ -629,7 +710,15 @@ def submit_signup(
     if faction in (None, "", "— None —"):
         faction = None
 
-    experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
+    # DERIVED, not taken from the request. Experience is now the club's own
+    # count of games this player has been paired for in this system, plus any
+    # games they've told us they played elsewhere — so it can't be re-answered
+    # differently each week, and it moves people out of "New" on its own as
+    # they play. The value is still WRITTEN to the signup row so everything
+    # downstream (the matcher, the pairing cards, the posted image) keeps
+    # reading one field, and so each signup keeps a record of where the player
+    # stood at the time.
+    experience = experience_summary(db, club_id, player.id, body.system)["tier"]
 
     # Catalogue-driven config. See SystemConfig in models.py for field meanings.
     eff_vibe_options, eff_default_vibe = _effective_vibe_config(db, club_id, config)

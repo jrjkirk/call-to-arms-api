@@ -543,6 +543,30 @@ class ClubSystem(SQLModel, table=True):
     discord_gate_mode: Optional[str] = None
 
 
+class PlayerExperienceAdjustment(SQLModel, table=True):
+    """Games a player says they've played elsewhere, per (club, system).
+
+    Added to the count derived from pairings rather than replacing it, so the
+    club's own tally keeps rising underneath and the total can't go stale. It
+    also means the adjustment can't be used to hide experience — you can only
+    ever add.
+
+    Per system for the same reason the count is: "20 games of Kill Team before
+    I joined" says nothing about your Old World experience. `system` holds the
+    legacy display string that Signup.system and Pairing.system store, so this
+    joins against them without a lookup.
+    """
+    __tablename__ = "player_experience_adjustments"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    player_id: int = Field(foreign_key="players.id", index=True)
+    system: str = Field(index=True)
+    extra_games: int = 0
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class PlayerDiscordVerification(SQLModel, table=True):
     """Per-(player, guild) proof that a player is in a given Discord server.
 

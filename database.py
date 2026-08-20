@@ -47,6 +47,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # written by each system's own admin editing that
                        # system's Club-page carousel card and its per-system
                        # Discord server / gate mode
+    "player_experience_adjustments",  # per-(player, system) "games I played
+                       # elsewhere", set by the player on the signup form and
+                       # added to the count derived from pairings
     "player_discord_verifications",  # per-(player, guild) Discord membership
                        # cache for the signup gate — inserted once per player
                        # per server by signups.require_discord_member

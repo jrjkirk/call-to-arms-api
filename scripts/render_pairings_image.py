@@ -120,7 +120,10 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
     # reds/greens would imply they're the same one.
     experience_colors = {
         "new": "#6eb46e",
+        # "some" is the retired name for the middle tier, still on historical
+        # signups — it renders identically to "experienced".
         "some": "#b8a878",
+        "experienced": "#b8a878",
         "veteran": "#d08a50",
     }
 
