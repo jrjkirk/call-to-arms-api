@@ -144,7 +144,7 @@ def create_call_out(
     _require_system_enabled(db, club_id, body.system)
 
     player = _require_linked_player(user, db, club_id)
-    require_discord_member(db, player, club_id)
+    require_discord_member(db, player, club_id, body.system)
 
     game_at = _parse_game_at(body.game_date, body.game_time)
     if game_at <= now_uk_naive():
@@ -207,8 +207,10 @@ def take_call_out(
     db: Session = Depends(get_session),
 ):
     taker = _require_linked_player(user, db, club_id)
-    require_discord_member(db, taker, club_id)
+    # The call-out is loaded BEFORE the gate now: which Discord server applies
+    # depends on which system the call-out is for, and only the row knows that.
     c = _get_owned_call_out(db, call_out_id, club_id)
+    require_discord_member(db, taker, club_id, c.system)
 
     if c.status != "open":
         raise HTTPException(status_code=409, detail="This call-out is no longer open.")

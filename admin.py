@@ -588,10 +588,16 @@ def _build_display_row(
         "a_name": a_name,
         "a_faction": a_faction if a_faction is not None else (a_su.faction if a_su else None),
         "a_vibe": a_vibe,
+        # Self-reported experience ("New" / "Some" / "Veteran"). Carried
+        # through to the posted pairings image so the level each player put on
+        # their own signup is visible to their opponent before the game, not
+        # just to the matcher that used it to pair them.
+        "a_experience": a_su.experience if a_su else None,
         "b_signup_id": b_signup_id,
         "b_name": b_name,
         "b_faction": b_faction if (b_signup_id and b_faction is not None) else (b_su.faction if b_su else None),
         "b_vibe": b_vibe,
+        "b_experience": b_su.experience if b_su else None,
         "type": _public_vibe_display(a_vibe, b_vibe),
         "eta": _eta_show(a_su, b_su),
         "points": _pts_show(a_su, b_su, uses_points),
@@ -4441,6 +4447,204 @@ def _discord_gate_state(guild_id: Optional[str], club_discord_url: Optional[str]
     }
 
 
+class ClubSystemDiscordGateBody(BaseModel):
+    system: str
+    # Every field below is omit-to-leave-unchanged (model_fields_set), so the
+    # panel can save one control at a time without echoing the rest back.
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    guild_id: Optional[str] = None
+    discord_url: Optional[str] = None
+
+
+def _club_system_gate_state(
+    system: str,
+    enabled: bool,
+    mode: Optional[str],
+    own_guild_id: Optional[str],
+    own_discord_url: Optional[str],
+    club_name: str,
+    club_guild_id: Optional[str],
+    club_discord_url: Optional[str],
+) -> dict:
+    """Everything the per-system gate panel needs to render.
+
+    Takes plain values rather than a live ClubSystem/Session for the same
+    reason as _discord_gate_state above: it makes external HTTP calls to
+    Discord, and callers MUST release their pooler connection first.
+
+    Reports the OWN and the EFFECTIVE value of the server separately. A panel
+    that only showed the effective one couldn't distinguish "this system has
+    its own server" from "this system is borrowing the club's", which is the
+    single most important thing for an admin at a club like EGNWGC to see
+    before switching enforcement on.
+    """
+    guilds = discord_guild.bot_guilds()
+    bot_configured = guilds is not None
+
+    effective_guild_id = own_guild_id or club_guild_id
+    name = _connected_guild_name(effective_guild_id, guilds)
+    connected = name is not None
+
+    return {
+        "system": system,
+        "enabled": enabled,
+        # NULL mode means "opted in, still watching" — surfaced resolved so the
+        # panel never has to re-implement the fallback.
+        "mode": (mode or "monitor"),
+        "guild_id": effective_guild_id,
+        "guild_id_own": own_guild_id,
+        "inherits_guild": own_guild_id is None and club_guild_id is not None,
+        "guild_name": name,
+        "connected": connected,
+        # Enforcement is refused unless the check can actually run. A system
+        # sitting on "enforce" with no working connection would fail open on
+        # every signup while the UI claimed the gate was on — false reassurance
+        # is worse than being plainly off.
+        "can_enforce": connected,
+        "discord_url": own_discord_url or club_discord_url,
+        "discord_url_own": own_discord_url,
+        "inherits_url": own_discord_url is None and club_discord_url is not None,
+        "club_name": club_name,
+        "club_guild_id": club_guild_id,
+        "club_discord_url": club_discord_url,
+        "bot_configured": bot_configured,
+        "bot_invite_url": (
+            discord_guild.bot_invite_url(DISCORD_CLIENT_ID) if DISCORD_CLIENT_ID else None
+        ),
+        "available_guilds": guilds,
+    }
+
+
+def _load_club_system_for_gate(db: Session, user: User, system: str) -> tuple:
+    """Resolve + authorize the (club, system) row a gate call is about."""
+    _require_system_scope(system, user, db)
+    config = _get_system_config(db, system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="System not enabled for this club.")
+    club = db.get(Club, user.club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="Club not found")
+    return cs, club
+
+
+@router.get("/club-systems/discord-gate")
+def get_club_system_discord_gate(
+    system: str,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """That system's own admin reads its Discord gate config — same ownership
+    model as the carousel card and mission pool above.
+
+    Per system rather than per club because one club's game nights can each
+    run out of a different Discord server: at EGNWGC, Kill Team and The Old
+    World are separate servers and neither is a club-wide one.
+    """
+    cs, club = _load_club_system_for_gate(db, user, system)
+    state_args = (
+        system, cs.discord_gate_enabled, cs.discord_gate_mode,
+        cs.discord_guild_id, cs.discord_url,
+        club.name, club.discord_guild_id, club.discord_url,
+    )
+    # Release the pooler connection before any Discord call — the engine uses
+    # NullPool, so every request is a real new connection to Supabase's
+    # transaction pooler and the admin page loads these in a parallel burst.
+    db.close()
+    return _club_system_gate_state(*state_args)
+
+
+@router.post("/club-systems/discord-gate")
+def set_club_system_discord_gate(
+    body: ClubSystemDiscordGateBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """That system's own admin sets its Discord gate: opt in/out, which
+    server, which invite link, and monitor vs enforce."""
+    cs, club = _load_club_system_for_gate(db, user, body.system)
+    provided = body.model_fields_set
+
+    if "guild_id" in provided:
+        raw = (body.guild_id or "").strip()
+        if raw == "":
+            # Clearing falls the system back to the club's server, which is
+            # the right behaviour for a club with one Discord for everything.
+            cs.discord_guild_id = None
+        else:
+            # Accept a pasted invite or channel URL as readily as a raw
+            # snowflake — an admin who copies the link out of their browser
+            # shouldn't hit a validation error for it.
+            resolved = (
+                raw if raw.isdigit()
+                else (discord_guild.guild_id_from_url(raw)
+                      or discord_guild.resolve_invite_guild_id(raw))
+            )
+            if not resolved or not resolved.isdigit():
+                raise HTTPException(
+                    status_code=422,
+                    detail="Enter a Discord server ID (numbers only), or paste a server invite link.",
+                )
+            cs.discord_guild_id = resolved
+
+    if "discord_url" in provided:
+        cs.discord_url = (body.discord_url or "").strip() or None
+
+    if "mode" in provided and body.mode is not None:
+        mode = body.mode.strip().lower()
+        if mode not in {"monitor", "enforce"}:
+            raise HTTPException(status_code=422, detail="Mode must be monitor or enforce.")
+        cs.discord_gate_mode = mode
+
+    if "enabled" in provided and body.enabled is not None:
+        cs.discord_gate_enabled = bool(body.enabled)
+
+    # One combined check rather than one per field: enabled, mode and guild can
+    # all arrive in the same save, and what matters is the state they land in.
+    if cs.discord_gate_enabled and (cs.discord_gate_mode or "monitor") == "enforce":
+        effective_guild = cs.discord_guild_id or club.discord_guild_id
+        if not effective_guild:
+            raise HTTPException(
+                status_code=422,
+                detail="Set this system's Discord server before enforcing the gate.",
+            )
+        if _connected_guild_name(effective_guild, discord_guild.bot_guilds()) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The bot can't see that Discord server yet — it needs to be added "
+                    "by someone with Manage Server. Send them the invite link, then try again."
+                ),
+            )
+
+    db.add(cs)
+    # log_audit does not commit — it must land in the same transaction as the
+    # change it records, so it goes before the commit, not after.
+    log_audit(
+        db, user, "club_system_discord_gate", target_type="club_system",
+        target_id=cs.id,
+        detail=(
+            f"system={body.system} enabled={cs.discord_gate_enabled} "
+            f"mode={cs.discord_gate_mode or 'monitor'} guild={cs.discord_guild_id or '(inherits)'}"
+        ),
+    )
+    db.commit()
+    db.refresh(cs)
+
+    state_args = (
+        body.system, cs.discord_gate_enabled, cs.discord_gate_mode,
+        cs.discord_guild_id, cs.discord_url,
+        club.name, club.discord_guild_id, club.discord_url,
+    )
+    db.close()  # release before the Discord calls, same as the GET path
+    return _club_system_gate_state(*state_args)
+
+
 @router.get("/discord-gate")
 def get_discord_gate(
     user: User = Depends(require_super_admin),
@@ -4510,9 +4714,9 @@ def set_discord_gate(
                     ),
                 )
         _upsert_setting(db, club.id, "discord_gate_mode", mode)
-        db.commit()
         log_audit(db, user, "discord_gate_mode", target_type="club",
                   target_id=club.id, detail=f"mode={mode}")
+        db.commit()
 
     guild_id, club_discord_url = club.discord_guild_id, club.discord_url
     mode_now = _discord_gate_mode(db, club.id)

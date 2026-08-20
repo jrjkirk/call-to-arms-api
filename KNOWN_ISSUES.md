@@ -92,28 +92,3 @@ either way.
 **Code.** `database.py` engine construction; the fan-out is in
 `call-to-arms-web/src/routes/admin/+page.svelte`.
 
----
-
-## 3. `POST /signups/prearranged` doesn't check the caller is one of the players
-
-**Symptom.** None visible. Any logged-in member of a club can create a
-pre-arranged game between two *arbitrary* players at that club.
-
-**Cause.** The endpoint authenticates the caller (`require_user`) and validates
-that both players belong to the caller's club, but never checks that the caller
-is one of them — `player_a_id` and `player_b_id` come straight from the request
-body.
-
-**Why it's left.** Same class as the nine missing-ownership bugs found and
-fixed during the Phase 1 club-scoping work, but with no cross-club exposure:
-everything stays inside the caller's own club, and the blast radius is a
-nuisance signup that any admin can delete. Found while adding the Discord gate
-and deliberately kept out of that change's scope.
-
-**Revisit when.** Anyone touches this endpoint, or a club reports unexpected
-pre-arranged games. The fix is small — compare `active_player_id_for(db, user,
-club_id)` against `player_a_id`/`player_b_id` and 403 otherwise — but it needs
-a decision first on whether an admin should still be allowed to arrange games
-on others' behalf.
-
-**Code.** `signups.submit_prearranged`.

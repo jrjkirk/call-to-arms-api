@@ -46,7 +46,11 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # landing page profile (blurb/logo/links/hours)
     "club_systems",   # Phase 1 step 1: seeded once by seed_clubs.py; now also
                        # written by each system's own admin editing that
-                       # system's Club-page carousel card
+                       # system's Club-page carousel card and its per-system
+                       # Discord server / gate mode
+    "player_discord_verifications",  # per-(player, guild) Discord membership
+                       # cache for the signup gate — inserted once per player
+                       # per server by signups.require_discord_member
     "club_events",    # Club landing page calendar: one-off/override events,
                        # CRUD by club super-admin (system_id=None) or that
                        # system's own admin (system_id set)

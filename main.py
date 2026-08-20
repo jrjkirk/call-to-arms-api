@@ -304,6 +304,13 @@ def get_club(
             "blurb": cs.carousel_blurb,
             "photo_url": cs.carousel_photo_url,
             "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
+            # The "Join our Discord" CTA lives on the carousel card, not in
+            # the club hero, because a club's game nights can each run out of
+            # a different Discord server — a single club-level button would
+            # send Kill Team players to the Old World server. Falls back to the
+            # club's own link so a club with one Discord for everything still
+            # shows the button on every card without configuring anything.
+            "discord_url": cs.discord_url or club.discord_url,
         }
         for cs, sc in club_systems
     ]
@@ -1007,9 +1014,16 @@ def get_pairings(
             "player_a_name": a.player_name if a else f"A#{p.a_signup_id}",
             "player_a_id": a.player_id if a else None,
             "player_a_faction": p.a_faction or (a.faction if a else None),
+            # Self-reported experience, straight off the signup ("New" / "Some"
+            # / "Veteran"). Shown on the pairing card so both players can see
+            # at a glance what they're walking into — it already feeds the
+            # matcher's experience weighting, but until now was invisible to
+            # the people actually playing the game.
+            "player_a_experience": a.experience if a else None,
             "player_b_name": b.player_name if b else None,
             "player_b_id": b.player_id if b else None,
             "player_b_faction": p.b_faction or (b.faction if b else None) if b else None,
+            "player_b_experience": b.experience if b else None,
             "is_bye": is_bye,
             "game_type": game_type,
             "eta": eta,

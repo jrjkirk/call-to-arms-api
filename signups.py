@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import active_player_id_for, get_session, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
-from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club
+from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification
 import discord_guild
 from auth import active_club_id, admin_scopes, require_user
 from systems import SYSTEM_RULES
@@ -174,36 +174,126 @@ def is_first_signup(db: Session, player_id: Optional[int], club_id: int, system:
 
 
 def _discord_gate_mode(db: Session, club_id: int) -> str:
-    """'off' | 'monitor' | 'enforce' for this club. Defaults to 'off' so the
-    gate is inert everywhere until a club deliberately turns it on."""
+    """'off' | 'monitor' | 'enforce' for this club as a whole. Defaults to
+    'off' so the gate is inert everywhere until a club deliberately turns it
+    on. This is the FALLBACK for systems that set no mode of their own —
+    resolve_discord_gate below is what call sites should go through."""
     mode = (get_setting(db, club_id, "discord_gate_mode", "off") or "off").strip().lower()
     return mode if mode in {"off", "monitor", "enforce"} else "off"
 
 
-def require_discord_member(db: Session, player: Player, club_id: int) -> None:
-    """Gate the commit-to-play actions on being in the club's Discord server.
+def _club_system_for(db: Session, club_id: int, system: Optional[str]) -> Optional[ClubSystem]:
+    """This club's row for a system, addressed by the legacy display string
+    that Signup.system and friends actually store. None when the caller
+    didn't say which system, or the club doesn't run it."""
+    if not system:
+        return None
+    config = _get_system_config(db, system)
+    if config is None:
+        return None
+    return db.exec(
+        scoped(ClubSystem, club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+
+
+def resolve_discord_gate(
+    db: Session, club_id: int, system: Optional[str]
+) -> tuple[Optional[str], str, Optional[str], Optional[str]]:
+    """Which Discord server this (club, system) is gated on, in what mode,
+    with which invite link — returns (guild_id, mode, invite_url, server_label).
+
+    Two things are going on here, and they resolve differently on purpose.
+
+    WHETHER the gate applies is opt-in per system, with no inheritance: a game
+    night is gated only if its own admin ticked discord_gate_enabled. A club
+    running three systems can gate one and leave the other two alone, and no
+    club-wide switch can quietly turn it on for a system that didn't ask for
+    it. A system that hasn't opted in returns mode 'off' and never reaches
+    Discord.
+
+    WHICH SERVER it points at DOES fall back to the club, because that's a
+    default rather than a policy: most clubs have one Discord for everything
+    and shouldn't have to paste the same invite into every system, while
+    EGNWGC — where Kill Team and The Old World are separate servers, neither
+    of them club-wide — sets each system's own and the fallback never fires.
+
+    server_label is what the player gets told to join. It names the SYSTEM
+    when that system has its own server ("the Kill Team Discord") and the CLUB
+    when it's inheriting — telling a player to "join EGNWGC's Discord" when
+    there are three of them and only one will let them in is the failure this
+    label exists to avoid.
+    """
+    club = db.get(Club, club_id)
+    if club is None:
+        return None, "off", None, None
+
+    cs = _club_system_for(db, club_id, system)
+
+    if system is not None:
+        # System-scoped action: opt-in is the whole story.
+        if cs is None or not cs.discord_gate_enabled:
+            return None, "off", None, None
+        # NULL mode means "opted in, still watching" — escalating to enforce
+        # is always a deliberate second action by the admin.
+        mode = (cs.discord_gate_mode or "monitor").strip().lower()
+        if mode not in {"off", "monitor", "enforce"}:
+            mode = "monitor"
+    else:
+        # No system in play (club-level action). Falls back to the original
+        # club-wide gate, which is off at every club today. Kept so a caller
+        # that can't name a system degrades to the old behaviour rather than
+        # silently skipping the check.
+        mode = _discord_gate_mode(db, club_id)
+
+    guild_id = (cs.discord_guild_id if cs else None) or club.discord_guild_id
+    invite_url = (cs.discord_url if cs else None) or club.discord_url
+
+    if cs is not None and cs.discord_guild_id:
+        label = f"the {system} Discord"
+    else:
+        label = f"{club.name}'s Discord"
+
+    return guild_id, mode, invite_url, label
+
+
+def require_discord_member(
+    db: Session, player: Player, club_id: int, system: Optional[str] = None
+) -> None:
+    """Gate the commit-to-play actions on being in the right Discord server.
 
     The point isn't identity-checking for its own sake: pairings, drops and
     call-outs are all announced in that Discord, so someone outside it can't
     find out they've been paired. Being in the server is what makes the rest
     of the app work for them.
 
-    Runs at most ONE Discord API call per player, ever — a verified player
-    short-circuits on a single column read, which is why this is safe to put
-    on the hot signup path. Fails open at every step: no guild id, no bot
+    `system` is the legacy display string ("Kill Team"), and picks WHICH
+    server — a club can run each game night out of a different one. Omitting
+    it falls back to the club-wide server, which is correct for the club-level
+    actions that aren't tied to a system.
+
+    Runs at most ONE Discord API call per player PER SERVER, ever — a verified
+    player short-circuits on an indexed row read, which is why this is safe to
+    put on the hot signup path. Fails open at every step: no guild id, no bot
     token, an unclaimed/guest player, or an undetermined answer all let the
     caller through.
     """
+    # Blanket grandfather stamp from the original club-wide rollout: every
+    # player who already existed when the gate first shipped is exempt from
+    # every server's check, forever. Deliberate — that stamp exists precisely
+    # so established members are never surprised by a new requirement, and
+    # splitting the gate per system doesn't change who was already here.
     if player.discord_verified_at is not None:
-        return  # already verified — the overwhelmingly common path
+        return
 
-    club = db.get(Club, club_id)
-    if club is None or not club.discord_guild_id:
-        return  # no server configured: gate off for this club
+    guild_id, mode, invite_url, server_label = resolve_discord_gate(db, club_id, system)
 
-    mode = _discord_gate_mode(db, club_id)
+    if not guild_id:
+        return  # no server configured for this system or its club: gate off
     if mode == "off":
         return
+
+    if _is_verified_for_guild(db, player.id, guild_id):
+        return  # already checked against THIS server — the common path
 
     # No Discord identity to check: unclaimed roster entries and admin-created
     # players. An admin vouching for someone must never be blocked by this.
@@ -213,12 +303,10 @@ def require_discord_member(db: Session, player: Player, club_id: int) -> None:
     if account is None or not account.discord_id:
         return
 
-    member = discord_guild.is_guild_member(club.discord_guild_id, account.discord_id)
+    member = discord_guild.is_guild_member(guild_id, account.discord_id)
 
     if member is True:
-        player.discord_verified_at = datetime.utcnow()
-        db.add(player)
-        db.commit()
+        _record_verification(db, player.id, guild_id)
         return
 
     if member is None:
@@ -230,22 +318,57 @@ def require_discord_member(db: Session, player: Player, club_id: int) -> None:
         # alerted so a busy signup night doesn't spam the alerts channel.
         print(
             f"[discord_gate] MONITOR would block player={player.id} "
-            f"({player.name!r}) club={club_id} guild={club.discord_guild_id}"
+            f"({player.name!r}) club={club_id} system={system!r} guild={guild_id}"
         )
         return
 
+    club = db.get(Club, club_id)
     raise HTTPException(
         status_code=403,
         detail={
             "code": "discord_membership_required",
             "message": (
-                f"Join {club.name}'s Discord to sign up — that's where pairings "
-                f"and reminders get posted."
+                f"Join {server_label} to take part — that's where pairings "
+                f"and reminders for {system or 'this club'} get posted."
             ),
-            "club_name": club.name,
-            "discord_url": club.discord_url,
+            "club_name": club.name if club else None,
+            "system": system,
+            "server_label": server_label,
+            "discord_url": invite_url,
         },
     )
+
+
+def _is_verified_for_guild(db: Session, player_id: Optional[int], guild_id: str) -> bool:
+    """Whether this player has already been confirmed in this server."""
+    if player_id is None:
+        return False
+    return db.exec(
+        select(PlayerDiscordVerification)
+        .where(PlayerDiscordVerification.player_id == player_id)
+        .where(PlayerDiscordVerification.guild_id == guild_id)
+    ).first() is not None
+
+
+def _record_verification(db: Session, player_id: Optional[int], guild_id: str) -> None:
+    """Cache a confirmed membership so this player is never checked against
+    this server again.
+
+    Swallows write failures on purpose: the player HAS been confirmed as a
+    member, so the only cost of a failed insert is one extra Discord call
+    next time. Turning that into a 500 would block a legitimate signup over
+    a cache miss, which contradicts the fail-open rule the whole gate is
+    built on. The unique index on (player_id, guild_id) means a concurrent
+    double-signup lands here rather than writing two rows.
+    """
+    if player_id is None:
+        return
+    try:
+        db.add(PlayerDiscordVerification(player_id=player_id, guild_id=guild_id))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        capture(e, kind="discord_gate_cache_write", guild_id=guild_id)
 
 
 def _validate_week(week: str) -> str:
@@ -491,7 +614,7 @@ def submit_signup(
     db: Session = Depends(get_session),
 ):
     player = _require_linked_player(user, db, club_id)
-    require_discord_member(db, player, club_id)
+    require_discord_member(db, player, club_id, body.system)
 
     config = _get_system_config(db, body.system)
     if config is None:
@@ -715,14 +838,42 @@ def submit_prearranged(
 
     _require_system_enabled(db, club_id, body.system)
 
-    # The gate applies to the CALLER, not to player_a/player_b — a caller with
-    # no player at this club is left alone, matching this endpoint's existing
-    # (deliberately loose) handling of who may arrange a game.
+    # Ownership: you may only arrange a game you are playing in. Without this,
+    # any logged-in club member could book two arbitrary players against each
+    # other — and because a pre-arranged game also blocks both of them out of
+    # that week's pairings, it's a way to quietly disrupt someone else's club
+    # night. The opponent is unrestricted: pick anyone on the club roster, or a
+    # guest, exactly as before.
+    #
+    # System admins are exempt so they can still arrange a game on two members'
+    # behalf. Same call as league.submit_result's ownership check, and for the
+    # same reason: an admin can already generate, edit and delete pairings
+    # outright, so refusing them here would protect nothing.
+    #
+    # A caller with no player at this club is NOT a participant by definition,
+    # so they now need the admin scope. That's the tightening — this endpoint
+    # used to let them through untouched.
+    #
+    # Checked BEFORE the Discord gate below: it's a local comparison, so a
+    # caller who fails both shouldn't be sent to join a Discord server only to
+    # be refused again on the second attempt for the real reason.
     caller_player_id = active_player_id_for(db, user, club_id)
+    # player_b_id is None for a guest / +1, which simply means the caller has
+    # to be player A — the comparison handles that without a special case.
+    if caller_player_id is None or caller_player_id not in (body.player_a_id, body.player_b_id):
+        if body.system not in admin_scopes(user, db, club_id):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only arrange games you're playing in.",
+            )
+
+    # The gate applies to the CALLER, who by the check above is either one of
+    # the two players or this system's admin. An admin with no player row at
+    # this club has no Discord identity to check, so they pass through.
     if caller_player_id is not None:
         caller_player = db.get(Player, caller_player_id)
         if caller_player is not None:
-            require_discord_member(db, caller_player, club_id)
+            require_discord_member(db, caller_player, club_id, body.system)
 
     week = _validate_week(body.week)
 

@@ -79,8 +79,10 @@ def _to_render_rows(display_rows: list[dict]) -> list[dict]:
         out.append({
             "A": r.get("a_name"),
             "Faction A": r.get("a_faction"),
+            "Exp A": r.get("a_experience"),
             "B": r.get("b_name"),
             "Faction B": r.get("b_faction"),
+            "Exp B": r.get("b_experience"),
             "Type": r.get("type"),
             "ETA": r.get("eta"),
             "Points": r.get("points"),
@@ -109,6 +111,30 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
     vs_color = "#c9a14a"
     bye_color = "#8a8270"
     border_default = "#5a4a26"
+
+    # Self-reported experience, shown as a tag under each player's faction so
+    # both sides can see what they're walking into before the game rather than
+    # finding out across the table. Deliberately three plain colours on the
+    # existing palette and NOT the game-type accents — a player's experience
+    # and the game's competitiveness are different axes, and reusing the accent
+    # reds/greens would imply they're the same one.
+    experience_colors = {
+        "new": "#6eb46e",
+        "some": "#b8a878",
+        "veteran": "#d08a50",
+    }
+
+    def _exp_tag(value: str | None) -> tuple[str, str] | None:
+        """(label, colour) for an experience tag, or None to draw nothing.
+
+        Unknown values are dropped rather than rendered raw: this string comes
+        off a signup row, and a system that grows a fourth level should show
+        nothing until this map is updated, not a mystery uncoloured tag.
+        """
+        key = (value or "").strip().lower()
+        if key not in experience_colors:
+            return None
+        return key.upper(), experience_colors[key]
 
     # Per-(system, vibe) accent colours. A system/vibe not listed here (e.g. a
     # newly-added system) falls back to border_default via _accent below — a
@@ -241,6 +267,11 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
                 fontweight="bold", ha="left", va="center", zorder=3)
         ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
                 style="italic", ha="left", va="center", zorder=3)
+        exp_a = _exp_tag(r.get("Exp A"))
+        if exp_a:
+            label, colour = exp_a
+            ax.text(name_a_x, cy - 0.45, label, color=colour, fontsize=8,
+                    fontweight="bold", ha="left", va="center", zorder=3)
 
         for x_center, label, value, _w in meta_x_positions:
             ax.text(x_center, cy + 0.22, label, color=meta_label_color, fontsize=8,
@@ -271,6 +302,11 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             faction_b = str(r.get("Faction B") or "").strip() or "—"
             ax.text(name_b_right, cy - 0.18, faction_b, color=faction_color, fontsize=11,
                     style="italic", ha="right", va="center", zorder=3)
+            exp_b = _exp_tag(r.get("Exp B"))
+            if exp_b:
+                label, colour = exp_b
+                ax.text(name_b_right, cy - 0.45, label, color=colour, fontsize=8,
+                        fontweight="bold", ha="right", va="center", zorder=3)
 
         sep_top = card_top - 0.22
         sep_bot = card_bottom + 0.22

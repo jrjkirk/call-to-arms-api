@@ -13,10 +13,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, or_, select
 
-from auth import require_user, current_user, active_club_id
+from auth import require_user, current_user, active_club_id, admin_scopes
 from database import active_player_id_for, get_session, resolve_request_club_id, resolve_webhook_url, scoped
 from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, SystemConfig, User
 from services import announce_new_achievements
+from signups import require_discord_member
 
 router = APIRouter(prefix="/league", tags=["league"])
 
@@ -460,7 +461,8 @@ def submit_result(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
-    if active_player_id_for(db, user, club_id) is None:
+    caller_player_id = active_player_id_for(db, user, club_id)
+    if caller_player_id is None:
         raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
 
     if body.player_1_id == body.player_2_id:
@@ -498,6 +500,44 @@ def submit_result(
     season_id = _current_season_id(db, club_id, system_id)
     if season_id is None:
         raise HTTPException(status_code=422, detail="No league season is configured.")
+
+    gate_system = db.get(SystemConfig, system_id)
+
+    # Ownership: you may only log a game you played in. Without this, any
+    # logged-in club member could submit a result between two arbitrary
+    # players — and unlike a stray signup, that moves the league, because
+    # every submission triggers a full Elo recalculation for the season.
+    #
+    # System admins are exempt so they can still enter results on someone
+    # else's behalf (a paper sheet from club night, a player without the app).
+    # That's a convenience, not a hole: an admin can already create results via
+    # POST /admin/league/results/from-pairings and edit or delete any existing
+    # row, so blocking them here would protect nothing.
+    #
+    # Checked BEFORE the Discord gate below: it's a local comparison, so a
+    # caller who fails both shouldn't be sent to join a Discord server only to
+    # be refused again on the second attempt for the real reason.
+    if caller_player_id not in (body.player_1_id, body.player_2_id):
+        scopes = admin_scopes(user, db, club_id)
+        if gate_system is None or gate_system.legacy_system_name not in scopes:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only submit results for games you played in.",
+            )
+
+    # Submitting a result is a commit-to-play action like signing up: it moves
+    # league standings and gets announced in the same Discord the gate is
+    # about. Gated on the caller, who by the check above is either one of the
+    # two players or that system's admin.
+    #
+    # Runs on the RESOLVED system, not body.system: that field is optional and
+    # omitting it falls back to the club's single league-enabled system, so
+    # gating on the raw body would let a caller skip the check by leaving it
+    # out. Placed after validation so an invalid payload never costs a Discord
+    # call.
+    caller_player = db.get(Player, caller_player_id)
+    if caller_player is not None and gate_system is not None:
+        require_discord_member(db, caller_player, club_id, gate_system.legacy_system_name)
 
     result_date = datetime.utcnow().strftime("%d/%m/%Y")
 

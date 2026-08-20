@@ -507,6 +507,72 @@ class ClubSystem(SQLModel, table=True):
     # as missions_enabled/league_enabled above.
     table_booking_enabled: bool = False
 
+    # Per-(club, system) Discord server, for the membership gate (2026-08-20).
+    # One club can run each of its game nights out of a DIFFERENT Discord
+    # server — at EGNWGC, Kill Team and The Old World are separate servers
+    # neither of which is a "club" server. So the guild, the invite link and
+    # the enforcement mode all belong here, not on Club.
+    #
+    # All three are NULL-means-inherit: a club whose systems share one Discord
+    # sets nothing here and keeps falling back to Club.discord_guild_id /
+    # Club.discord_url / the club-level discord_gate_mode setting. That's what
+    # keeps the original club-wide gate working untouched.
+    #
+    # discord_url is also the "Join our Discord" CTA on this system's Club-page
+    # carousel card — the invite a player is shown must be the server they're
+    # actually being gated on, or the gate sends them to the wrong place.
+    discord_guild_id: Optional[str] = None
+    discord_url: Optional[str] = None
+
+    # The gate is OPT-IN PER SYSTEM, same shape as missions_enabled /
+    # league_enabled / table_booking_enabled above and owned by the same
+    # admin. Not every game night wants the friction — one system can require
+    # Discord membership while its neighbour at the same club doesn't care,
+    # and that's a decision per game night, not per club.
+    #
+    # False (the default, and the state every existing row migrates into)
+    # means this system is never gated, whatever the club-level settings say.
+    # There is deliberately NO inheritance here: an opt-in that a club-wide
+    # switch could silently turn on for you isn't an opt-in.
+    #
+    # discord_gate_mode is the rollout dial WITHIN an opted-in system:
+    # 'monitor' (log who would be blocked, block nobody) or 'enforce'. NULL
+    # resolves to 'monitor', so opting in starts by watching and escalating to
+    # enforce stays a deliberate second action.
+    discord_gate_enabled: bool = False
+    discord_gate_mode: Optional[str] = None
+
+
+class PlayerDiscordVerification(SQLModel, table=True):
+    """Per-(player, guild) proof that a player is in a given Discord server.
+
+    Replaces Player.discord_verified_at as the gate's cache once a club can
+    have more than one Discord server. That single column could only answer
+    "has this player been checked", which silently became the wrong question:
+    being in the Kill Team server says nothing about being in the Old World
+    one, so one boolean would let a verified KT player through TOW's gate.
+
+    Keyed on guild_id rather than system_id deliberately — the fact being
+    cached is "this person is in THAT server", which stays true no matter how
+    many systems point at it. Two systems sharing a server therefore share the
+    verification, and re-pointing a system at a different server correctly
+    invalidates nothing (the old rows just stop being consulted).
+
+    Rows are only ever inserted, never cleared: same one-call-per-player-ever
+    guarantee as the column it replaces. A player who later leaves the Discord
+    keeps their access — deliberate, matching the original design's bias
+    toward never blocking an established member. Uniqueness on
+    (player_id, guild_id) is enforced by the check-then-insert in
+    signups.require_discord_member, same convention as ClubSystem/ClubWebhook.
+    """
+    __tablename__ = "player_discord_verifications"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    player_id: int = Field(foreign_key="players.id", index=True)
+    guild_id: str = Field(index=True)
+    verified_at: datetime = Field(default_factory=datetime.utcnow)
+
 
 class ClubEvent(SQLModel, table=True):
     """A calendar entry for one club: either a one-off event or an override/
