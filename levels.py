@@ -29,7 +29,7 @@ import httpx
 from sqlmodel import Session, select
 
 from database import name_with_mention, resolve_webhook_url
-from experience import games_played
+from experience import counts_for_players, games_played
 from models import Pairing, PlayerLevelAnnouncement, Player, Signup, SystemConfig
 from observability import capture
 
@@ -134,38 +134,16 @@ def progress(db: Session, club_id: int, player_id: Optional[int], system: str) -
 def levels_for_players(
     db: Session, club_id: int, system: str, player_ids: list[int]
 ) -> dict[int, int]:
-    """Level for many players at once, in one pass over the system's pairings.
+    """Level for many players at once, via one aggregate query.
 
-    The per-player helper is a query each, which is fine on a profile page but
-    an N+1 on a pairings list — and the pairings image is rendered by a cron,
-    where that multiplies by every player in the week.
+    See experience.counts_for_players — this used to scan the system's whole
+    signup and pairing tables in Python on every call, including every poll of
+    the public pairings endpoint.
     """
-    ids = {pid for pid in player_ids if pid is not None}
-    if not ids:
-        return {}
-
-    # signup id -> player id, for this club and system only.
-    owner: dict[int, int] = {}
-    for sid, pid in db.exec(
-        select(Signup.id, Signup.player_id)
-        .where(Signup.club_id == club_id)
-        .where(Signup.system == system)
-        .where(Signup.player_id.is_not(None))
-    ).all():
-        owner[sid] = pid
-
-    counts: dict[int, int] = {pid: 0 for pid in ids}
-    for a, b in db.exec(
-        select(Pairing.a_signup_id, Pairing.b_signup_id)
-        .where(Pairing.club_id == club_id)
-        .where(Pairing.system == system)
-        .where(Pairing.b_signup_id.is_not(None))
-    ).all():
-        for sid in (a, b):
-            pid = owner.get(sid)
-            if pid in counts:
-                counts[pid] += 1
-    return {pid: level_for(n) for pid, n in counts.items()}
+    return {
+        pid: level_for(n)
+        for pid, n in counts_for_players(db, club_id, system, player_ids).items()
+    }
 
 
 def milestones_crossed(previous_level: int, current_level: int) -> list[int]:
@@ -215,16 +193,27 @@ def announce_level_ups(db: Session, club_id: int, system: str) -> int:
         select(Player).where(Player.club_id == club_id).where(Player.active == True)
     ).all()
 
-    posted = 0
-    for player in players:
-        state = db.exec(
+    # One aggregate for the whole club, and one query for every high-water mark
+    # — rather than three queries per player. This was an N+1 measured at 8.7
+    # seconds on prod, held for the entire publish request, which is long
+    # enough to starve the connection pool on its own.
+    levels_now = levels_for_players(db, club_id, system, [p.id for p in players])
+    states = {
+        st.player_id: st
+        for st in db.exec(
             select(PlayerLevelAnnouncement)
             .where(PlayerLevelAnnouncement.club_id == club_id)
-            .where(PlayerLevelAnnouncement.player_id == player.id)
             .where(PlayerLevelAnnouncement.system == system)
-        ).first()
+        ).all()
+    }
+
+    # Collect what to say, THEN post — Discord is slow and must not be talked
+    # to while holding a database connection.
+    to_post: list[tuple[str, int]] = []
+    for player in players:
+        state = states.get(player.id)
         previous = state.last_level if state else 1
-        current = level_for(games_played(db, club_id, player.id, system))
+        current = levels_now.get(player.id, 1)
         if current <= previous:
             continue
 
@@ -242,16 +231,22 @@ def announce_level_ups(db: Session, club_id: int, system: str) -> int:
         db.add(state)
 
         if url and crossed:
+            who = name_with_mention(db, player.name, player.id)
             for lv in crossed:
-                if _post_ding(url, db, player, system, lv):
-                    posted += 1
+                to_post.append((who, lv))
+
     db.commit()
+    db.close()  # release before any network call
+
+    posted = 0
+    for who, lv in to_post:
+        if _post_ding(url, who, system, lv):
+            posted += 1
     return posted
 
 
-def _post_ding(url: str, db: Session, player: Player, system: str, level: int) -> bool:
+def _post_ding(url: str, who: str, system: str, level: int) -> bool:
     band = band_for(level)
-    who = name_with_mention(db, player.name, player.id)
     if level >= LEVEL_CAP:
         text = f"{_BAND_FLOURISH[band]} **DING!** {who} has hit **level {LEVEL_CAP}** in {system}. Maximum level. Nothing left to prove."
     else:

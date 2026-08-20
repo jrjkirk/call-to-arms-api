@@ -18,6 +18,7 @@ comes from — no sweep to run, nothing to rebuild if a pairing is deleted.
 """
 from typing import Optional
 
+from sqlalchemy import bindparam, text
 from sqlmodel import Session, select
 
 from models import Pairing, PlayerExperienceAdjustment, Signup
@@ -56,25 +57,48 @@ def games_played(db: Session, club_id: int, player_id: Optional[int], system: st
     """
     if player_id is None:
         return 0
-    # The player's signup ids for this (club, system) — the join key pairings
-    # actually store.
-    signup_ids = db.exec(
-        select(Signup.id)
-        .where(Signup.club_id == club_id)
-        .where(Signup.system == system)
-        .where(Signup.player_id == player_id)
-    ).all()
-    if not signup_ids:
-        return 0
-    ids = set(signup_ids)
+    return counts_for_players(db, club_id, system, [player_id]).get(player_id, 0)
+
+
+def counts_for_players(
+    db: Session, club_id: int, system: str, player_ids: list[int]
+) -> dict[int, int]:
+    """Games played, for many players at once, as ONE aggregate query.
+
+    This used to pull every signup and every pairing for the system into Python
+    and count there. That is a full scan of two tables per call — and GET
+    /pairings calls it, which the pairings page POLLS while a week is
+    unpublished. Measured on prod it cost half a second per request while
+    holding the request's database connection, which is how a page nobody
+    thought was expensive started exhausting the connection pool.
+
+    Counting in SQL keeps it to one indexed aggregate. Byes are excluded
+    (b_signup_id IS NULL) — nobody plays a bye.
+    """
+    ids = [pid for pid in {p for p in player_ids} if pid is not None]
+    if not ids:
+        return {}
 
     rows = db.exec(
-        select(Pairing.a_signup_id, Pairing.b_signup_id)
-        .where(Pairing.club_id == club_id)
-        .where(Pairing.system == system)
-        .where(Pairing.b_signup_id.is_not(None))  # a bye isn't a game
+        text(
+            """
+            SELECT s.player_id, count(*) AS games
+            FROM pairings pr
+            JOIN signups s
+              ON s.id = pr.a_signup_id OR s.id = pr.b_signup_id
+            WHERE pr.club_id = :club_id
+              AND pr.system = :system
+              AND pr.b_signup_id IS NOT NULL
+              AND s.club_id = :club_id
+              AND s.system = :system
+              AND s.player_id IN :ids
+            GROUP BY s.player_id
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        params={"club_id": club_id, "system": system, "ids": ids},
     ).all()
-    return sum(1 for a, b in rows if a in ids or b in ids)
+    counted = {pid: n for pid, n in rows}
+    return {pid: counted.get(pid, 0) for pid in ids}
 
 
 def adjustment_for(db: Session, club_id: int, player_id: Optional[int], system: str) -> int:
