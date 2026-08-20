@@ -61,34 +61,46 @@ player was grandfathered.
 
 ---
 
-## 2. Admin page fires ~40 requests in parallel on load
+## 2. Supabase's pooler caps us at ~16 concurrent connections
 
-**Symptom.** The admin page is slower to load than the rest of the app, and
-anything added to its per-system fan-out multiplies by the number of systems a
-club runs.
+**Symptom.** Under a large enough burst of simultaneous requests, some fail —
+historically `psycopg2.OperationalError: SSL connection has been closed
+unexpectedly`, later `TimeoutError: QueuePool limit ... reached`. Both are the
+same underlying wall seen from different sides.
 
-**Cause.** `initSystemScope(scope)` runs once per game night and `Promise.all`s
-about ten fetches inside it. A club running six systems therefore issues ~60
-requests where the code reads as ten. This has bitten twice: the per-system
-Discord gate panel turned one Discord API call into six (rate-limited, fixed by
-caching in `discord_guild.py`), and `loadCarousel` refetched the entire `/club`
-payload once per system (fixed by sharing one in-flight promise).
+**Cause.** Measured from the Fly machine against the prod pooler, holding N
+connections simultaneously for 2s: 12 → 24/24 clean, 16 → 32/32 clean, 20 →
+39/40, 30 → 56/60, 100 → 89/100. **Past roughly 16 the pooler starts dropping
+connections**, and what it returns is the SSL error. So the ceiling is
+Supabase's, not ours, and no pool size can exceed it.
 
-**No longer a 500.** This entry used to describe a wave of
-`psycopg2.OperationalError: SSL connection has been closed unexpectedly`,
-caused by `NullPool` opening ~40 brand new pooler connections at once. The
-engine now uses a bounded pool (`pool_size=5, max_overflow=10, pool_pre_ping`),
-which absorbs the burst — measured against prod, 40 parallel queries complete
-in 0.59s using 5 connections, and per-request latency halved (0.77s → 0.38s)
-now that each one no longer pays a TLS handshake.
+Compounding it: a connection is acquired during FastAPI **dependency
+resolution** (`require_user` does `db.get(User, ...)`) and held until
+`get_session`'s generator tears down after the response. A request therefore
+holds its connection while merely *queued* for a thread, so concurrent
+checkouts track **in-flight requests**, not executing handlers. Sizing a pool
+against the AnyIO threadpool limit is wrong for this reason — it was tried, and
+it 500'd.
 
-**Why it's left.** What remains is a design smell, not a fault: the page works
-and is reasonably quick. The deeper fix is to stop prefetching every system on
-load — either lazy per-tab loading, or one batched admin-bootstrap endpoint.
+**Current state — not currently firing.** `database.py` uses
+`pool_size=10, max_overflow=4` (=14, under the ceiling, leaving headroom for
+cron processes), `pool_pre_ping`, `pool_recycle=300`, `pool_timeout=30`. Warm
+is deliberately most of the capacity: a reused connection can't be refused.
+`--limit-concurrency=64` in the Dockerfile is a safety valve for genuine
+overload — **not** a throttle; at 32 it rejected 87 of 120 requests with hard
+503s, which is worse than what it prevents. And the admin page no longer
+prefetches every system (`ensureSystemScope`), which removed the burst that
+caused all of this.
 
-**Revisit when.** Anything new is added to `initSystemScope` (check what it
-costs times the number of systems first), or a club grows enough systems that
-load time becomes noticeable again.
+**Why it's left.** Nothing to fix while we stay under the ceiling. It's
+recorded because the ceiling is invisible, low, and the error it produces looks
+like a network fault rather than a limit.
 
-**Code.** The fan-out is in `call-to-arms-web/src/routes/admin/+page.svelte`;
-the pool is in `database.py`.
+**Revisit when.** The SSL or QueuePool error reappears; anything is added to
+`initSystemScope` (its cost multiplies by the number of systems a club runs);
+uvicorn gains `--workers` (the pool is per-process, so capacity must be divided
+between them); or the Supabase plan changes, which would move the ceiling —
+re-measure rather than assume.
+
+**Code.** `database.py` (pool), `Dockerfile` (limit-concurrency),
+`call-to-arms-web/src/routes/admin/+page.svelte` (`ensureSystemScope`).
