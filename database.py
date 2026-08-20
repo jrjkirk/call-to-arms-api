@@ -100,10 +100,23 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # transaction-mode hazard (it's what bites asyncpg). Do not switch drivers
 # without revisiting this.
 #
-# Sizing: one uvicorn process (see Dockerfile — no --workers), so this pool is
-# the whole application's footprint, not per-worker. 5 + 10 overflow caps us at
-# 15 concurrent connections, comfortably under the pooler's allowance while
-# still absorbing the admin burst.
+# SIZING IS TIED TO THE THREADPOOL — do not lower it casually.
+# Every endpoint in this app is a sync `def`, so FastAPI runs them in AnyIO's
+# threadpool, whose default limiter is 40 threads. That makes 40 the hard
+# ceiling on concurrently-executing handlers, and therefore on simultaneously
+# checked-out connections. Sizing total capacity to that ceiling means HTTP
+# traffic can NEVER exhaust the pool — not merely "usually doesn't", which is
+# what a smaller pool buys you. A pool of 15 was measured failing 40 of 60
+# concurrent checkouts with `QueuePool limit of size 5 overflow 10 reached`;
+# that's a 500 to the user, just a different one from the SSL drops.
+#
+# One uvicorn process (see Dockerfile — no --workers), so this pool is the whole
+# application's footprint, not per-worker. If a worker count is ever added, or
+# the handlers become `async def`, revisit both numbers together.
+#
+# pool_size is the warm baseline kept open between bursts (player traffic never
+# needs more); overflow absorbs the admin page's fan-out and is closed on
+# return, so quiet periods don't hold 40 idle connections.
 #
 # pool_pre_ping: pgbouncer and the network both drop idle connections, and a
 # pooled connection that died while idle would otherwise surface as a random
@@ -118,13 +131,24 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # max_overflow/pool_timeout outright — and `sqlite:///…` is now the local dev
 # and test path (the staging Postgres project no longer exists), so passing
 # these unconditionally breaks every local run.
+# AnyIO's default thread limiter. The app never raises it, so this is the most
+# handlers that can run — and hold a connection — at once.
+MAX_CONCURRENT_HANDLERS = 40
+_POOL_WARM = 10
+
 _POOL_KWARGS = (
     {
-        "pool_size": 5,
-        "max_overflow": 10,
+        "pool_size": _POOL_WARM,
+        # Total capacity == the handler ceiling, so a request can always get a
+        # connection rather than queueing behind one.
+        "max_overflow": MAX_CONCURRENT_HANDLERS - _POOL_WARM,
         "pool_pre_ping": True,
         "pool_recycle": 300,
-        "pool_timeout": 10,
+        # Belt and braces: capacity now matches the ceiling, so HTTP traffic
+        # shouldn't ever wait here. Generous rather than 10s so that if
+        # something does saturate it (a cron script sharing this engine), the
+        # request queues instead of 500ing.
+        "pool_timeout": 30,
     }
     if DATABASE_URL.startswith(("postgresql", "postgres://"))
     else {}
