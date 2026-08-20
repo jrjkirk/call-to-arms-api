@@ -76,15 +76,33 @@ def level_for(games: int) -> int:
     return lv
 
 
-# Rarity bands, borrowed from the game this is modelled on. Kept here rather
-# than in the frontend so the Discord announcement and the profile agree.
+# Rarity bands: one per ten levels, so the colour moves at every announced
+# milestone. The two go together deliberately — the "ding" and the new colour
+# are the same moment, which is the whole reward.
+#
+# It started with a change at 30, another at 50 and the cap at 60, matching the
+# game this borrows from. Measured on prod, that put 99 of 99 (player, system)
+# pairs in ONE band with the first change 75 games away — about 1.7 years at
+# the club's best play rate. A progression toy that looks identical for years
+# isn't showing progression.
+#
+# Starts on green rather than white: white reads as "nothing yet" when it's
+# the colour four fifths of the club will wear for months.
+BANDS: list[tuple[int, str]] = [
+    (60, "legendary"),
+    (50, "ascendant"),
+    (40, "mythic"),
+    (30, "epic"),
+    (20, "rare"),
+    (10, "uncommon"),
+    (1, "common"),
+]
+
+
 def band_for(level: int) -> str:
-    if level >= LEVEL_CAP:
-        return "legendary"
-    if level >= 50:
-        return "epic"
-    if level >= 30:
-        return "rare"
+    for floor, name in BANDS:
+        if level >= floor:
+            return name
     return "common"
 
 
@@ -129,10 +147,14 @@ def milestones_crossed(previous_level: int, current_level: int) -> list[int]:
     return sorted(set(out))
 
 
+# One per band, so the announcement carries the same step up the profile shows.
 _BAND_FLOURISH = {
-    "common": "🎉",
-    "rare": "🔷",
+    "common": "🟢",
+    "uncommon": "🟦",
+    "rare": "🔵",
     "epic": "🟣",
+    "mythic": "🌸",
+    "ascendant": "🔮",
     "legendary": "🟠",
 }
 
