@@ -1045,12 +1045,28 @@ def submit_prearranged(
 
     eta = (body.eta or "").strip() or None
 
+    # Experience is DERIVED per player, exactly as it is on the normal signup
+    # path. It used to be hardcoded "New" for both sides here, which meant a
+    # thirty-game veteran who arranged their own game appeared on the pairing
+    # card as a newcomer — the one place the label matters most, since a
+    # pre-arranged game is the one nobody else vetted.
+    #
+    # A guest (player_b_id None) has no history and no account, so they stay
+    # New. That's correct rather than a fallback: the club knows nothing about
+    # them.
+    exp_a = experience_summary(db, club_id, pa.id, body.system)["tier"]
+    exp_b = (
+        experience_summary(db, club_id, pb_player_id, body.system)["tier"]
+        if pb_player_id is not None
+        else "New"
+    )
+
     # Create both signups and pairing in one transaction
     su_a = Signup(
         week=week, system=body.system,
         player_id=pa.id, player_name=pa.name,
         faction=faction_a, points=points, eta=eta,
-        experience="New", vibe=vibe,
+        experience=exp_a, vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
         club_id=club_id,
@@ -1059,7 +1075,7 @@ def submit_prearranged(
         week=week, system=body.system,
         player_id=pb_player_id, player_name=pb_name,
         faction=faction_b, points=points, eta=eta,
-        experience="New", vibe=vibe,
+        experience=exp_b, vibe=vibe,
         standby_ok=False, tnt_ok=False,
         scenario=None, can_demo=False,
         club_id=club_id,

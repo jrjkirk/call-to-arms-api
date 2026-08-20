@@ -288,18 +288,19 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
                 fontweight="bold", ha="left", va="center", zorder=3)
         ax.text(name_a_x, cy - 0.18, faction_a, color=faction_color, fontsize=11,
                 style="italic", ha="left", va="center", zorder=3)
+        # Left player: level then tier, reading outward from the name, so the
+        # card is symmetrical about the VS instead of both sides running
+        # left-to-right.
         exp_a = _exp_tag(r.get("Exp A"))
         lvl_a = _level_tag(r.get("Lvl A"))
         tag_x = name_a_x
-        if lvl_a:
-            label, colour = lvl_a
+        for tag in (lvl_a, exp_a):
+            if not tag:
+                continue
+            label, colour = tag
             ax.text(tag_x, cy - 0.45, label, color=colour, fontsize=8,
                     fontweight="bold", ha="left", va="center", zorder=3)
             tag_x += 0.42
-        if exp_a:
-            label, colour = exp_a
-            ax.text(tag_x, cy - 0.45, label, color=colour, fontsize=8,
-                    fontweight="bold", ha="left", va="center", zorder=3)
 
         for x_center, label, value, _w in meta_x_positions:
             ax.text(x_center, cy + 0.22, label, color=meta_label_color, fontsize=8,
@@ -330,18 +331,17 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             faction_b = str(r.get("Faction B") or "").strip() or "—"
             ax.text(name_b_right, cy - 0.18, faction_b, color=faction_color, fontsize=11,
                     style="italic", ha="right", va="center", zorder=3)
+            # Right player: the same order, mirrored — level outermost.
             exp_b = _exp_tag(r.get("Exp B"))
             lvl_b = _level_tag(r.get("Lvl B"))
             tag_x_b = name_b_right
-            if lvl_b:
-                label, colour = lvl_b
+            for tag in (lvl_b, exp_b):
+                if not tag:
+                    continue
+                label, colour = tag
                 ax.text(tag_x_b, cy - 0.45, label, color=colour, fontsize=8,
                         fontweight="bold", ha="right", va="center", zorder=3)
                 tag_x_b -= 0.42
-            if exp_b:
-                label, colour = exp_b
-                ax.text(tag_x_b, cy - 0.45, label, color=colour, fontsize=8,
-                        fontweight="bold", ha="right", va="center", zorder=3)
 
         sep_top = card_top - 0.22
         sep_bot = card_bottom + 0.22
