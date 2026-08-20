@@ -61,34 +61,34 @@ player was grandfathered.
 
 ---
 
-## 2. Admin page can 500 in a burst: `SSL connection has been closed unexpectedly`
+## 2. Admin page fires ~40 requests in parallel on load
 
-**Symptom.** Loading the admin page occasionally throws a wave of
+**Symptom.** The admin page is slower to load than the rest of the app, and
+anything added to its per-system fan-out multiplies by the number of systems a
+club runs.
+
+**Cause.** `initSystemScope(scope)` runs once per game night and `Promise.all`s
+about ten fetches inside it. A club running six systems therefore issues ~60
+requests where the code reads as ten. This has bitten twice: the per-system
+Discord gate panel turned one Discord API call into six (rate-limited, fixed by
+caching in `discord_guild.py`), and `loadCarousel` refetched the entire `/club`
+payload once per system (fixed by sharing one in-flight promise).
+
+**No longer a 500.** This entry used to describe a wave of
 `psycopg2.OperationalError: SSL connection has been closed unexpectedly`,
-always on `SELECT users WHERE id = ?` — the first query of every authenticated
-request. It self-recovers within about a minute.
+caused by `NullPool` opening ~40 brand new pooler connections at once. The
+engine now uses a bounded pool (`pool_size=5, max_overflow=10, pool_pre_ping`),
+which absorbs the burst — measured against prod, 40 parallel queries complete
+in 0.59s using 5 connections, and per-request latency halved (0.77s → 0.38s)
+now that each one no longer pays a TLS handshake.
 
-**Cause.** `database.py` builds the engine with `poolclass=NullPool` against
-Supabase's **transaction pooler** (port 6543), so every request opens a brand
-new connection. The admin page fires roughly **40 requests in parallel** on
-load, which means ~40 simultaneous fresh pooler connections. The pooler runs
-out and drops them.
+**Why it's left.** What remains is a design smell, not a fault: the page works
+and is reasonably quick. The deeper fix is to stop prefetching every system on
+load — either lazy per-tab loading, or one batched admin-bootstrap endpoint.
 
-**Why it's left.** It's admin-only (a player's signup flow makes a handful of
-requests, not 40), it self-heals, and it loses no data. The fix — a bounded
-client-side pool, e.g. `pool_size=5, max_overflow=10, pool_pre_ping=True,
-pool_recycle=300` — touches every database call in the application, so it
-deserves a deliberate session with staging verification rather than being
-tacked onto a feature. It would also make that page noticeably faster by
-reusing connections instead of paying a TLS handshake per request. Client-side
-pooling is safe with the transaction pooler here: psycopg2 doesn't use
-server-side prepared statements, which is the usual transaction-mode hazard.
+**Revisit when.** Anything new is added to `initSystemScope` (check what it
+costs times the number of systems first), or a club grows enough systems that
+load time becomes noticeable again.
 
-**Revisit when.** It recurs, a *player* hits it rather than only an admin, or
-anything new is added to the admin page's parallel load. Reducing that
-~40-request fan-out is the deeper fix; the pool change makes it survivable
-either way.
-
-**Code.** `database.py` engine construction; the fan-out is in
-`call-to-arms-web/src/routes/admin/+page.svelte`.
-
+**Code.** The fan-out is in `call-to-arms-web/src/routes/admin/+page.svelte`;
+the pool is in `database.py`.

@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 from sqlalchemy import event
 from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
-from sqlalchemy.pool import NullPool
 
 from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, Player, ScheduledJobRun, User
 
@@ -88,7 +87,50 @@ WRITE_ALLOWED_TABLES: set[str] = {
                        # reminder + auto-expire in run_call_outs_check.py)
 }
 
-engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+# Bounded client-side pool against Supabase's TRANSACTION pooler (port 6543).
+#
+# This was NullPool, which opened a brand new connection — TLS handshake and
+# all — for every single request. The admin page fires ~40 requests in parallel
+# on load, so it asked the pooler for ~40 simultaneous fresh connections; the
+# pooler ran out and dropped them, which is the `SSL connection has been closed
+# unexpectedly` wave that used to hit the admin page (was KNOWN_ISSUES #2).
+#
+# Client-side pooling is safe with the transaction pooler HERE specifically:
+# psycopg2 doesn't use server-side prepared statements, which is the usual
+# transaction-mode hazard (it's what bites asyncpg). Do not switch drivers
+# without revisiting this.
+#
+# Sizing: one uvicorn process (see Dockerfile — no --workers), so this pool is
+# the whole application's footprint, not per-worker. 5 + 10 overflow caps us at
+# 15 concurrent connections, comfortably under the pooler's allowance while
+# still absorbing the admin burst.
+#
+# pool_pre_ping: pgbouncer and the network both drop idle connections, and a
+# pooled connection that died while idle would otherwise surface as a random
+# query error. The ping costs a round trip on checkout and buys immunity to
+# stale-connection errors.
+# pool_recycle: proactively retire connections after 5 minutes so they rarely
+# reach the state pre_ping has to catch.
+# pool_timeout: fail in 10s rather than hanging a request forever if all 15 are
+# checked out.
+#
+# Applied only for PostgreSQL. SQLite uses SingletonThreadPool, which rejects
+# max_overflow/pool_timeout outright — and `sqlite:///…` is now the local dev
+# and test path (the staging Postgres project no longer exists), so passing
+# these unconditionally breaks every local run.
+_POOL_KWARGS = (
+    {
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_timeout": 10,
+    }
+    if DATABASE_URL.startswith(("postgresql", "postgres://"))
+    else {}
+)
+
+engine = create_engine(DATABASE_URL, echo=False, **_POOL_KWARGS)
 
 
 @event.listens_for(Session, "before_flush")

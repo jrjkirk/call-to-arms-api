@@ -4557,9 +4557,10 @@ def get_club_system_discord_gate(
         cs.discord_guild_id, cs.discord_url,
         club.name, club.discord_guild_id, club.discord_url,
     )
-    # Release the pooler connection before any Discord call — the engine uses
-    # NullPool, so every request is a real new connection to Supabase's
-    # transaction pooler and the admin page loads these in a parallel burst.
+    # Return the connection to the pool before any Discord call. The pool is
+    # bounded (database.py), and the admin page loads one of these per system
+    # in a parallel burst — holding a connection across external HTTP latency
+    # is exactly how a bounded pool gets exhausted.
     db.close()
     return _club_system_gate_state(*state_args, force_refresh=refresh)
 
@@ -4660,9 +4661,8 @@ def get_discord_gate(
         raise HTTPException(status_code=404, detail="Club not found")
     guild_id, club_discord_url = club.discord_guild_id, club.discord_url
     mode = _discord_gate_mode(db, club.id)
-    # Release the pooler connection before any Discord call. The engine uses
-    # NullPool, so every request is a real new connection to Supabase's
-    # transaction pooler and there are only so many to go round.
+    # Return the connection to the pool before any Discord call — holding one
+    # across external HTTP latency is how a bounded pool gets exhausted.
     db.close()
     return _discord_gate_state(guild_id, club_discord_url, mode)
 
