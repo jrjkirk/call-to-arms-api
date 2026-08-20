@@ -100,23 +100,31 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # transaction-mode hazard (it's what bites asyncpg). Do not switch drivers
 # without revisiting this.
 #
-# SIZING IS TIED TO THE THREADPOOL — do not lower it casually.
-# Every endpoint in this app is a sync `def`, so FastAPI runs them in AnyIO's
-# threadpool, whose default limiter is 40 threads. That makes 40 the hard
-# ceiling on concurrently-executing handlers, and therefore on simultaneously
-# checked-out connections. Sizing total capacity to that ceiling means HTTP
-# traffic can NEVER exhaust the pool — not merely "usually doesn't", which is
-# what a smaller pool buys you. A pool of 15 was measured failing 40 of 60
-# concurrent checkouts with `QueuePool limit of size 5 overflow 10 reached`;
-# that's a 500 to the user, just a different one from the SSL drops.
+# SIZING — read this before changing either number.
 #
-# One uvicorn process (see Dockerfile — no --workers), so this pool is the whole
-# application's footprint, not per-worker. If a worker count is ever added, or
-# the handlers become `async def`, revisit both numbers together.
+# A connection is acquired during DEPENDENCY resolution (require_user does
+# `db.get(User, ...)`) and held until the request finishes and get_session's
+# generator tears down. So the number of simultaneously checked-out connections
+# tracks **in-flight requests**, not executing handlers.
+#
+# An earlier version of this comment claimed AnyIO's 40-thread limiter capped
+# it, and sized the pool to 40 on that basis. That was wrong, and it 500'd in
+# production with `QueuePool limit of size 10 overflow 30 reached`: a request
+# holds its connection while it is merely QUEUED for a thread, so 60 concurrent
+# requests want 60 connections no matter how few threads run at once.
+#
+# The pool is therefore NOT the place to bound this — a pool can only be sized
+# against a bounded number, and in-flight requests are bounded by the HTTP
+# server, not by us. uvicorn's --limit-concurrency (see Dockerfile) is what
+# bounds it; this pool is sized to sit just above that limit so a request that
+# the server admitted always finds a connection.
+#
+# One uvicorn process (no --workers), so this pool is the whole application's
+# footprint. If workers are ever added, divide capacity between them.
 #
 # pool_size is the warm baseline kept open between bursts (player traffic never
 # needs more); overflow absorbs the admin page's fan-out and is closed on
-# return, so quiet periods don't hold 40 idle connections.
+# return, so quiet periods don't hold idle connections.
 #
 # pool_pre_ping: pgbouncer and the network both drop idle connections, and a
 # pooled connection that died while idle would otherwise surface as a random
@@ -131,17 +139,20 @@ WRITE_ALLOWED_TABLES: set[str] = {
 # max_overflow/pool_timeout outright — and `sqlite:///…` is now the local dev
 # and test path (the staging Postgres project no longer exists), so passing
 # these unconditionally breaks every local run.
-# AnyIO's default thread limiter. The app never raises it, so this is the most
-# handlers that can run — and hold a connection — at once.
-MAX_CONCURRENT_HANDLERS = 40
+# Must stay >= uvicorn's --limit-concurrency in the Dockerfile. The server
+# refuses (503) beyond that many in-flight requests, so that — plus headroom
+# for the scheduled scripts that share this module — is the real ceiling on
+# concurrent checkouts.
+MAX_INFLIGHT_REQUESTS = 32
 _POOL_WARM = 10
 
 _POOL_KWARGS = (
     {
         "pool_size": _POOL_WARM,
-        # Total capacity == the handler ceiling, so a request can always get a
-        # connection rather than queueing behind one.
-        "max_overflow": MAX_CONCURRENT_HANDLERS - _POOL_WARM,
+        # Capacity sits ABOVE the admitted-request ceiling, so any request the
+        # server accepted is guaranteed a connection. The +8 is headroom for
+        # in-process background work that doesn't go through the HTTP limiter.
+        "max_overflow": MAX_INFLIGHT_REQUESTS + 8 - _POOL_WARM,
         "pool_pre_ping": True,
         "pool_recycle": 300,
         # Belt and braces: capacity now matches the ceiling, so HTTP traffic
