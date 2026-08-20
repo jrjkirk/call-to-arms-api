@@ -4465,6 +4465,7 @@ def _club_system_gate_state(
     club_name: str,
     club_guild_id: Optional[str],
     club_discord_url: Optional[str],
+    force_refresh: bool = False,
 ) -> dict:
     """Everything the per-system gate panel needs to render.
 
@@ -4478,7 +4479,11 @@ def _club_system_gate_state(
     single most important thing for an admin at a club like EGNWGC to see
     before switching enforcement on.
     """
-    guilds = discord_guild.bot_guilds()
+    # Cached by default: the admin page renders one of these panels per system
+    # and Discord allows one bot_guilds call per second, so an uncached burst
+    # 429s all but the first. force_refresh is the admin's explicit "Check
+    # connection" press, which must see through the cache.
+    guilds = discord_guild.bot_guilds(force=force_refresh)
     bot_configured = guilds is not None
 
     effective_guild_id = own_guild_id or club_guild_id
@@ -4535,6 +4540,7 @@ def _load_club_system_for_gate(db: Session, user: User, system: str) -> tuple:
 @router.get("/club-systems/discord-gate")
 def get_club_system_discord_gate(
     system: str,
+    refresh: bool = False,
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
@@ -4555,7 +4561,7 @@ def get_club_system_discord_gate(
     # NullPool, so every request is a real new connection to Supabase's
     # transaction pooler and the admin page loads these in a parallel burst.
     db.close()
-    return _club_system_gate_state(*state_args)
+    return _club_system_gate_state(*state_args, force_refresh=refresh)
 
 
 @router.post("/club-systems/discord-gate")

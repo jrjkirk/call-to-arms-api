@@ -23,6 +23,7 @@ and a silent hard-fail here would break the club's whole signup night.
 """
 import os
 import re
+import time
 from typing import Optional
 
 import httpx
@@ -31,6 +32,23 @@ from observability import capture
 
 DISCORD_API = "https://discord.com/api/v10"
 _TIMEOUT = 5.0
+
+# `GET /users/@me/guilds` is rate limited to ONE REQUEST PER SECOND (verified
+# against the live API: x-ratelimit-remaining hits 0 after the first call, and
+# reset-after is 1.000). The admin page loads every system's gate panel in one
+# parallel burst, so a club with six game nights fired six of these at once —
+# one succeeded and five came back 429.
+#
+# That was worse than merely slow. A 429 makes bot_guilds() return None, which
+# the panel reads as "no bot configured" and renders as "the Call to Arms
+# Discord bot isn't set up on this platform yet, contact the platform admin" —
+# a false and alarming message, on five panels out of six.
+#
+# So: one process-wide cache, and on ANY failure fall back to the last known
+# good answer rather than None. Stale-but-true beats fresh-but-wrong here; the
+# set of servers a bot belongs to changes about once a club, not once a second.
+_GUILDS_TTL = 60.0
+_guilds_cache: dict = {"at": 0.0, "value": None}
 
 # Any of:
 #   https://discord.gg/abc123
@@ -141,22 +159,49 @@ def bot_identity() -> Optional[dict]:
     return {"id": d.get("id"), "username": d.get("username")}
 
 
-def bot_guilds() -> Optional[list[dict]]:
+def bot_guilds(force: bool = False) -> Optional[list[dict]]:
     """`[{"id", "name"}, ...]` for every guild the bot has been added to, or
-    None if undetermined. Powers the admin guild picker, so an admin chooses
-    their server by NAME instead of hunting for a snowflake in Developer
-    Mode — and it doubles as proof the bot was actually added."""
+    None if it has never been determined. Powers the admin guild picker, so an
+    admin chooses their server by NAME instead of hunting for a snowflake in
+    Developer Mode — and it doubles as proof the bot was actually added.
+
+    Cached for _GUILDS_TTL seconds because Discord allows one call per second
+    here and the admin page asks once per system (see the note above).
+
+    `force=True` bypasses the cache, for the admin's explicit "Check
+    connection" press: that runs seconds after someone added the bot in another
+    tab, and answering it from a 60-second-old cache would tell them their
+    successful setup had failed.
+    """
     if not is_configured():
         return None
+
+    cached = _guilds_cache["value"]
+    if not force and cached is not None:
+        if (time.monotonic() - _guilds_cache["at"]) < _GUILDS_TTL:
+            return cached
+
     try:
         resp = httpx.get(
             f"{DISCORD_API}/users/@me/guilds", headers=_headers(), timeout=_TIMEOUT
         )
     except Exception:
-        return None
+        return cached  # network wobble: last known good, else None
     if resp.status_code != 200:
-        return None
-    return [{"id": g.get("id"), "name": g.get("name")} for g in resp.json()]
+        # Overwhelmingly a 429 from a burst of panels. Never downgrade a known
+        # answer to None over one — that's what showed "bot isn't set up".
+        if resp.status_code != 429:
+            capture(
+                RuntimeError(f"Discord bot_guilds returned {resp.status_code}"),
+                kind="discord_bot_guilds",
+                status=resp.status_code,
+            )
+        return cached
+
+    value = [{"id": g.get("id"), "name": g.get("name")} for g in resp.json()]
+    _guilds_cache["at"] = time.monotonic()
+    _guilds_cache["value"] = value
+    return value
 
 
 def guild_id_from_url(url: Optional[str]) -> Optional[str]:
