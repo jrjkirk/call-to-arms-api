@@ -2331,9 +2331,31 @@ def _mask_webhook_row(row: Optional[ClubWebhook]) -> dict:
     return {"configured": True, "last_four": "..." + row.url[-4:]}
 
 
+def _require_webhook_scope(db: Session, user: User, system_id: Optional[int]) -> None:
+    """A club super-admin may set any of their club's webhooks; a system admin
+    may set their own system's.
+
+    Webhooks are per-system across the board — signup/pairings/call_to_arms
+    always, and the league ones since leagues went modular — so "which channel
+    does my game night post to" is genuinely that system admin's call, and it
+    was only ever super-admin-gated because the whole grid lived on a
+    club-level page.
+    """
+    if user.is_platform_admin or user.is_super_admin:
+        return
+    if system_id is None:
+        raise HTTPException(
+            status_code=403, detail="Only a club super-admin can set club-wide webhooks."
+        )
+    system = db.get(SystemConfig, system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+    _require_system_scope(system.legacy_system_name, user, db)
+
+
 @router.get("/webhooks")
 def list_club_webhooks(
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Webhook grid for the caller's own club, scoped to what the club
@@ -2364,6 +2386,8 @@ def list_club_webhooks(
                 "webhook_type": webhook_type,
                 "system_id": system.id,
                 "system_name": system.name,
+                # The scope key the per-system Discord tab filters this grid by.
+                "legacy_system_name": system.legacy_system_name,
                 **_mask_webhook_row(row),
             })
     for webhook_type in WEBHOOK_TYPES_LEAGUE:
@@ -2375,8 +2399,18 @@ def list_club_webhooks(
                 "webhook_type": webhook_type,
                 "system_id": system.id,
                 "system_name": system.name,
+                "legacy_system_name": system.legacy_system_name,
                 **_mask_webhook_row(row),
             })
+
+    # A system admin sees only their own systems' rows. The masked value is
+    # harmless, but the per-system Discord panel renders this grid directly and
+    # listing rows they'd be refused on save is a worse answer than not
+    # offering them.
+    if not (user.is_platform_admin or user.is_super_admin):
+        scopes = admin_scopes(user, db, user.club_id)
+        by_id = {s.id: s.legacy_system_name for s in systems}
+        grid = [g for g in grid if by_id.get(g["system_id"]) in scopes]
     return grid
 
 
@@ -2389,7 +2423,7 @@ class ClubWebhookBody(BaseModel):
 @router.post("/webhooks")
 def upsert_club_webhook(
     body: ClubWebhookBody,
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Create/update the caller's own club's webhook for (webhook_type,
@@ -2401,6 +2435,8 @@ def upsert_club_webhook(
             status_code=422,
             detail=f"webhook_type must be one of: {sorted(ALL_WEBHOOK_TYPES)}",
         )
+
+    _require_webhook_scope(db, user, body.system_id)
 
     if body.webhook_type in WEBHOOK_TYPES_PER_SYSTEM or body.webhook_type in WEBHOOK_TYPES_LEAGUE:
         if body.system_id is None:
@@ -2464,10 +2500,11 @@ def upsert_club_webhook(
 def remove_club_webhook(
     webhook_type: str,
     system_id: Optional[int] = None,
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Delete the caller's own club's webhook row if it exists. Idempotent."""
+    _require_webhook_scope(db, user, system_id)
     row = db.exec(
         select(ClubWebhook).where(
             ClubWebhook.club_id == user.club_id,
@@ -2493,20 +2530,34 @@ def remove_club_webhook(
 
 @router.get("/club-systems")
 def list_club_systems(
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """List the caller's own club's ClubSystem rows, joined with
-    SystemConfig for display."""
+    SystemConfig for display.
+
+    A club super-admin sees every system. A system admin sees only the ones
+    they administer — the per-system config panel reads this to populate its
+    schedule/vibe form, and showing them rows they can't edit would just be
+    noise they'd have to work out the rules for.
+    """
     rows = db.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
         .where(ClubSystem.club_id == user.club_id)
     ).all()
+    if not (user.is_platform_admin or user.is_super_admin):
+        scopes = admin_scopes(user, db, user.club_id)
+        rows = [(cs, sc) for cs, sc in rows if sc.legacy_system_name in scopes]
     return [
         {
             "system_id": cs.system_id,
             "system_name": sc.name,
+            # The scope string admin UIs address a system by (admin_scopes,
+            # Signup.system, …). name and legacy_system_name coincide for every
+            # system today, so matching on the display name works right up
+            # until one is renamed — hand back the real key.
+            "legacy_system_name": sc.legacy_system_name,
             "enabled": cs.enabled,
             "session_day": cs.session_day,
             "session_cadence": cs.session_cadence,
@@ -2540,7 +2591,7 @@ class ClubSystemScheduleBody(BaseModel):
 @router.post("/club-systems")
 def update_club_system_schedule(
     body: ClubSystemScheduleBody,
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Enable/disable/reschedule a catalogue system for the caller's own
@@ -2549,10 +2600,41 @@ def update_club_system_schedule(
     self-service enable or disable any catalogue system. club_id always
     comes from user.club_id, never the request body — same non-negotiable
     rule as scoped() everywhere else. Same shape/validation as the
-    platform-admin equivalent, POST /admin/platform/clubs/{club_id}/systems."""
+    platform-admin equivalent, POST /admin/platform/clubs/{club_id}/systems.
+
+    TWO CALLERS, TWO POWERS (2026-08-20). A club super-admin may do anything
+    here, including adding a system to the club or switching one off. That
+    stays a club-level decision: it changes what the club runs.
+
+    A system's own admin may reschedule and re-vibe THEIR system — it's their
+    game night, and making them queue behind a super-admin for a cadence change
+    was the point of moving this into the per-system panel. They may NOT flip
+    `enabled`, and may not create a ClubSystem row that doesn't exist yet
+    (they'd have no scope over a system the club doesn't run).
+    """
     system = db.get(SystemConfig, body.system_id)
     if system is None:
         raise HTTPException(status_code=404, detail="System not found.")
+
+    is_super = user.is_platform_admin or user.is_super_admin
+    if not is_super:
+        _require_system_scope(system.legacy_system_name, user, db)
+        existing_row = db.exec(
+            scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == body.system_id)
+        ).first()
+        if existing_row is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Only a club super-admin can add a system to the club.",
+            )
+        if bool(body.enabled) != bool(existing_row.enabled):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Only a club super-admin can enable or disable a system. "
+                    "You can change how yours runs, but not whether it runs."
+                ),
+            )
 
     if body.enabled and not system.active:
         raise HTTPException(
