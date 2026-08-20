@@ -142,8 +142,8 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
             return None
         for floor, colour in band_colors:
             if level >= floor:
-                return f"Lv {level}", colour
-        return f"Lv {level}", band_colors[-1][1]
+                return f"Lvl. {level}", colour
+        return f"Lvl. {level}", band_colors[-1][1]
 
     def _exp_tag(value: str | None) -> tuple[str, str] | None:
         """(label, colour) for an experience tag, or None to draw nothing.
@@ -155,7 +155,10 @@ def render_pairings_image(display_rows: list[dict], week: str, system: str) -> i
         key = (value or "").strip().lower()
         if key not in experience_colors:
             return None
-        return key.upper(), experience_colors[key]
+        # "Some" is the retired name for the middle tier and reads oddly on its
+        # own, so it prints as EXPERIENCED wherever it still sits on old rows.
+        label = "EXPERIENCED" if key == "some" else key.upper()
+        return label, experience_colors[key]
 
     # Per-(system, vibe) accent colours. A system/vibe not listed here (e.g. a
     # newly-added system) falls back to border_default via _accent below — a
