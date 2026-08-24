@@ -1,7 +1,6 @@
-"""Venue management, schema step: create venue_configs, venue_tables,
-venue_bookings and venue_staff.
+"""Venue management, schema step: create the venue tables.
 
-Four brand-new tables, no ALTERs — the club IS the venue, so nothing existing
+Six brand-new tables, no ALTERs — the club IS the venue, so nothing existing
 changes shape. Nothing is public until a super-admin opens Venue Admin, adds a
 table and sets VenueConfig.enabled, so running this is inert on its own.
 
@@ -19,14 +18,20 @@ import sys
 from sqlalchemy import inspect
 
 from database import engine
-from models import VenueBooking, VenueConfig, VenueStaff, VenueTable
+from models import (
+    VenueBooking, VenueClubNight, VenueConfig, VenueStaff, VenueSystemTable,
+    VenueTable,
+)
 
-TABLES = [VenueConfig, VenueTable, VenueBooking, VenueStaff]
+# VenueTable first: venue_bookings and venue_system_tables both carry a foreign
+# key to it, so it has to exist before they do.
+TABLES = [
+    VenueConfig, VenueTable, VenueBooking, VenueStaff,
+    VenueClubNight, VenueSystemTable,
+]
 
 
 def create_tables() -> None:
-    # Order matters: venue_bookings carries a foreign key to venue_tables, so
-    # the tables must exist before the bookings that point at them.
     for model in TABLES:
         model.metadata.create_all(engine, tables=[model.__table__], checkfirst=True)
         print(f"  {model.__tablename__} ready")

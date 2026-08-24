@@ -1099,3 +1099,66 @@ class VenueStaff(SQLModel, table=True):
     club_id: int = Field(foreign_key="clubs.id", index=True)
     user_id: int = Field(foreign_key="users.id", index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueClubNight(SQLModel, table=True):
+    """The venue's plan for one club night: how many tables it expects to need.
+
+    Owned by venue staff, not by the system's admin, which is why it isn't a
+    column on ClubSystem — the bar's capacity planning and the game night's
+    configuration answer to different people.
+
+    expected_tables is a forecast, and a forecast nobody checks is a guess with
+    better posture. venue.table_review() holds it against what actually
+    happened: published pairings, one pairing to a table, over recent sessions.
+    That's the number worth trusting — signups include people who don't turn
+    up, and a BYE occupies nobody's table.
+    """
+    __tablename__ = "venue_club_nights"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+
+    # None = no plan set; the review still reports what actually happened, and
+    # the busyness view falls back to estimating from signups.
+    expected_tables: Optional[int] = None
+    notes: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueSystemTable(SQLModel, table=True):
+    """Which of the venue's tables suit a game system — and which are held back
+    for that system's club night.
+
+    One relationship, two strengths, because they're the same fact at different
+    volume. "Table 3 is a 6x4, so it suits The Old World" and "Table 3 is The
+    Old World's on a Wednesday" both describe a table belonging to a game;
+    modelling them as separate features would mean two admin screens, two
+    lookups and a way for them to disagree.
+
+        reserved = False -- PREFERRED. Offered first to someone booking that
+            game, and shown to them as recommended. No effect on anyone else.
+        reserved = True  -- HELD. Preferred, and additionally not offered to the
+            public at all on the nights that system meets.
+
+    A row per (system, table), not a list of ids on the system: a table can
+    belong to several systems, since each has its own night — table 3 can be
+    The Old World's on Wednesday and Kill Team's on Monday without those two
+    ever colliding. It also means deleting a table can't strand an id inside
+    somebody's JSON array.
+
+    Reservations bind the PUBLIC only. The staff console will still seat a
+    walk-in on a held table, because someone standing in a half-empty room can
+    see what the rule can't.
+    """
+    __tablename__ = "venue_system_tables"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+    table_id: int = Field(foreign_key="venue_tables.id", index=True)
+    reserved: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)

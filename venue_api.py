@@ -20,8 +20,8 @@ import venue as V
 from auth import active_club_id, current_user, require_user
 from database import get_session
 from models import (
-    Club, SystemConfig, ClubSystem, User, VenueBooking, VenueConfig,
-    VenueStaff, VenueTable, Player,
+    Club, SystemConfig, ClubSystem, User, VenueBooking, VenueClubNight,
+    VenueConfig, VenueStaff, VenueSystemTable, VenueTable, Player,
 )
 from database import active_player_id_for
 
@@ -115,6 +115,7 @@ def get_availability(
     date_str: str = Query(..., alias="date"),
     duration: Optional[int] = None,
     party_size: Optional[int] = None,
+    system_id: Optional[int] = None,
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
@@ -123,7 +124,48 @@ def get_availability(
         day = date.fromisoformat(date_str)
     except ValueError:
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD.")
-    return V.availability(db, club_id, day, duration, party_size)
+    return V.availability(db, club_id, day, duration, party_size, system_id)
+
+
+@router.get("/tables-for-slot")
+def tables_for_slot(
+    date_str: str = Query(..., alias="date"),
+    start_time: str = Query(...),
+    duration: int = Query(...),
+    party_size: int = Query(2),
+    system_id: Optional[int] = None,
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """The actual tables free for one slot, best first, flagged for whether they
+    suit the chosen game.
+
+    Lets the booking form offer a real choice — "Table 3, 6x4, recommended for
+    The Old World" — instead of silently assigning something and hoping. The
+    first entry is what the venue would pick, so a booker who doesn't care can
+    ignore the list entirely.
+    """
+    _require_enabled(db, club_id)
+    try:
+        day = date.fromisoformat(date_str)
+        start = V.to_minutes(start_time)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date or time.")
+
+    preferred = set(V.system_tables(db, club_id).get(system_id, {}).get("preferred", [])) \
+        if system_id is not None else set()
+    free = V.free_tables_for(
+        db, club_id, day, start, start + duration,
+        party_size=party_size, system_id=system_id,
+    )
+    return {
+        "tables": [
+            {"id": t.id, "name": t.name, "size_label": t.size_label, "seats": t.seats,
+             "recommended": t.id in preferred}
+            for t in free
+        ],
+        "held_for_club_night": sorted(V.reserved_table_ids_on(db, club_id, day)),
+    }
 
 
 @router.get("/busy")
@@ -241,7 +283,10 @@ def create_booking(
                    f"Cancel one to book another.",
         )
 
-    free = V.free_tables_for(db, club_id, day, start, end, party_size=body.party_size)
+    free = V.free_tables_for(
+        db, club_id, day, start, end,
+        party_size=body.party_size, system_id=body.system_id,
+    )
     if not free:
         raise HTTPException(status_code=409, detail="No table free for that slot.")
     if body.table_id is not None:
@@ -249,9 +294,9 @@ def create_booking(
         if chosen is None:
             raise HTTPException(status_code=409, detail="That table isn't free for that slot.")
     else:
-        # Smallest table that still fits the party, so a pair doesn't eat the
-        # only 6x4 and force the next four-player booking away.
-        chosen = min(free, key=lambda t: (t.seats, t.sort_order, t.id))
+        # free_tables_for already returns best-first: tables that suit the game,
+        # then the smallest that still fits, so a pair doesn't eat the only 6x4.
+        chosen = free[0]
 
     player_id = active_player_id_for(db, user, club_id)
     player = db.get(Player, player_id) if player_id else None
@@ -767,7 +812,10 @@ def admin_create_booking(
     if end <= start:
         raise HTTPException(status_code=422, detail="Length must be positive.")
 
-    free = V.free_tables_for(db, club_id, day, start, end)
+    # for_public=False: staff may seat someone on a table held for a club night.
+    free = V.free_tables_for(
+        db, club_id, day, start, end, system_id=body.system_id, for_public=False,
+    )
     if body.table_id is not None:
         chosen = next((t for t in free if t.id == body.table_id), None)
         if chosen is None:
@@ -859,3 +907,129 @@ def remove_staff(
     db.delete(row)
     db.commit()
     return {"ok": True}
+
+
+# ---- club nights: what each one needs, and which tables are its own ----
+
+@router.get("/admin/club-nights")
+def get_club_nights(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
+    """Every club night this venue hosts, with its table plan, its tables, and
+    how that plan has held up against real pairings."""
+    _, club_id = ctx
+    rows = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club_id)
+        .where(ClubSystem.enabled == True)
+        .where(SystemConfig.active == True)
+        .order_by(SystemConfig.name)
+    ).all()
+
+    plans = V.club_night_plans(db, club_id)
+    assigned = V.system_tables(db, club_id)
+    tables = db.exec(
+        select(VenueTable)
+        .where(VenueTable.club_id == club_id)
+        .order_by(VenueTable.sort_order, VenueTable.id)
+    ).all()
+
+    out = []
+    for cs, sc in rows:
+        plan = plans.get(sc.id)
+        entry = assigned.get(sc.id, {"preferred": [], "reserved": []})
+        out.append({
+            "system_id": sc.id,
+            "system": sc.name,
+            "session_day": cs.session_day,
+            "session_cadence": cs.session_cadence,
+            "start_time": cs.session_start_time,
+            "expected_tables": plan.expected_tables if plan else None,
+            "notes": plan.notes if plan else None,
+            "preferred_table_ids": sorted(entry["preferred"]),
+            "reserved_table_ids": sorted(entry["reserved"]),
+            "review": V.table_review(db, club_id, sc.id),
+        })
+    return {
+        "club_nights": out,
+        "tables": [
+            {"id": t.id, "name": t.name, "size_label": t.size_label,
+             "seats": t.seats, "active": t.active}
+            for t in tables
+        ],
+    }
+
+
+class ClubNightBody(BaseModel):
+    system_id: int
+    expected_tables: Optional[int] = None
+    notes: Optional[str] = None
+    # Every table this system may use, and the subset held back from the public
+    # on its night. Sent whole rather than as add/remove operations — the admin
+    # screen is a grid of checkboxes, and replacing the set is the only way for
+    # unticking the last box to mean anything.
+    preferred_table_ids: Optional[list[int]] = None
+    reserved_table_ids: Optional[list[int]] = None
+
+
+@router.post("/admin/club-nights")
+def save_club_night(
+    body: ClubNightBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    _, club_id = ctx
+    cs = db.exec(
+        select(ClubSystem)
+        .where(ClubSystem.club_id == club_id)
+        .where(ClubSystem.system_id == body.system_id)
+    ).first()
+    if cs is None:
+        raise HTTPException(status_code=404, detail="This club doesn't run that system.")
+
+    if body.expected_tables is not None and not (0 <= body.expected_tables <= 200):
+        raise HTTPException(status_code=422, detail="Expected tables must be 0–200.")
+
+    plan = db.exec(
+        select(VenueClubNight)
+        .where(VenueClubNight.club_id == club_id)
+        .where(VenueClubNight.system_id == body.system_id)
+    ).first()
+    if plan is None:
+        plan = VenueClubNight(club_id=club_id, system_id=body.system_id)
+    plan.expected_tables = body.expected_tables
+    if body.notes is not None:
+        plan.notes = body.notes.strip() or None
+    plan.updated_at = datetime.utcnow()
+    db.add(plan)
+
+    if body.preferred_table_ids is not None or body.reserved_table_ids is not None:
+        preferred = set(body.preferred_table_ids or [])
+        reserved = set(body.reserved_table_ids or [])
+        # Reserving a table is a stronger form of preferring it, so a reserved
+        # table is always preferred too. Without this a venue could hold a table
+        # for a night and simultaneously mark it unsuitable for that game.
+        preferred |= reserved
+
+        valid = {
+            t.id for t in db.exec(
+                select(VenueTable).where(VenueTable.club_id == club_id)
+            ).all()
+        }
+        unknown = (preferred | reserved) - valid
+        if unknown:
+            raise HTTPException(status_code=422, detail="Unknown table in the list.")
+
+        for row in db.exec(
+            select(VenueSystemTable)
+            .where(VenueSystemTable.club_id == club_id)
+            .where(VenueSystemTable.system_id == body.system_id)
+        ).all():
+            db.delete(row)
+        for table_id in sorted(preferred):
+            db.add(VenueSystemTable(
+                club_id=club_id, system_id=body.system_id,
+                table_id=table_id, reserved=table_id in reserved,
+            ))
+
+    db.commit()
+    return get_club_nights(ctx=ctx, db=db)

@@ -36,6 +36,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "venue_tables",   # the club's bookable table inventory, staff-managed
     "venue_bookings", # public table bookings + staff walk-in entries
     "venue_staff",    # who may open Venue Admin without being a super-admin
+    "venue_club_nights",     # per-club-night table forecast, checked against
+                             # real pairings by venue.table_review()
+    "venue_system_tables",   # which tables suit a game, and which are held
+                             # back from the public on that game's night
     "players",        # create-profile inserts; admin edit updates name/titles/
                       # notes and the two visibility switches (active,
                       # league_visible); admin delete removes history-free rows
