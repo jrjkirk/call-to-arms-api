@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select, or_
 
-from database import active_player_id_for, get_session, resolve_request_club_id, scoped
+from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 from levels import levels_for_players
 from week_logic import next_session_date, sessions_in_range
@@ -576,13 +576,13 @@ def get_player(player_id: int, user: User = Depends(require_user), club_id: int 
                 continue
 
             rank = None
-            if rating_row is not None and player.active:
+            if rating_row is not None and player.active and player.league_visible:
                 higher = session.exec(
                     select(LeagueRating)
                     .join(Player, Player.id == LeagueRating.player_id)
                     .where(LeagueRating.club_id == club_id)
                     .where(LeagueRating.system_id == sid)
-                    .where(Player.active == True)
+                    .where(*in_league_filter())
                     .where(LeagueRating.rating > rating_row.rating)
                 ).all()
                 rank = len(higher) + 1
@@ -735,7 +735,7 @@ def _compute_league_rankings(session: Session, club_id: int, system_id: int, sea
     statement = (
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
-        .where(Player.active == True)
+        .where(*in_league_filter())
         .where(LeagueRating.club_id == club_id)
         .where(LeagueRating.system_id == system_id)
         .where(LeagueRating.season_id == season_id)

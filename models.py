@@ -38,7 +38,22 @@ class Player(SQLModel, table=True):
     name: str
     default_faction: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Roster membership, NOT identity. False = archived: the player has left,
+    # so they're hidden from admin pickers, signup and the league, but the row
+    # and all its history stay put and the owning account STAYS LINKED.
+    #
+    # This used to gate identity too — active_player_id_for filtered on it —
+    # which meant archiving someone made the app believe their Discord account
+    # had no profile at all, offer them "create a profile", and hand them a
+    # second Player row with an empty history. Two real players hit that. See
+    # the note on active_player_id_for in database.py.
     active: bool = True
+    # Separate from `active`: a player who is still very much on the roster but
+    # doesn't want to appear in league rankings — a casual, or someone who asked
+    # to be left out. They still sign up and get paired as normal. Archiving
+    # implies this (an archived player is out of the league either way), so the
+    # league filters on both.
+    league_visible: bool = True
     titles: Optional[str] = Field(default=None)
     admin_notes: Optional[str] = Field(default=None)
     announced_achievements: Optional[str] = Field(default=None)

@@ -326,8 +326,11 @@ def me(
 
     # Does this user have a player at ANY club yet? Used by the frontend to send
     # a brand-new player to the club finder rather than a default club subdomain.
+    # Ignores `active` for the same reason active_player_id_for does: an
+    # archived player still belongs to a club, and sending them round the club
+    # finder as if they were brand new is how duplicate rows got made.
     has_club = db.exec(
-        select(Player).where(Player.user_id == user.id, Player.active == True)
+        select(Player).where(Player.user_id == user.id)
     ).first() is not None
 
     return {
@@ -422,6 +425,36 @@ def complete_signup(
     }
 
 
+def _reject_if_already_linked(db: Session, user: User, club_id: int) -> None:
+    """Guard for claim and create: one account, one player per club.
+
+    Split out because the archived case needs a different message. Both paths
+    used to say "You already have a linked player profile at this club", which
+    is true and completely unhelpful to someone whose profile is archived —
+    they can't see it on the roster, in the league, or anywhere else, so being
+    told they have one reads as a bug. Before this guard even saw archived rows
+    (active_player_id_for filtered them out) they'd sail past it and get a
+    second, empty player. Now they're stopped, so the message has to explain
+    the state they're actually in and who can change it.
+    """
+    existing_id = active_player_id_for(db, user, club_id)
+    if existing_id is None:
+        return
+    existing = db.get(Player, existing_id)
+    if existing is not None and not existing.active:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Your profile ({existing.name}) is archived, so it's hidden for now. "
+                f"Ask a club admin to put you back on the roster — your games, level and "
+                f"league record are all still there."
+            ),
+        )
+    raise HTTPException(
+        status_code=400, detail="You already have a linked player profile at this club"
+    )
+
+
 @router.post("/claim/{player_id}")
 def claim_player(
     player_id: int,
@@ -433,8 +466,7 @@ def claim_player(
     ACTIVE club. Multi-club network model: a user can own one player per club,
     so the "already linked" check is per-club, and ownership is recorded on
     Player.user_id (not the single User.player_id)."""
-    if active_player_id_for(db, user, club_id) is not None:
-        raise HTTPException(status_code=400, detail="You already have a linked player profile at this club")
+    _reject_if_already_linked(db, user, club_id)
 
     player = db.get(Player, player_id)
     if player is None or not player.active or player.club_id != club_id:
@@ -470,8 +502,7 @@ def create_profile(
     current user (Player.user_id). Used for people with no existing row to
     claim. Multi-club network model: a user can create one player per club.
     """
-    if active_player_id_for(db, user, club_id) is not None:
-        raise HTTPException(status_code=400, detail="You already have a linked player profile at this club")
+    _reject_if_already_linked(db, user, club_id)
 
     name = body.name.strip()
     if not name:

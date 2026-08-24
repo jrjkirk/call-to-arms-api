@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import active_player_id_for, get_session, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
+from database import active_player_id_for, get_session, sibling_player_ids, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
 import discord_guild
 from experience import summary as experience_summary
@@ -156,8 +156,17 @@ def _require_linked_player(user: User, db: Session, club_id: int) -> Player:
     if pid is None:
         raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
     player = db.get(Player, pid)
-    if player is None or not player.active:
+    if player is None:
         raise HTTPException(status_code=400, detail="Linked player profile not found.")
+    if not player.active:
+        # Archived, not missing — and saying so matters. The old message was
+        # "profile not found", which reads as "you have no account" and invites
+        # exactly the create-a-second-profile behaviour that split two players'
+        # histories. Name the real state and the real remedy.
+        raise HTTPException(
+            status_code=400,
+            detail="Your player profile is archived. Ask a club admin to restore it — don't create a new one, or you'll lose your history.",
+        )
     return player
 
 
@@ -171,10 +180,17 @@ def is_first_signup(db: Session, player_id: Optional[int], club_id: int, system:
     them on one implementation so they can never disagree about who counts as
     new. Guests (player_id None) are never "first" — they have no history to
     have, and nothing downstream should treat them as a new member.
+
+    Asks about the PERSON, not the row. A player row is not a stable identity —
+    an account can end up owning more than one (see sibling_player_ids), and
+    the new row starts empty. Keyed on player_id alone this returned True every
+    time someone got a fresh row, so the club got "A NEW CHALLENGER APPROACHES"
+    for two players with years of history between them, two weeks running.
     """
     if player_id is None:
         return False
-    q = scoped(Signup, club_id).where(Signup.player_id == player_id)
+    ids = sibling_player_ids(db, player_id) or [player_id]
+    q = scoped(Signup, club_id).where(Signup.player_id.in_(ids))
     if system is not None:
         q = q.where(Signup.system == system)
     return db.exec(q).first() is None

@@ -31,7 +31,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "signups",        # Call to Arms form: insert/update/delete own signup; also pairing grid save-back
     "pairings",       # drop-out flow + admin pairing generation/editing/deletion
     "publish_state",  # admin publish/unpublish pairings
-    "players",        # only write is inserting new players via create-profile
+    "players",        # create-profile inserts; admin edit updates name/titles/
+                      # notes and the two visibility switches (active,
+                      # league_visible); admin delete removes history-free rows
     "league_results", # result submission + full ratings recalc
     "league_ratings", # result submission + full ratings recalc
     "admin_roles",    # admin appointment/removal
@@ -370,18 +372,93 @@ def resolve_active_club_id(
     return user.home_club_id or user.club_id
 
 
+def sibling_player_ids(db: Session, player_id: Optional[int]) -> list[int]:
+    """Every Player row belonging to the same PERSON at the same club — usually
+    just `[player_id]`, but more when one account owns several rows.
+
+    It shouldn't be possible to own two rows at one club, and now it mostly
+    isn't (see active_player_id_for). But it happened, the duplicates are real
+    rows with real signups attached, and anything asking "has this person done
+    X before?" has to span them or it gets the wrong answer. That question is
+    what produced weekly "🎉 A NEW CHALLENGER APPROACHES!" posts for two
+    long-standing players: the check was per-row, and their new row was empty.
+
+    Unclaimed roster entries (user_id NULL) have no account to group by, so
+    they're only ever themselves — two unclaimed rows with the same name are
+    not evidence of the same person.
+    """
+    if player_id is None:
+        return []
+    player = db.get(Player, player_id)
+    if player is None:
+        return []
+    if player.user_id is None:
+        return [player.id]
+    rows = db.exec(
+        select(Player).where(
+            Player.user_id == player.user_id,
+            Player.club_id == player.club_id,
+        )
+    ).all()
+    return [p.id for p in rows] or [player.id]
+
+
+def in_league_filter():
+    """The condition a Player row must meet to appear in league standings:
+    on the roster AND not opted out of the league.
+
+    Two separate switches, because they answer different questions. `active`
+    is "are they still at this club" — archiving someone should take them out
+    of the table. `league_visible` is "do they want a ranking at all" — a
+    casual who plays every week but asked not to be listed stays fully active
+    and still gets paired.
+
+    Returned as a list to splat into a `.where(*in_league_filter())`, so every
+    league query filters identically. They used to each write
+    `Player.active == True` inline, which is how the league came to be the only
+    thing the archive switch visibly did.
+    """
+    return [Player.active == True, Player.league_visible == True]
+
+
 def active_player_id_for(db: Session, user: User, club_id: int) -> Optional[int]:
     """The id of the Player this user owns at a given club (their identity
     *there*), or None if they have no player at that club yet — in which case
     the frontend shows the claim/create-a-profile flow, exactly as it does
     today for a brand-new user. Multi-club network model: a user owns one
-    Player per club (Player.user_id), so "my player" is now club-relative."""
+    Player per club (Player.user_id), so "my player" is now club-relative.
+
+    DELIBERATELY IGNORES `Player.active`. Ownership is a fact about who someone
+    is; archiving is a fact about whether they're currently on the roster. This
+    filtered on `active == True`, which conflated the two and cost us real data:
+
+      Archive a player who has a linked Discord account, and this returns None.
+      /auth/me then reports "no player at this club" and the frontend shows the
+      claim-or-create flow. They can't claim their own row back — claim
+      candidates are `active == True AND user_id IS NULL`, and claim_player
+      404s on an inactive row — so the only door open is create_profile, whose
+      guard called THIS function and so also saw nothing. Result: a second
+      Player row, no signup history, no level, no league record, and a
+      "🎉 A NEW CHALLENGER APPROACHES!" post for a player of two years.
+
+      That happened to Snoozi (user 70 ended up owning players 114 and 121) and
+      contributed to Shaun Warne's history splitting across three rows.
+
+    Callers that care whether the player may currently DO something must check
+    `active` themselves — signups._require_linked_player is the example.
+
+    Ordering: active rows win, then lowest id, so the pick stays deterministic
+    for any account that already owns more than one row from the old bug. It
+    resolves to their original, history-bearing player rather than the empty
+    duplicate.
+    """
     row = db.exec(
-        select(Player).where(
+        select(Player)
+        .where(
             Player.user_id == user.id,
             Player.club_id == club_id,
-            Player.active == True,
         )
+        .order_by(Player.active.desc(), Player.id.asc())
     ).first()
     return row.id if row else None
 

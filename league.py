@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, or_, select
 
 from auth import require_user, current_user, active_club_id, admin_scopes
-from database import active_player_id_for, get_session, resolve_request_club_id, resolve_webhook_url, scoped
+from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, resolve_webhook_url, scoped
 from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, SystemConfig, User
 from services import announce_new_achievements
 from signups import require_discord_member
@@ -117,7 +117,7 @@ def _season_champion(db: Session, club_id: int, system_id: int, season_id: int) 
     row = db.exec(
         select(LeagueRating, Player)
         .join(Player, Player.id == LeagueRating.player_id)
-        .where(Player.active == True)
+        .where(*in_league_filter())
         .where(LeagueRating.club_id == club_id)
         .where(LeagueRating.system_id == system_id)
         .where(LeagueRating.season_id == season_id)

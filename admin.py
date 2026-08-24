@@ -43,7 +43,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
+from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlayerDiscordVerification, PlayerExperienceAdjustment, PlayerLevelAnnouncement, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from observability import capture
 from levels import announce_level_ups
@@ -322,16 +322,99 @@ def admin_players(
             "name": p.name,
             "titles": player_titles(p),
             "active": p.active,
+            "league_visible": p.league_visible,
+            # Whether a Discord account owns this row. The admin needs to see
+            # it before archiving or deleting: doing either to a claimed row
+            # affects a real person who is logged in right now, while an
+            # unclaimed row is just a roster entry nobody has taken.
+            "claimed": p.user_id is not None,
             "admin_notes": p.admin_notes,
         }
         for p in players
     ]
 
 
+
+@router.delete("/players/{player_id}")
+def delete_player(
+    player_id: int,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Permanently remove a player row — but ONLY one with no playing history.
+
+    Deleting a row that has history is not a tidy-up, it's data loss with a
+    delay on it. Signup rows carry `player_id` as a plain int with no foreign
+    key, so removing the player leaves signups pointing at an id that no longer
+    resolves: they still appear in old pairings and league tables under their
+    stored `player_name`, but nothing can attribute them to anybody, and the
+    games stop counting toward experience and level. That is not hypothetical —
+    player 113 was deleted straight from the database and orphaned two of Shaun
+    Warne's signups (747, 775), which is part of why his record ended up split
+    across three rows.
+
+    So there are two different operations and this is the narrow one:
+
+      Archive (PATCH active=False) — for a real player who has left. Keeps
+        every game they played, keeps their account linked so they get their
+        own profile back if they return.
+      Delete (here) — for a row that should never have existed: a duplicate, a
+        typo, a test entry, someone who signed up and never played.
+
+    History-bearing rows are refused with a 409 pointing at archive.
+    """
+    player = db.get(Player, player_id)
+    if not player or player.club_id != user.club_id:
+        raise HTTPException(status_code=404, detail="Player not found.")
+
+    signups = db.exec(
+        scoped(Signup, user.club_id).where(Signup.player_id == player_id)
+    ).all()
+    results = db.exec(
+        scoped(LeagueResult, user.club_id).where(
+            (LeagueResult.player_1_id == player_id) | (LeagueResult.player_2_id == player_id)
+        )
+    ).all()
+    if signups or results:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{player.name} has {len(signups)} signup(s) and {len(results)} league "
+                f"result(s). Deleting would orphan them. Archive the player instead — "
+                f"that hides them everywhere but keeps their history intact."
+            ),
+        )
+
+    # Nothing depends on the row's play history, but these side tables can still
+    # hold entries (a player can set "games played elsewhere" or pass the
+    # Discord gate before ever signing up), and they'd outlive the row.
+    for model, col in (
+        (PlayerExperienceAdjustment, PlayerExperienceAdjustment.player_id),
+        (PlayerLevelAnnouncement, PlayerLevelAnnouncement.player_id),
+        (PlayerDiscordVerification, PlayerDiscordVerification.player_id),
+        (LeagueRating, LeagueRating.player_id),
+    ):
+        for row in db.exec(select(model).where(col == player_id)).all():
+            db.delete(row)
+
+    # Clear the legacy User.player_id back-link, or the owner is left pointing
+    # at a dead row and /auth/me resolves nothing.
+    for u in db.exec(select(User).where(User.player_id == player_id)).all():
+        u.player_id = None
+        db.add(u)
+
+    name = player.name
+    db.delete(player)
+    log_audit(db, user, "player.delete", "player", player_id, f"{name!r} (no history)")
+    db.commit()
+    return {"ok": True, "deleted": True}
+
+
 class PatchPlayerBody(BaseModel):
     name: Optional[str] = None
     titles: Optional[list[str]] = None
     active: Optional[bool] = None
+    league_visible: Optional[bool] = None
     admin_notes: Optional[str] = None
 
 
@@ -357,6 +440,9 @@ def patch_player(
     if body.active is not None:
         player.active = body.active
 
+    if body.league_visible is not None:
+        player.league_visible = body.league_visible
+
     if body.admin_notes is not None:
         player.admin_notes = body.admin_notes.strip() or None
 
@@ -369,6 +455,8 @@ def patch_player(
         "name": player.name,
         "titles": player_titles(player),
         "active": player.active,
+        "league_visible": player.league_visible,
+        "claimed": player.user_id is not None,
         "admin_notes": player.admin_notes,
     }
 
