@@ -589,6 +589,10 @@ def club_night_pitch(db: Session, club_id: int, booking: VenueBooking) -> Option
         "system_id": sc.id,
         "system": sc.name,
         "slug": sc.slug,
+        # The signup form addresses systems by their legacy name, so the pitch
+        # has to carry it or its "sign up for it" link lands nowhere. The
+        # same-evening branch above gets this from club_nights_on already.
+        "legacy_system_name": sc.legacy_system_name,
         "accent_color": cs.accent_color,
         "start_time": cs.session_start_time,
         "session_day": cs.session_day,

@@ -38,6 +38,23 @@ def _require_venue_admin(
     return user, club_id
 
 
+def _require_venue_owner(
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+) -> tuple[User, int]:
+    """Stricter than _require_venue_admin: the club's own super-admin, or a
+    platform admin. Granting venue access is an ownership decision, not a
+    day-to-day one — the bar manager runs the diary but doesn't get to hand out
+    keys, and shouldn't be able to promote themselves' colleagues either."""
+    if user.is_platform_admin or (user.is_super_admin and user.club_id == club_id):
+        return user, club_id
+    raise HTTPException(
+        status_code=403,
+        detail="Only a club super-admin can change who has venue access.",
+    )
+
+
 def _require_enabled(db: Session, club_id: int) -> VenueConfig:
     """Public endpoints 404 rather than 403 when a club doesn't sell table
     space. There is nothing to authorize — the feature simply isn't there for
@@ -338,6 +355,11 @@ def venue_admin_me(
     cfg = V.get_config(db, club_id)
     return {
         "can_admin_venue": V.can_admin_venue(db, user, club_id),
+        # Separate from the above so the page can hide the Staff tab from a bar
+        # manager rather than showing them a tab that 403s.
+        "can_manage_staff": bool(
+            user.is_platform_admin or (user.is_super_admin and user.club_id == club_id)
+        ),
         "enabled": bool(cfg and cfg.enabled),
     }
 
@@ -778,7 +800,7 @@ def admin_create_booking(
 # ---- staff access ----
 
 @router.get("/admin/staff")
-def list_staff(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
+def list_staff(ctx=Depends(_require_venue_owner), db: Session = Depends(get_session)):
     """Who holds venue access here. Super-admins and platform admins aren't
     listed — they have it implicitly and can't be revoked from this screen, so
     showing them with a Remove button would be a lie."""
@@ -805,7 +827,7 @@ class StaffBody(BaseModel):
 @router.post("/admin/staff")
 def add_staff(
     body: StaffBody,
-    ctx=Depends(_require_venue_admin),
+    ctx=Depends(_require_venue_owner),
     db: Session = Depends(get_session),
 ):
     _, club_id = ctx
@@ -827,7 +849,7 @@ def add_staff(
 @router.delete("/admin/staff/{staff_id}")
 def remove_staff(
     staff_id: int,
-    ctx=Depends(_require_venue_admin),
+    ctx=Depends(_require_venue_owner),
     db: Session = Depends(get_session),
 ):
     _, club_id = ctx
