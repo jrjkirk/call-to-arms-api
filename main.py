@@ -31,6 +31,7 @@ from league import router as league_router, _resolve_system_id, _current_season_
 from admin import router as admin_router
 from analytics import router as analytics_router
 from call_outs import router as call_outs_router
+from venue_api import router as venue_router
 
 app = FastAPI()
 
@@ -74,6 +75,7 @@ app.include_router(league_router)
 app.include_router(admin_router)
 app.include_router(analytics_router)
 app.include_router(call_outs_router)
+app.include_router(venue_router)
 
 
 @app.get("/health")

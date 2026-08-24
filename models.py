@@ -902,3 +902,200 @@ class CallOut(SQLModel, table=True):
     # hour later on the next cron tick.
     last_reminder_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+# ---------------------------------------------------------------------------
+# Venue management (2026-08-24)
+#
+# The club IS the venue — there is no separate Venue entity, and the public
+# booking page lives on the club's own landing page. That was a deliberate
+# choice over a standalone Venue row: every club already carries the venue
+# facts (address, lat/lng, opening_hours, logo, blurb), and a second entity
+# would have duplicated all of them for the sake of a slug.
+#
+# Note the direction here versus TableBookingConfig above. That feature points
+# OUTWARD — the club emails a venue saying "book us six tables on Wednesday".
+# These tables point INWARD — the public books space at the club's own venue.
+# They share a vocabulary and nothing else; don't merge them.
+# ---------------------------------------------------------------------------
+
+
+class VenueConfig(SQLModel, table=True):
+    """Booking policy for one club's venue. One row per club, created the
+    first time a super-admin opens Venue Admin.
+
+    Separate from Club rather than more columns on it: this is ~15 settings
+    that only matter to clubs selling table space, and Club is already the
+    widest table in the schema. Same call as LeagueConfig and
+    TableBookingConfig, both of which hang their settings off the club rather
+    than living in it.
+    """
+    __tablename__ = "venue_configs"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True, unique=True)
+
+    # Master switch. Off = no public booking page, no endpoints, nothing shown
+    # on the club page. Every club starts off; this is also the natural paywall
+    # switch if venue management becomes a paid tier.
+    enabled: bool = False
+
+    # "instant"  — a booking that fits is confirmed on the spot and staff are
+    #              told after the fact.
+    # "request"  — every booking lands as `requested` and waits for staff.
+    # Configurable rather than fixed: the whole complaint is staff losing time
+    # to booking admin, but a busy Saturday may still want a human gate.
+    confirm_mode: str = "instant"
+
+    # Booking grid. slot_minutes is the granularity start times snap to;
+    # min/max duration are what a booker may ask for. Wargames run long, hence
+    # a default max of four hours rather than a restaurant's ninety minutes.
+    slot_minutes: int = 30
+    min_duration_minutes: int = 60
+    max_duration_minutes: int = 240
+
+    # How far ahead bookings open, and how close to the start they still take.
+    # lead_time_minutes stops someone booking a table for four minutes' time
+    # and catching staff cold.
+    max_advance_days: int = 60
+    lead_time_minutes: int = 60
+
+    max_party_size: int = 8
+    # Bookings a single account may hold at once, counting only future ones.
+    # The abuse control that replaces "anonymous booking needs a rate limit" —
+    # booking requires a Discord login, so the account is the limit.
+    max_active_bookings_per_user: int = 3
+
+    # Bookable hours per weekday, independent of Club.opening_hours: a venue is
+    # often open before it will take table bookings. Same shape as
+    # Club.opening_hours so the admin UI can reuse the editor.
+    # [{"day": "Monday", "open": "18:00", "close": "23:00", "closed": false}, ...]
+    booking_hours: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
+    # How staff hear about a booking. Both may be on; both may be off (the
+    # console still shows everything). Which channel a venue wants is a
+    # property of how that venue is run -- a bar with a staff Discord wants a
+    # ping, a game store with an inbox wants email -- so it is configuration,
+    # not a hardcoded choice.
+    notify_email: bool = True
+    # Falls back to Club.contact_email when blank, so a venue that has already
+    # told us where to write doesn't have to say it twice.
+    notify_emails: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    notify_discord: bool = False
+
+    # Shown on the public booking page: house rules, parking, "food served
+    # until 9". Freeform, venue's own words.
+    booking_blurb: Optional[str] = None
+    # Appended to the confirmation email/page. Door codes, where to collect
+    # terrain, who to ask for.
+    confirmation_note: Optional[str] = None
+
+    # Whether the confirmation should mention the club nights running at this
+    # venue. The cross-sell -- a bar booking on a Wednesday hears about the
+    # Old World night that already runs that evening.
+    promote_club_nights: bool = True
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueTable(SQLModel, table=True):
+    """One bookable table at a club's venue.
+
+    Real rows rather than a bare count, because staff think in named tables:
+    "Table 3 is the 6x4 by the window, and it's out of service tonight". A
+    count can't express a mixed inventory, can't take one table out, and can't
+    tell a booker which table is theirs.
+    """
+    __tablename__ = "venue_tables"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+
+    name: str                                   # "Table 3", "The Snug"
+    size_label: Optional[str] = None            # "6x4", "4x4" — display only
+    seats: int = 2                              # players it comfortably takes
+    # Off = exists but not bookable (broken leg, reserved for staff). Kept
+    # rather than deleted so historical bookings still name a real table.
+    active: bool = True
+    sort_order: int = 0
+    notes: Optional[str] = None                 # staff-facing only
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueBooking(SQLModel, table=True):
+    """A table booked at a club's venue, by a logged-in user.
+
+    Times are local "HH:MM" strings against the club's timezone, matching the
+    convention already used by ClubEvent.start_time and
+    TableBookingConfig.cutoff_time. booking_date is a real date rather than the
+    "DD/MM/YYYY" week string used by Signup -- a booking is a specific day, not
+    a club week.
+
+    player_id is denormalised alongside user_id because the two answer
+    different questions: user_id is who booked (their account, for their "my
+    bookings" list), player_id is who they are at this club (for the roster and
+    for anything that wants to join bookings to club history). A user with no
+    player row at this club can still book.
+    """
+    __tablename__ = "venue_bookings"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    table_id: int = Field(foreign_key="venue_tables.id", index=True)
+
+    booking_date: date = Field(index=True)
+    start_time: str                             # "HH:MM" local
+    end_time: str                               # "HH:MM" local, exclusive
+
+    party_size: int = 2
+    # What they're playing, when it's a system this club runs. NULL covers
+    # "something else" / "not saying" — a venue takes bookings for games it
+    # has never heard of, and the drop-down must not be a wall.
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
+    game_note: Optional[str] = None             # free text when system_id is NULL
+
+    user_id: int = Field(foreign_key="users.id", index=True)
+    player_id: Optional[int] = Field(default=None, foreign_key="players.id", index=True)
+    contact_name: str
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    notes: Optional[str] = None                 # booker's own message to staff
+
+    # "requested" (awaiting staff, only in confirm_mode="request")
+    # "confirmed" | "cancelled" | "no_show"
+    status: str = Field(default="confirmed", index=True)
+    staff_note: Optional[str] = None
+    # Set when staff add a booking themselves for a walk-in or a phone call,
+    # so the console can tell "they booked" from "we booked them in".
+    created_by_staff: bool = False
+
+    cancelled_at: Optional[datetime] = None
+    cancelled_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueStaff(SQLModel, table=True):
+    """Grants a user the Venue Admin tab at one club.
+
+    Its own grant rather than an admin_roles scope on purpose. Scopes are game
+    systems -- valid_scopes() is built from the SystemConfig catalogue, and the
+    codebase already retired its one pseudo-scope ("League") when leagues went
+    per-system. Venue work is not a game system: the person running the bar
+    needs the bookings console and nothing else, and should not have to be
+    handed The Old World's admin rights to get it.
+
+    Super-admins and platform admins have venue access implicitly and need no
+    row here (see venue.can_admin_venue).
+    """
+    __tablename__ = "venue_staff"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)

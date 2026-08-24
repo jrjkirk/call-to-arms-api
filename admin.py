@@ -2423,7 +2423,13 @@ WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms
 # channels. Migrated existing club-level rows to their club's single
 # league-enabled system — see migrations/split_league_webhooks_per_system.py.
 WEBHOOK_TYPES_LEAGUE: tuple[str, ...] = ("league_result", "achievement", "league_rankings")
-ALL_WEBHOOK_TYPES: frozenset[str] = frozenset(WEBHOOK_TYPES_PER_SYSTEM + WEBHOOK_TYPES_LEAGUE)
+# Club-level, system_id always NULL. Venue bookings aren't a game system — the
+# bar has one staff channel, not one per game night — so this deliberately does
+# NOT join the per-system grid.
+WEBHOOK_TYPES_CLUB: tuple[str, ...] = ("venue_booking",)
+ALL_WEBHOOK_TYPES: frozenset[str] = frozenset(
+    WEBHOOK_TYPES_PER_SYSTEM + WEBHOOK_TYPES_LEAGUE + WEBHOOK_TYPES_CLUB
+)
 
 
 def _mask_webhook_row(row: Optional[ClubWebhook]) -> dict:

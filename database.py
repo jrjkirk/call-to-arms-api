@@ -31,6 +31,11 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "signups",        # Call to Arms form: insert/update/delete own signup; also pairing grid save-back
     "pairings",       # drop-out flow + admin pairing generation/editing/deletion
     "publish_state",  # admin publish/unpublish pairings
+    "venue_configs",  # venue booking policy: one row per club, created on
+                      # first open of Venue Admin and edited there
+    "venue_tables",   # the club's bookable table inventory, staff-managed
+    "venue_bookings", # public table bookings + staff walk-in entries
+    "venue_staff",    # who may open Venue Admin without being a super-admin
     "players",        # create-profile inserts; admin edit updates name/titles/
                       # notes and the two visibility switches (active,
                       # league_visible); admin delete removes history-free rows
