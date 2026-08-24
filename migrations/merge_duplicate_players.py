@@ -48,6 +48,16 @@ ORPHANS = {747: 47, 775: 47}
 # Adjustments to drop after merging: entered to paper over lost history.
 DROP_ADJUSTMENTS = [(119, "The Old World")]
 
+# survivor_id -> the User that should own it afterwards.
+#
+# Shaun has two Discord accounts. Player 47 carries all 16 games but belongs to
+# user 26 (June); user 69 (10/08) is the one he actually uses now — the deleted
+# player 113 signed up on 12/08 and 19/08 just after that account appeared, he
+# created player 119 on 26/08, and he entered the manual games on 23/08. Left
+# pointing at user 26, his current login would find no profile and be offered
+# create-a-profile, which is precisely how he got here.
+REASSIGN_OWNER = {47: 69}
+
 
 def main(apply: bool) -> None:
     with Session(engine) as db:
@@ -114,6 +124,24 @@ def main(apply: bool) -> None:
 
                 print(f"  delete player {dup_id} ({dup.name!r})")
                 db.delete(dup)
+
+            new_owner_id = REASSIGN_OWNER.get(survivor_id)
+            if new_owner_id is not None and survivor.user_id != new_owner_id:
+                new_owner = db.get(User, new_owner_id)
+                if new_owner is None:
+                    print(f"  !! user {new_owner_id} missing — leaving owner as {survivor.user_id}")
+                else:
+                    # Clear the old owner's legacy back-link first, or two users
+                    # point at one player and whichever loads first wins.
+                    for u in db.exec(select(User).where(User.player_id == survivor_id)).all():
+                        if u.id != new_owner_id:
+                            print(f"  user {u.id} releases player {survivor_id}")
+                            u.player_id = None
+                            db.add(u)
+                    print(f"  owner {survivor.user_id} -> {new_owner_id}")
+                    survivor.user_id = new_owner_id
+                    new_owner.player_id = survivor_id
+                    db.add(survivor); db.add(new_owner)
 
             if reactivate and not survivor.active:
                 print(f"  reactivating player {survivor_id}")
