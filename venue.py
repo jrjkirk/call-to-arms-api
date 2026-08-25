@@ -1165,6 +1165,22 @@ def club_night_pitch(db: Session, club_id: int, booking: VenueBooking) -> Option
 # contradicts the one view staff read fastest.
 TABLE_COLORS = ("slate", "blue", "green", "amber", "red", "purple", "teal", "grey")
 
+# What a fixture may be. Validated on save so a typo can't put something on the
+# plan that nothing knows how to draw.
+FEATURE_KINDS = (
+    "enclosure", "wall", "note", "bar", "door", "pillar", "shelves",
+    "stairs", "toilets",
+)
+
+# Structure, not furniture: these ignore the colour palette. A plan where the
+# walls are teal stops reading as a building.
+STRUCTURAL_KINDS = ("enclosure", "wall", "door")
+
+# One wall thickness for the whole plan — the room's own boundary, an
+# enclosure's walls, and a standalone wall segment. They are the same material,
+# so anything else makes them fail to line up where they meet.
+WALL_FT = 0.5
+
 STANDARD_TABLE = (6.0, 4.0)
 DEFAULT_ROOM = (30.0, 20.0)
 
@@ -1296,7 +1312,7 @@ def layout(db: Session, club_id: int) -> dict:
         ],
         "features": [
             {"id": f.id, "room_id": f.room_id, "kind": f.kind, "label": f.label,
-             "shape": f.shape,
+             "shape": f.shape, "color": f.color,
              "pos_x": f.pos_x, "pos_y": f.pos_y, "width_ft": f.width_ft,
              "depth_ft": f.depth_ft, "rotation": f.rotation}
             for f in features

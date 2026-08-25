@@ -1733,6 +1733,7 @@ class PlanFeature(BaseModel):
     room_id: int
     kind: str = "wall"
     shape: str = "rect"
+    color: str = "grey"
     label: Optional[str] = None
     pos_x: float = 0.0
     pos_y: float = 0.0
@@ -1829,8 +1830,11 @@ def save_layout(
             if f is None or f.club_id != club_id:
                 continue
         f.room_id = row.room_id
+        if row.kind not in V.FEATURE_KINDS:
+            raise HTTPException(status_code=422, detail=f"Unknown fixture: {row.kind}")
         f.kind = row.kind
         f.shape = row.shape if row.shape in ("rect", "round", "oval") else "rect"
+        f.color = row.color if row.color in V.TABLE_COLORS else "grey"
         f.label = (row.label or "").strip() or None
         f.pos_x, f.pos_y = row.pos_x, row.pos_y
         f.width_ft, f.depth_ft = row.width_ft, row.depth_ft

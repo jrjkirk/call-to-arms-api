@@ -1328,8 +1328,15 @@ class VenueFeature(SQLModel, table=True):
     room_id: int = Field(foreign_key="venue_rooms.id", index=True)
 
     label: Optional[str] = None
-    # "enclosure" | "wall" | "bar" | "door" | "pillar" | "shelves" | "stairs"
-    # | "toilets"
+    # Same palette token as VenueTable.color. Walls, rooms and doors ignore it:
+    # they're structure, and a plan where the walls are teal stops reading as a
+    # building.
+    color: str = "grey"
+    # "enclosure" | "wall" | "note" | "bar" | "door" | "pillar" | "shelves" |
+    # "stairs" | "toilets"
+    #
+    # `note` is annotation — "Shop", "Staff only" — drawn as text with no box,
+    # because a venue's plan has areas that aren't objects.
     #
     # `enclosure` is a room drawn as a BOX — four walls with a hollow middle —
     # rather than four separate wall segments. Venues are made of rooms, not of
