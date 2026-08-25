@@ -1716,6 +1716,7 @@ class PlanTable(BaseModel):
     id: Optional[int] = None
     name: str
     shape: str = "rect"
+    color: str = "slate"
     room_id: Optional[int] = None
     pos_x: Optional[float] = None
     pos_y: Optional[float] = None
@@ -1803,6 +1804,7 @@ def save_layout(
                 continue
         t.name = row.name.strip() or t.name or "Table"
         t.shape = row.shape if row.shape in ("rect", "round", "oval") else "rect"
+        t.color = row.color if row.color in V.TABLE_COLORS else "slate"
         t.room_id = row.room_id
         t.pos_x, t.pos_y = row.pos_x, row.pos_y
         t.width_ft, t.depth_ft = row.width_ft, row.depth_ft

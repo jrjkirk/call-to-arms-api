@@ -1159,6 +1159,12 @@ def club_night_pitch(db: Session, club_id: int, booking: VenueBooking) -> Option
 # CENTRE of a thing, so rotation is one transform about that point.
 # ---------------------------------------------------------------------------
 
+# The palette a venue may colour-code its plan with. Named rather than free
+# hex: the plan is dark, and "green" is already how the Tonight view says
+# "free", so an unconstrained picker would let someone build a room that
+# contradicts the one view staff read fastest.
+TABLE_COLORS = ("slate", "blue", "green", "amber", "red", "purple", "teal", "grey")
+
 STANDARD_TABLE = (6.0, 4.0)
 DEFAULT_ROOM = (30.0, 20.0)
 
@@ -1280,7 +1286,7 @@ def layout(db: Session, club_id: int) -> dict:
             for r in rooms
         ],
         "tables": [
-            {"id": t.id, "name": t.name, "room_id": t.room_id, "shape": t.shape,
+            {"id": t.id, "name": t.name, "room_id": t.room_id, "shape": t.shape, "color": t.color,
              "pos_x": t.pos_x, "pos_y": t.pos_y,
              "width_ft": t.width_ft, "depth_ft": t.depth_ft,
              "rotation": t.rotation, "seats": t.seats, "active": t.active,

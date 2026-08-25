@@ -1033,6 +1033,13 @@ class VenueTable(SQLModel, table=True):
     # venue thinks in — tables are 6x4, rooms are "about thirty by twenty".
     # Storing centimetres and converting would mean rounding a 6x4 into
     # 182.88cm and back, and showing someone 5.99ft.
+    # A palette TOKEN, not a hex value: "slate" | "blue" | "green" | "amber" |
+    # "red" | "purple" | "teal" | "grey". Venues colour-code their room —
+    # "the blue bank is the tournament tables", "red ones are demo" — and a
+    # free colour picker would let someone choose something illegible on a dark
+    # plan, or a green that reads as "free" in the Tonight view. Naming the
+    # colours keeps the palette restyleable in one place.
+    color: str = "slate"
     # "rect" | "round" | "oval". Venues really do have all three — a 6x4
     # gaming table, a 4ft round in the bar, a long oval for a demo game — and a
     # plan that draws them all as rectangles is a plan staff have to translate.
