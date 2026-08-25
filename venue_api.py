@@ -1715,6 +1715,7 @@ def delete_room(
 class PlanTable(BaseModel):
     id: Optional[int] = None
     name: str
+    shape: str = "rect"
     room_id: Optional[int] = None
     pos_x: Optional[float] = None
     pos_y: Optional[float] = None
@@ -1730,6 +1731,7 @@ class PlanFeature(BaseModel):
     id: Optional[int] = None
     room_id: int
     kind: str = "wall"
+    shape: str = "rect"
     label: Optional[str] = None
     pos_x: float = 0.0
     pos_y: float = 0.0
@@ -1800,6 +1802,7 @@ def save_layout(
             if t is None or t.club_id != club_id:
                 continue
         t.name = row.name.strip() or t.name or "Table"
+        t.shape = row.shape if row.shape in ("rect", "round", "oval") else "rect"
         t.room_id = row.room_id
         t.pos_x, t.pos_y = row.pos_x, row.pos_y
         t.width_ft, t.depth_ft = row.width_ft, row.depth_ft
@@ -1825,6 +1828,7 @@ def save_layout(
                 continue
         f.room_id = row.room_id
         f.kind = row.kind
+        f.shape = row.shape if row.shape in ("rect", "round", "oval") else "rect"
         f.label = (row.label or "").strip() or None
         f.pos_x, f.pos_y = row.pos_x, row.pos_y
         f.width_ft, f.depth_ft = row.width_ft, row.depth_ft

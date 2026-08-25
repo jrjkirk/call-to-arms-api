@@ -1280,7 +1280,7 @@ def layout(db: Session, club_id: int) -> dict:
             for r in rooms
         ],
         "tables": [
-            {"id": t.id, "name": t.name, "room_id": t.room_id,
+            {"id": t.id, "name": t.name, "room_id": t.room_id, "shape": t.shape,
              "pos_x": t.pos_x, "pos_y": t.pos_y,
              "width_ft": t.width_ft, "depth_ft": t.depth_ft,
              "rotation": t.rotation, "seats": t.seats, "active": t.active,
@@ -1290,6 +1290,7 @@ def layout(db: Session, club_id: int) -> dict:
         ],
         "features": [
             {"id": f.id, "room_id": f.room_id, "kind": f.kind, "label": f.label,
+             "shape": f.shape,
              "pos_x": f.pos_x, "pos_y": f.pos_y, "width_ft": f.width_ft,
              "depth_ft": f.depth_ft, "rotation": f.rotation}
             for f in features

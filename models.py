@@ -1033,6 +1033,12 @@ class VenueTable(SQLModel, table=True):
     # venue thinks in — tables are 6x4, rooms are "about thirty by twenty".
     # Storing centimetres and converting would mean rounding a 6x4 into
     # 182.88cm and back, and showing someone 5.99ft.
+    # "rect" | "round" | "oval". Venues really do have all three — a 6x4
+    # gaming table, a 4ft round in the bar, a long oval for a demo game — and a
+    # plan that draws them all as rectangles is a plan staff have to translate.
+    # width_ft/depth_ft stay the bounding box whatever the shape, so sizing,
+    # rotation and the overlap check need no special cases.
+    shape: str = "rect"
     room_id: Optional[int] = Field(default=None, foreign_key="venue_rooms.id", index=True)
     # CENTRE position, not a corner: rotation is then a single SVG transform
     # about (pos_x, pos_y) with no offset arithmetic, and a table stays put
@@ -1317,6 +1323,7 @@ class VenueFeature(SQLModel, table=True):
     label: Optional[str] = None
     # "wall" | "bar" | "door" | "pillar" | "shelves" | "stairs" | "toilets"
     kind: str = "wall"
+    shape: str = "rect"
     pos_x: float = 0.0
     pos_y: float = 0.0
     width_ft: float = 4.0
