@@ -1314,7 +1314,8 @@ def layout(db: Session, club_id: int) -> dict:
             {"id": f.id, "room_id": f.room_id, "kind": f.kind, "label": f.label,
              "shape": f.shape, "color": f.color,
              "pos_x": f.pos_x, "pos_y": f.pos_y, "width_ft": f.width_ft,
-             "depth_ft": f.depth_ft, "rotation": f.rotation}
+             "depth_ft": f.depth_ft, "rotation": f.rotation,
+             "flip_h": f.flip_h, "flip_v": f.flip_v}
             for f in features
         ],
     }

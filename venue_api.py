@@ -1740,6 +1740,8 @@ class PlanFeature(BaseModel):
     width_ft: float = 4.0
     depth_ft: float = 2.0
     rotation: float = 0.0
+    flip_h: bool = False
+    flip_v: bool = False
 
 
 class LayoutBody(BaseModel):
@@ -1839,6 +1841,8 @@ def save_layout(
         f.pos_x, f.pos_y = row.pos_x, row.pos_y
         f.width_ft, f.depth_ft = row.width_ft, row.depth_ft
         f.rotation = float(row.rotation) % 360
+        f.flip_h = bool(row.flip_h)
+        f.flip_v = bool(row.flip_v)
         db.add(f)
 
     db.commit()

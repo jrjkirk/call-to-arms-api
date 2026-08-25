@@ -1350,4 +1350,16 @@ class VenueFeature(SQLModel, table=True):
     width_ft: float = 4.0
     depth_ft: float = 2.0
     rotation: float = 0.0
+
+    # Mirrors, about the object's own centre.
+    #
+    # Only doors have a handedness, and they have TWO independent ones: which
+    # jamb it's hinged on, and which side it opens toward. Rotation can't
+    # separate them — turning a door 180 degrees swaps both at once — so a
+    # left-hand door that opens inward is unreachable from a right-hand one by
+    # rotation alone. These are the missing axis. Every other shape is
+    # symmetrical and ignores them.
+    flip_h: bool = False
+    flip_v: bool = False
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
