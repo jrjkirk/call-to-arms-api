@@ -1073,6 +1073,11 @@ class VenueBooking(SQLModel, table=True):
     # so the console can tell "they booked" from "we booked them in".
     created_by_staff: bool = False
 
+    # Set when this row is one table of a venue event (see VenueEvent). An
+    # event holds its tables as ordinary bookings on purpose: clash detection,
+    # availability and the day view then need no knowledge of events at all.
+    event_id: Optional[int] = Field(default=None, foreign_key="venue_events.id", index=True)
+
     cancelled_at: Optional[datetime] = None
     cancelled_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -1191,3 +1196,41 @@ class VenueNightTable(SQLModel, table=True):
     table_id: int = Field(foreign_key="venue_tables.id", index=True)
     reserved: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueEvent(SQLModel, table=True):
+    """Something the venue is running that takes tables out of circulation: a
+    tournament, a launch night, a birthday.
+
+    The tables it holds are ordinary VenueBooking rows carrying this event's id.
+    That was a deliberate choice over a second kind of thing that blocks a
+    table: every rule about whether a table is free already lives in
+    free_tables_for, and an event that blocked tables its own way would be a
+    second implementation to keep in step — the exact split that let a table be
+    double-booked in every booking system that has ever had one.
+
+    So an event is a booking the venue makes across several tables at once. It
+    clashes properly, shows in the diary, and releases its tables the moment
+    it's cancelled, all without another line of blocking logic.
+    """
+    __tablename__ = "venue_events"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+
+    name: str
+    description: Optional[str] = None
+    event_date: date = Field(index=True)
+    start_time: str                              # "HH:MM" local
+    end_time: str                                # "HH:MM" local, exclusive
+    tables_needed: int = 1
+
+    # Whether bookers see it on the booking page's day strip. A tournament is
+    # worth advertising; "carpet cleaning" is not, and a venue shouldn't have to
+    # choose between blocking the room and telling the public why.
+    public: bool = True
+
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

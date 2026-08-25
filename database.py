@@ -38,6 +38,8 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "venue_staff",    # who may open Venue Admin without being a super-admin
     "venue_club_nights",     # per-club-night table forecast, checked against
                              # real pairings by venue.table_review()
+    "venue_events",          # venue-run events; their tables are held as
+                             # ordinary venue_bookings carrying the event id
     "venue_night_tables",    # which tables suit a club night, and which are
                              # held back from the public when it runs
     "players",        # create-profile inserts; admin edit updates name/titles/

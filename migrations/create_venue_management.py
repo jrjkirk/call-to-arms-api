@@ -19,15 +19,15 @@ from sqlalchemy import inspect
 
 from database import engine
 from models import (
-    VenueBooking, VenueClubNight, VenueConfig, VenueNightTable, VenueStaff,
-    VenueTable,
+    VenueBooking, VenueClubNight, VenueConfig, VenueEvent, VenueNightTable,
+    VenueStaff, VenueTable,
 )
 
 # Order matters: venue_bookings and venue_night_tables carry foreign keys to
 # venue_tables, and venue_night_tables to venue_club_nights, so each has to
 # exist before the rows that point at it.
 TABLES = [
-    VenueConfig, VenueTable, VenueBooking, VenueStaff,
+    VenueConfig, VenueTable, VenueEvent, VenueBooking, VenueStaff,
     VenueClubNight, VenueNightTable,
 ]
 

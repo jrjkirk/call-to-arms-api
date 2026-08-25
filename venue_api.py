@@ -104,7 +104,7 @@ def venue_info(
         "max_party_size": cfg.max_party_size,
         "first_date": today.isoformat(),
         "last_date": (today + timedelta(days=cfg.max_advance_days)).isoformat(),
-        "booking_hours": cfg.booking_hours or V.DEFAULT_BOOKING_HOURS,
+        "opening_hours": V.opening_hours(db, club_id),
         "tables": len(V.active_tables(db, club_id)),
         "systems": [{"id": s.id, "name": s.name, "slug": s.slug} for s in systems],
     }
@@ -247,7 +247,7 @@ def create_booking(
         )
 
     end = start + duration
-    window = V.hours_for(cfg, day)
+    window = V.hours_for(db, club_id, day)
     if window is None:
         raise HTTPException(status_code=409, detail="The venue isn't open for bookings that day.")
     if start < window[0] or end > window[1]:
@@ -423,7 +423,6 @@ def get_venue_config(ctx=Depends(_require_venue_admin), db: Session = Depends(ge
         "lead_time_minutes": cfg.lead_time_minutes,
         "max_party_size": cfg.max_party_size,
         "max_active_bookings_per_user": cfg.max_active_bookings_per_user,
-        "booking_hours": cfg.booking_hours or V.DEFAULT_BOOKING_HOURS,
         "notify_email": cfg.notify_email,
         "notify_emails": cfg.notify_emails or [],
         "notify_discord": cfg.notify_discord,
@@ -453,7 +452,6 @@ class VenueConfigBody(BaseModel):
     lead_time_minutes: Optional[int] = None
     max_party_size: Optional[int] = None
     max_active_bookings_per_user: Optional[int] = None
-    booking_hours: Optional[list] = None
     notify_email: Optional[bool] = None
     notify_emails: Optional[list[str]] = None
     notify_discord: Optional[bool] = None
@@ -501,9 +499,6 @@ def save_venue_config(
             detail="Shortest booking can't be longer than the longest.",
         )
 
-    if body.booking_hours is not None:
-        cfg.booking_hours = _clean_hours(body.booking_hours)
-
     for field in ("notify_email", "notify_discord", "promote_club_nights", "enabled"):
         val = getattr(body, field)
         if val is not None:
@@ -518,6 +513,12 @@ def save_venue_config(
 
     # Turning the venue on with nothing to sell would publish a booking page
     # that can never take a booking.
+    if cfg.enabled and all(r["closed"] for r in V.opening_hours(db, club_id)):
+        raise HTTPException(
+            status_code=409,
+            detail="Set your open hours before opening bookings — every day is "
+                   "currently marked closed, so no slot could ever be offered.",
+        )
     if cfg.enabled and not V.active_tables(db, club_id):
         raise HTTPException(
             status_code=409,
@@ -541,21 +542,23 @@ def _clean_hours(rows: list) -> list:
         day = (row.get("day") or "").strip().title()
         if day not in V.WEEKDAYS:
             continue
+        note = (row.get("note") or "").strip() or None
         if row.get("closed"):
-            by_day[day] = {"day": day, "open": None, "close": None, "closed": True}
+            by_day[day] = {"day": day, "open": None, "close": None, "closed": True, "note": note}
             continue
         try:
             o, c = V.to_minutes(row.get("open")), V.to_minutes(row.get("close"))
         except (ValueError, TypeError):
-            by_day[day] = {"day": day, "open": None, "close": None, "closed": True}
+            by_day[day] = {"day": day, "open": None, "close": None, "closed": True, "note": note}
             continue
         if c <= o:
             raise HTTPException(
                 status_code=422,
                 detail=f"{day}: closing time must be after opening time.",
             )
-        by_day[day] = {"day": day, "open": V.to_hhmm(o), "close": V.to_hhmm(c), "closed": False}
-    return [by_day.get(d, {"day": d, "open": None, "close": None, "closed": True})
+        by_day[day] = {"day": day, "open": V.to_hhmm(o), "close": V.to_hhmm(c),
+                       "closed": False, "note": note}
+    return [by_day.get(d, {"day": d, "open": None, "close": None, "closed": True, "note": None})
             for d in V.WEEKDAYS]
 
 
@@ -700,12 +703,38 @@ def admin_day(
         "booking_rows": [
             {**V.describe_booking(db, b),
              "table_id": b.table_id,
+             "event_id": b.event_id,
              "start_time": b.start_time,
              "end_time": b.end_time,
              "created_by_staff": b.created_by_staff,
              "staff_note": b.staff_note}
             for b in rows
         ],
+    }
+
+
+@router.get("/admin/calendar")
+def admin_calendar(
+    month: str = Query(..., description="YYYY-MM"),
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """A whole month of busyness, for the Diary's calendar view.
+
+    Batched through range_overview rather than looped day by day — thirty-one
+    day_overview calls would be several hundred queries for one screen.
+    """
+    _, club_id = ctx
+    try:
+        year, mon = (int(p) for p in month.split("-"))
+        first = date(year, mon, 1)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="month must be YYYY-MM.")
+    last = date(year + (mon == 12), (mon % 12) + 1, 1) - timedelta(days=1)
+    return {
+        "month": month,
+        "first_weekday": first.weekday(),   # 0 = Monday, to pad the grid
+        "days": V.range_overview(db, club_id, first, last),
     }
 
 
@@ -728,7 +757,7 @@ def admin_upcoming(
         .order_by(VenueBooking.booking_date, VenueBooking.start_time)
     ).all()
     return {
-        "days": [V.day_overview(db, club_id, first + timedelta(days=i)) for i in range(days)],
+        "days": V.range_overview(db, club_id, first, first + timedelta(days=days - 1)),
         "pending": [V.describe_booking(db, b) for b in pending],
     }
 
@@ -1158,6 +1187,9 @@ def get_venue_profile(ctx=Depends(_require_venue_admin), db: Session = Depends(g
         "blurb": club.blurb,
         "website_url": club.website_url,
         "discord_url": club.discord_url,
+        # The venue's ONE set of hours: what the public club page shows and what
+        # the availability engine offers slots within.
+        "opening_hours": V.opening_hours(db, club_id),
         # Never the whole URL back — a webhook URL is a credential. The last
         # four characters are enough for "is this the one I think it is",
         # matching how the admin tab masks its webhooks.
@@ -1170,6 +1202,7 @@ class VenueProfileBody(BaseModel):
     blurb: Optional[str] = None
     website_url: Optional[str] = None
     discord_url: Optional[str] = None
+    opening_hours: Optional[list] = None
 
 
 @router.post("/admin/venue-profile")
@@ -1184,6 +1217,16 @@ def save_venue_profile(
         val = getattr(body, field)
         if val is not None:
             setattr(club, field, val.strip() or None)
+
+    if body.opening_hours is not None:
+        # Stored as only the OPEN days: the club page treats a missing day as
+        # closed, and that's the shape it has always read.
+        club.opening_hours = [
+            {k: v for k, v in row.items() if k != "closed"}
+            for row in _clean_hours(body.opening_hours)
+            if not row["closed"]
+        ]
+
     db.add(club)
     db.commit()
     return get_venue_profile(ctx=ctx, db=db)
@@ -1282,4 +1325,197 @@ def test_venue_webhook(
         raise
     except Exception:
         raise HTTPException(status_code=502, detail="Couldn't reach Discord just now.")
+    return {"ok": True}
+
+
+# ---- events ----
+#
+# An event holds its tables as ordinary bookings (see VenueEvent), so nothing
+# below teaches the availability engine anything new about blocking.
+
+@router.get("/admin/events")
+def list_events(
+    date_str: Optional[str] = Query(None, alias="date"),
+    # ge=0 so days=0 means "just this date" — the day panel asks for exactly
+    # one day, and rejecting that made its event list silently always empty.
+    days: int = Query(60, ge=0, le=365),
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    from models import VenueEvent
+    _, club_id = ctx
+    first = date.fromisoformat(date_str) if date_str else V.club_now(db, club_id).date()
+    rows = db.exec(
+        select(VenueEvent)
+        .where(VenueEvent.club_id == club_id)
+        .where(VenueEvent.event_date >= first)
+        .where(VenueEvent.event_date <= first + timedelta(days=days))
+        .order_by(VenueEvent.event_date, VenueEvent.start_time)
+    ).all()
+    return [_event_payload(db, e) for e in rows]
+
+
+def _event_payload(db: Session, event) -> dict:
+    held = db.exec(
+        select(VenueBooking)
+        .where(VenueBooking.event_id == event.id)
+        .where(VenueBooking.status.in_(V.BLOCKING_STATUSES))
+    ).all()
+    tables = [db.get(VenueTable, b.table_id) for b in held]
+    return {
+        "id": event.id,
+        "name": event.name,
+        "description": event.description,
+        "date": event.event_date.isoformat(),
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "tables_needed": event.tables_needed,
+        "tables_held": len(held),
+        "table_names": sorted(t.name for t in tables if t),
+        "public": event.public,
+        # Says so plainly rather than letting a half-filled event look booked.
+        # An event created when the room was busy can hold fewer tables than it
+        # asked for, and the venue needs to know that now, not on the night.
+        "short_by": max(0, event.tables_needed - len(held)),
+    }
+
+
+class EventBody(BaseModel):
+    name: str
+    description: Optional[str] = None
+    date: str
+    start_time: str
+    end_time: str
+    tables_needed: int = 1
+    public: bool = True
+
+
+@router.post("/admin/events")
+def create_event(
+    body: EventBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Create an event and hold its tables.
+
+    Takes whatever it can get and reports the shortfall rather than failing
+    outright: a venue told "no" at 5pm on a busy Saturday has learned nothing
+    it can act on, while "held 4 of the 6 you wanted" tells them exactly which
+    problem they have.
+    """
+    from models import VenueEvent
+
+    user, club_id = ctx
+    try:
+        day = date.fromisoformat(body.date)
+        start = V.to_minutes(body.start_time)
+        end = V.to_minutes(body.end_time)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date or time.")
+    if end <= start:
+        raise HTTPException(status_code=422, detail="The event must end after it starts.")
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="Give the event a name.")
+    if not (1 <= body.tables_needed <= 200):
+        raise HTTPException(status_code=422, detail="Tables needed must be 1–200.")
+
+    event = VenueEvent(
+        club_id=club_id, name=body.name.strip(),
+        description=(body.description or "").strip() or None,
+        event_date=day, start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
+        tables_needed=body.tables_needed, public=body.public,
+        created_by_user_id=user.id,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    # for_public=False: an event may take a table held for a club night. Staff
+    # know what they're doing to their own room.
+    free = V.free_tables_for(db, club_id, day, start, end, for_public=False)
+    for table in free[:body.tables_needed]:
+        db.add(VenueBooking(
+            club_id=club_id, table_id=table.id, booking_date=day,
+            start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
+            party_size=1, user_id=user.id, contact_name=event.name,
+            notes=event.description, status="confirmed",
+            created_by_staff=True, event_id=event.id,
+        ))
+    db.commit()
+    return _event_payload(db, event)
+
+
+@router.patch("/admin/events/{event_id}")
+def patch_event(
+    event_id: int,
+    body: EventBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Edit an event. Changing the date, time or table count re-holds its
+    tables from scratch — releasing first, so an event that shrinks or moves
+    gives its old tables back to the public instead of sitting on them."""
+    from models import VenueEvent
+
+    user, club_id = ctx
+    event = db.get(VenueEvent, event_id)
+    if event is None or event.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        day = date.fromisoformat(body.date)
+        start = V.to_minutes(body.start_time)
+        end = V.to_minutes(body.end_time)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad date or time.")
+    if end <= start:
+        raise HTTPException(status_code=422, detail="The event must end after it starts.")
+
+    moved = (day != event.event_date or V.to_hhmm(start) != event.start_time
+             or V.to_hhmm(end) != event.end_time
+             or body.tables_needed != event.tables_needed)
+
+    event.name = body.name.strip() or event.name
+    event.description = (body.description or "").strip() or None
+    event.event_date, event.start_time, event.end_time = day, V.to_hhmm(start), V.to_hhmm(end)
+    event.tables_needed = body.tables_needed
+    event.public = body.public
+    event.updated_at = datetime.utcnow()
+    db.add(event)
+
+    if moved:
+        for b in db.exec(
+            select(VenueBooking).where(VenueBooking.event_id == event.id)
+        ).all():
+            db.delete(b)
+        db.commit()
+        free = V.free_tables_for(db, club_id, day, start, end, for_public=False)
+        for table in free[:body.tables_needed]:
+            db.add(VenueBooking(
+                club_id=club_id, table_id=table.id, booking_date=day,
+                start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
+                party_size=1, user_id=user.id, contact_name=event.name,
+                notes=event.description, status="confirmed",
+                created_by_staff=True, event_id=event.id,
+            ))
+    db.commit()
+    db.refresh(event)
+    return _event_payload(db, event)
+
+
+@router.delete("/admin/events/{event_id}")
+def delete_event(
+    event_id: int,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Cancel an event and release every table it was holding."""
+    from models import VenueEvent
+    _, club_id = ctx
+    event = db.get(VenueEvent, event_id)
+    if event is None or event.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    for b in db.exec(select(VenueBooking).where(VenueBooking.event_id == event_id)).all():
+        db.delete(b)
+    db.delete(event)
+    db.commit()
     return {"ok": True}

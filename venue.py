@@ -86,7 +86,9 @@ def get_or_create_config(db: Session, club_id: int) -> VenueConfig:
     cfg = get_config(db, club_id)
     if cfg is not None:
         return cfg
-    cfg = VenueConfig(club_id=club_id, booking_hours=DEFAULT_BOOKING_HOURS)
+    # No booking_hours: open hours live on Club.opening_hours now, edited in
+    # the same place the club page reads them from.
+    cfg = VenueConfig(club_id=club_id)
     db.add(cfg)
     db.commit()
     db.refresh(cfg)
@@ -123,16 +125,48 @@ def club_now(db: Session, club_id: int) -> datetime:
     return datetime.now(tz)
 
 
-def hours_for(cfg: VenueConfig, day: date) -> Optional[tuple[int, int]]:
-    """(open, close) in minutes for a given date, or None if not bookable."""
-    rows = cfg.booking_hours or DEFAULT_BOOKING_HOURS
+def opening_hours(db: Session, club_id: int) -> list[dict]:
+    """The venue's open hours, always seven rows, each with an explicit
+    `closed`.
+
+    Stored on Club.opening_hours, which is ALSO what the public club page
+    renders — one set of hours, edited once, in Venue Admin. There used to be a
+    second copy on VenueConfig.booking_hours for "we're open before we take
+    bookings"; that distinction cost venues two things to keep in step for a
+    nuance none of them asked for, so it's gone and that column is now an
+    orphan (same call as Club.leagues_enabled and ClubSystem.carousel_order).
+
+    Club.opening_hours stores ONLY the open days — the club page treats a
+    missing day as closed. This normalises to all seven so the editor and the
+    availability engine never have to think about absence.
+    """
+    club = db.get(Club, club_id)
+    by_day = {}
+    for row in (club.opening_hours if club else None) or []:
+        day_name = (row.get("day") or "").strip().title()
+        if day_name in WEEKDAYS:
+            by_day[day_name] = row
+    out = []
+    for name in WEEKDAYS:
+        row = by_day.get(name)
+        if row is None:
+            out.append({"day": name, "open": None, "close": None,
+                        "closed": True, "note": None})
+        else:
+            out.append({"day": name, "open": row.get("open"), "close": row.get("close"),
+                        "closed": False, "note": row.get("note")})
+    return out
+
+
+def hours_for(db: Session, club_id: int, day: date) -> Optional[tuple[int, int]]:
+    """(open, close) in minutes for a given date, or None if closed."""
     name = WEEKDAYS[day.weekday()]
-    for row in rows:
-        if (row.get("day") or "") == name:
-            if row.get("closed"):
+    for row in opening_hours(db, club_id):
+        if row["day"] == name:
+            if row["closed"]:
                 return None
             try:
-                return to_minutes(row.get("open")), to_minutes(row.get("close"))
+                return to_minutes(row["open"]), to_minutes(row["close"])
             except (ValueError, TypeError):
                 return None
     return None
@@ -343,7 +377,7 @@ def availability(
         return {"date": day.isoformat(), "enabled": False, "slots": [], "tables": 0}
 
     duration = duration_minutes or cfg.min_duration_minutes
-    window = hours_for(cfg, day)
+    window = hours_for(db, club_id, day)
     tables = active_tables(db, club_id)
 
     base = {
@@ -711,6 +745,132 @@ def _table_advice(
         return (f"Set aside {expected}, but the busiest recent session only used "
                 f"{busiest}. You could free up {expected - busiest}.")
     return f"{expected} looks right — recent sessions peaked at {busiest}."
+
+
+def range_overview(db: Session, club_id: int, first: date, last: date) -> list[dict]:
+    """day_overview for every date in a range, without the query storm.
+
+    A month view is thirty-one days, and day_overview asks for the club-night
+    definitions, that week's signups, the day's bookings and the table list
+    each time. Looped naively that is several hundred queries for one screen —
+    the same shape that exhausted the connection pool when /pairings was
+    scanning per request. So the whole window is fetched flat here and the
+    per-day work becomes dictionary lookups.
+    """
+    from week_logic import _fmt
+    from models import Signup
+
+    tables = active_tables(db, club_id)
+    total = len(tables)
+    plans = club_nights(db, club_id)
+    by_system = {p.system_id: p for p in plans if p.system_id is not None}
+    reserved = night_tables(db, club_id)
+    systems = db.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club_id)
+        .where(ClubSystem.enabled == True)
+        .where(SystemConfig.active == True)
+    ).all()
+
+    booking_rows = db.exec(
+        select(VenueBooking)
+        .where(VenueBooking.club_id == club_id)
+        .where(VenueBooking.booking_date >= first)
+        .where(VenueBooking.booking_date <= last)
+        .where(VenueBooking.status.in_(BLOCKING_STATUSES))
+    ).all()
+    bookings_by_day: dict[date, list[VenueBooking]] = {}
+    for b in booking_rows:
+        bookings_by_day.setdefault(b.booking_date, []).append(b)
+
+    weeks = set()
+    d = first
+    while d <= last:
+        weeks.add(_fmt(d))
+        d += timedelta(days=1)
+    counts: dict[tuple[str, str], int] = {}
+    for su in db.exec(
+        select(Signup)
+        .where(Signup.club_id == club_id)
+        .where(Signup.week.in_(sorted(weeks)))
+    ).all():
+        key = (su.week, su.system)
+        counts[key] = counts.get(key, 0) + 1
+
+    from week_logic import sessions_in_range
+
+    def runs_on(day: date, day_name, cadence, anchor) -> bool:
+        if not day_name:
+            return False
+        try:
+            return bool(sessions_in_range(day_name, cadence or "weekly", anchor, day, day))
+        except (AssertionError, KeyError):
+            return False
+
+    out = []
+    day = first
+    while day <= last:
+        nights = []
+        for cs, sc in systems:
+            if not runs_on(day, cs.session_day, cs.session_cadence, cs.cadence_anchor):
+                continue
+            plan = by_system.get(sc.id)
+            held = len(reserved.get(plan.id, {}).get("reserved", [])) if plan else 0
+            signups = counts.get((_fmt(day), sc.legacy_system_name), 0)
+            estimate = -(-signups // 2)
+            planned = plan.expected_tables if plan and plan.expected_tables else None
+            nights.append({
+                "night_id": plan.id if plan else None, "system_id": sc.id,
+                "system": sc.name, "accent_color": cs.accent_color,
+                "start_time": cs.session_start_time, "app_managed": True,
+                "signups": signups, "tables_planned": planned, "tables_held": held,
+                "tables_estimated": estimate,
+                "tables_expected": planned or held or estimate,
+                "outgrown": bool((planned or held) and estimate > (planned or held)),
+            })
+        for p in plans:
+            if p.system_id is not None:
+                continue
+            if not runs_on(day, p.session_day, p.session_cadence, p.cadence_anchor):
+                continue
+            held = len(reserved.get(p.id, {}).get("reserved", []))
+            planned = p.expected_tables or None
+            nights.append({
+                "night_id": p.id, "system_id": None, "system": p.name or "Club night",
+                "accent_color": None, "start_time": p.start_time, "app_managed": False,
+                "signups": 0, "tables_planned": planned, "tables_held": held,
+                "tables_estimated": 0, "tables_expected": planned or held or 0,
+                "outgrown": False,
+            })
+        nights.sort(key=lambda r: (r["start_time"] or "", r["system"]))
+
+        day_bookings = bookings_by_day.get(day, [])
+        booked_ids = {b.table_id for b in day_bookings}
+        held_ids: set[int] = set()
+        for n in nights:
+            if n["night_id"]:
+                held_ids.update(reserved.get(n["night_id"], {}).get("reserved", []))
+        night_demand = sum(n["tables_expected"] for n in nights)
+        committed = len(booked_ids) + night_demand - len(booked_ids & held_ids)
+
+        out.append({
+            "date": day.isoformat(),
+            "weekday": WEEKDAYS[day.weekday()],
+            "tables_total": total,
+            "tables_booked": len(booked_ids),
+            "tables_club_night": night_demand,
+            "tables_held": len(held_ids),
+            "tables_committed": committed,
+            "load": round(committed / total, 3) if total else None,
+            "over_capacity": total > 0 and committed > total,
+            "outgrown": any(n["outgrown"] for n in nights),
+            "club_nights": nights,
+            "bookings": len(day_bookings),
+            "events": len({b.event_id for b in day_bookings if b.event_id}),
+        })
+        day += timedelta(days=1)
+    return out
 
 
 def day_overview(db: Session, club_id: int, day: date) -> dict:
