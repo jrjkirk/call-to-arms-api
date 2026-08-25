@@ -21,7 +21,7 @@ from auth import active_club_id, current_user, require_user
 from database import get_session
 from models import (
     Club, SystemConfig, ClubSystem, User, VenueBooking, VenueClubNight,
-    VenueConfig, VenueStaff, VenueSystemTable, VenueTable, Player,
+    VenueConfig, VenueNightTable, VenueStaff, VenueTable, Player,
 )
 from database import active_player_id_for
 
@@ -152,8 +152,7 @@ def tables_for_slot(
     except ValueError:
         raise HTTPException(status_code=422, detail="Bad date or time.")
 
-    preferred = set(V.system_tables(db, club_id).get(system_id, {}).get("preferred", [])) \
-        if system_id is not None else set()
+    preferred = set(V.tables_for_system(db, club_id, system_id))
     free = V.free_tables_for(
         db, club_id, day, start, start + duration,
         party_size=party_size, system_id=system_id,
@@ -911,11 +910,47 @@ def remove_staff(
 
 # ---- club nights: what each one needs, and which tables are its own ----
 
+def _night_payload(db: Session, club_id: int, night, cs=None, sc=None) -> dict:
+    assigned = V.night_tables(db, club_id).get(night.id, {"preferred": [], "reserved": []})
+    base = {
+        "night_id": night.id,
+        "system_id": night.system_id,
+        "app_managed": night.system_id is not None,
+        "expected_tables": night.expected_tables,
+        "notes": night.notes,
+        "preferred_table_ids": sorted(assigned["preferred"]),
+        "reserved_table_ids": sorted(assigned["reserved"]),
+        "review": V.table_review(db, club_id, night),
+    }
+    if night.system_id is not None and cs is not None and sc is not None:
+        # Schedule comes from ClubSystem, never from the venue row — one source
+        # of truth, so the venue can't set a day that contradicts the game night.
+        base.update({
+            "system": sc.name,
+            "session_day": cs.session_day,
+            "session_cadence": cs.session_cadence,
+            "start_time": cs.session_start_time,
+            "editable_schedule": False,
+        })
+    else:
+        base.update({
+            "system": night.name or "Club night",
+            "session_day": night.session_day,
+            "session_cadence": night.session_cadence or "weekly",
+            "cadence_anchor": night.cadence_anchor.isoformat() if night.cadence_anchor else None,
+            "start_time": night.start_time,
+            "editable_schedule": True,
+        })
+    return base
+
+
 @router.get("/admin/club-nights")
 def get_club_nights(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
-    """Every club night this venue hosts, with its table plan, its tables, and
-    how that plan has held up against real pairings."""
+    """Every night this venue hosts — the ones Call to Arms runs and the ones it
+    doesn't — with each one's table plan, its tables, and how the plan has held
+    up where that can be measured."""
     _, club_id = ctx
+
     rows = db.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
@@ -925,30 +960,20 @@ def get_club_nights(ctx=Depends(_require_venue_admin), db: Session = Depends(get
         .order_by(SystemConfig.name)
     ).all()
 
-    plans = V.club_night_plans(db, club_id)
-    assigned = V.system_tables(db, club_id)
+    out = []
+    for cs, sc in rows:
+        night = V.get_or_create_night_for_system(db, club_id, sc.id)
+        out.append(_night_payload(db, club_id, night, cs, sc))
+
+    for night in V.club_nights(db, club_id):
+        if night.system_id is None:
+            out.append(_night_payload(db, club_id, night))
+
     tables = db.exec(
         select(VenueTable)
         .where(VenueTable.club_id == club_id)
         .order_by(VenueTable.sort_order, VenueTable.id)
     ).all()
-
-    out = []
-    for cs, sc in rows:
-        plan = plans.get(sc.id)
-        entry = assigned.get(sc.id, {"preferred": [], "reserved": []})
-        out.append({
-            "system_id": sc.id,
-            "system": sc.name,
-            "session_day": cs.session_day,
-            "session_cadence": cs.session_cadence,
-            "start_time": cs.session_start_time,
-            "expected_tables": plan.expected_tables if plan else None,
-            "notes": plan.notes if plan else None,
-            "preferred_table_ids": sorted(entry["preferred"]),
-            "reserved_table_ids": sorted(entry["reserved"]),
-            "review": V.table_review(db, club_id, sc.id),
-        })
     return {
         "club_nights": out,
         "tables": [
@@ -960,13 +985,21 @@ def get_club_nights(ctx=Depends(_require_venue_admin), db: Session = Depends(get
 
 
 class ClubNightBody(BaseModel):
-    system_id: int
+    night_id: Optional[int] = None
+    # Venue-only nights: the whole record of the night, since nothing else
+    # anywhere knows they exist.
+    name: Optional[str] = None
+    session_day: Optional[str] = None
+    session_cadence: Optional[str] = None
+    cadence_anchor: Optional[str] = None
+    start_time: Optional[str] = None
+
     expected_tables: Optional[int] = None
     notes: Optional[str] = None
-    # Every table this system may use, and the subset held back from the public
-    # on its night. Sent whole rather than as add/remove operations — the admin
-    # screen is a grid of checkboxes, and replacing the set is the only way for
-    # unticking the last box to mean anything.
+    # Every table this night may use, and the subset held back from the public
+    # when it runs. Sent whole rather than as add/remove operations — the admin
+    # screen is a grid of chips, and replacing the set is the only way for
+    # clearing the last one to mean anything.
     preferred_table_ids: Optional[list[int]] = None
     reserved_table_ids: Optional[list[int]] = None
 
@@ -977,37 +1010,78 @@ def save_club_night(
     ctx=Depends(_require_venue_admin),
     db: Session = Depends(get_session),
 ):
+    """Create or update a night. Omitting night_id creates a VENUE-ONLY night —
+    Magic, Bolt Action, anything this app doesn't run — which is the only kind
+    that can be created here. Call to Arms nights get their row made for them
+    when the tab is first opened, because their schedule already exists."""
     _, club_id = ctx
-    cs = db.exec(
-        select(ClubSystem)
-        .where(ClubSystem.club_id == club_id)
-        .where(ClubSystem.system_id == body.system_id)
-    ).first()
-    if cs is None:
-        raise HTTPException(status_code=404, detail="This club doesn't run that system.")
+
+    if body.night_id is None:
+        name = (body.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Give the night a name.")
+        night = VenueClubNight(club_id=club_id, system_id=None, name=name)
+    else:
+        night = db.get(VenueClubNight, body.night_id)
+        if night is None or night.club_id != club_id:
+            raise HTTPException(status_code=404, detail="Club night not found.")
+        if body.name is not None and night.system_id is None:
+            name = body.name.strip()
+            if not name:
+                raise HTTPException(status_code=422, detail="Give the night a name.")
+            night.name = name
+
+    if night.system_id is None:
+        # Schedule is only ours to set for a venue-only night; for a Call to
+        # Arms one it lives on ClubSystem and the venue must not fork it.
+        if body.session_day is not None:
+            if body.session_day not in V.WEEKDAYS:
+                raise HTTPException(status_code=422, detail="Pick a day of the week.")
+            night.session_day = body.session_day
+        if body.session_cadence is not None:
+            if body.session_cadence not in ("weekly", "fortnightly"):
+                raise HTTPException(status_code=422, detail="Cadence must be weekly or fortnightly.")
+            night.session_cadence = body.session_cadence
+        if body.cadence_anchor is not None:
+            try:
+                night.cadence_anchor = date.fromisoformat(body.cadence_anchor) \
+                    if body.cadence_anchor else None
+            except ValueError:
+                raise HTTPException(status_code=422, detail="Anchor date must be YYYY-MM-DD.")
+        if body.start_time is not None:
+            raw = body.start_time.strip()
+            if raw:
+                try:
+                    V.to_minutes(raw)
+                except ValueError:
+                    raise HTTPException(status_code=422, detail="Start time must be HH:MM.")
+            night.start_time = raw or None
+        if not night.session_day:
+            raise HTTPException(status_code=422, detail="Pick the day this night runs.")
+        # A fortnightly night with no anchor can't be placed on a calendar at
+        # all, so it would silently never appear. Refuse it at the door.
+        if (night.session_cadence or "weekly") == "fortnightly" and night.cadence_anchor is None:
+            raise HTTPException(
+                status_code=422,
+                detail="A fortnightly night needs a date it last ran, so we know which weeks it falls on.",
+            )
 
     if body.expected_tables is not None and not (0 <= body.expected_tables <= 200):
         raise HTTPException(status_code=422, detail="Expected tables must be 0–200.")
-
-    plan = db.exec(
-        select(VenueClubNight)
-        .where(VenueClubNight.club_id == club_id)
-        .where(VenueClubNight.system_id == body.system_id)
-    ).first()
-    if plan is None:
-        plan = VenueClubNight(club_id=club_id, system_id=body.system_id)
-    plan.expected_tables = body.expected_tables
+    night.expected_tables = body.expected_tables
     if body.notes is not None:
-        plan.notes = body.notes.strip() or None
-    plan.updated_at = datetime.utcnow()
-    db.add(plan)
+        night.notes = body.notes.strip() or None
+    night.updated_at = datetime.utcnow()
+    db.add(night)
+    db.commit()
+    db.refresh(night)
 
     if body.preferred_table_ids is not None or body.reserved_table_ids is not None:
         preferred = set(body.preferred_table_ids or [])
         reserved = set(body.reserved_table_ids or [])
-        # Reserving a table is a stronger form of preferring it, so a reserved
-        # table is always preferred too. Without this a venue could hold a table
-        # for a night and simultaneously mark it unsuitable for that game.
+        # Holding a table is a stronger form of preferring it, so a held table
+        # is always preferred too. Without this a venue could hold a table for a
+        # night and simultaneously mark it unsuitable for that night.
         preferred |= reserved
 
         valid = {
@@ -1015,21 +1089,197 @@ def save_club_night(
                 select(VenueTable).where(VenueTable.club_id == club_id)
             ).all()
         }
-        unknown = (preferred | reserved) - valid
-        if unknown:
+        if (preferred | reserved) - valid:
             raise HTTPException(status_code=422, detail="Unknown table in the list.")
 
         for row in db.exec(
-            select(VenueSystemTable)
-            .where(VenueSystemTable.club_id == club_id)
-            .where(VenueSystemTable.system_id == body.system_id)
+            select(VenueNightTable)
+            .where(VenueNightTable.club_id == club_id)
+            .where(VenueNightTable.club_night_id == night.id)
         ).all():
             db.delete(row)
         for table_id in sorted(preferred):
-            db.add(VenueSystemTable(
-                club_id=club_id, system_id=body.system_id,
+            db.add(VenueNightTable(
+                club_id=club_id, club_night_id=night.id,
                 table_id=table_id, reserved=table_id in reserved,
             ))
+        db.commit()
 
-    db.commit()
     return get_club_nights(ctx=ctx, db=db)
+
+
+@router.delete("/admin/club-nights/{night_id}")
+def delete_club_night(
+    night_id: int,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Remove a venue-only night.
+
+    A Call to Arms night can't be deleted here — it exists because the club
+    runs that game, and taking it off the venue's diary wouldn't stop the
+    players arriving. Its game admin turns the system off; this screen only
+    ever owned the table plan.
+    """
+    _, club_id = ctx
+    night = db.get(VenueClubNight, night_id)
+    if night is None or night.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Club night not found.")
+    if night.system_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This night comes from a game system your club runs. Turn the system "
+                   "off in Admin if it's finished; removing it here wouldn't stop anyone turning up.",
+        )
+    for row in db.exec(
+        select(VenueNightTable)
+        .where(VenueNightTable.club_night_id == night_id)
+    ).all():
+        db.delete(row)
+    db.delete(night)
+    db.commit()
+    return {"ok": True}
+
+
+# ---- the venue's own public details ----
+#
+# blurb / website / Discord invite used to live on the Admin tab's club-page
+# form. They're venue facts, edited by whoever runs the venue, so they moved
+# here — the same reasoning that keeps the table plan out of ClubSystem.
+
+@router.get("/admin/venue-profile")
+def get_venue_profile(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
+    from database import resolve_webhook_url
+    _, club_id = ctx
+    club = db.get(Club, club_id)
+    url = resolve_webhook_url(db, club_id, V.WEBHOOK_TYPE_VENUE, None)
+    return {
+        "name": club.name,
+        "blurb": club.blurb,
+        "website_url": club.website_url,
+        "discord_url": club.discord_url,
+        # Never the whole URL back — a webhook URL is a credential. The last
+        # four characters are enough for "is this the one I think it is",
+        # matching how the admin tab masks its webhooks.
+        "webhook": {"configured": True, "last_four": "…" + url[-4:]} if url
+                   else {"configured": False},
+    }
+
+
+class VenueProfileBody(BaseModel):
+    blurb: Optional[str] = None
+    website_url: Optional[str] = None
+    discord_url: Optional[str] = None
+
+
+@router.post("/admin/venue-profile")
+def save_venue_profile(
+    body: VenueProfileBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    _, club_id = ctx
+    club = db.get(Club, club_id)
+    for field in ("blurb", "website_url", "discord_url"):
+        val = getattr(body, field)
+        if val is not None:
+            setattr(club, field, val.strip() or None)
+    db.add(club)
+    db.commit()
+    return get_venue_profile(ctx=ctx, db=db)
+
+
+class WebhookBody(BaseModel):
+    url: str
+
+
+@router.post("/admin/webhook")
+def save_venue_webhook(
+    body: WebhookBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Set the Discord webhook that booking notifications post to.
+
+    Configured here rather than sending venue staff to Admin → Discord: it's
+    the venue's own channel, and the person who ticks "tell me on Discord" is
+    the person who should be able to say where.
+    """
+    from models import ClubWebhook
+
+    url = body.url.strip()
+    if not url.startswith("https://discord.com/api/webhooks/") and \
+       not url.startswith("https://discordapp.com/api/webhooks/"):
+        raise HTTPException(
+            status_code=422,
+            detail="That doesn't look like a Discord webhook URL. It should start "
+                   "https://discord.com/api/webhooks/",
+        )
+    _, club_id = ctx
+    row = db.exec(
+        select(ClubWebhook)
+        .where(ClubWebhook.club_id == club_id)
+        .where(ClubWebhook.webhook_type == V.WEBHOOK_TYPE_VENUE)
+        .where(ClubWebhook.system_id.is_(None))
+    ).first()
+    if row is None:
+        row = ClubWebhook(club_id=club_id, webhook_type=V.WEBHOOK_TYPE_VENUE,
+                          system_id=None, url=url)
+    else:
+        row.url = url
+    db.add(row)
+    db.commit()
+    return get_venue_profile(ctx=ctx, db=db)
+
+
+@router.delete("/admin/webhook")
+def delete_venue_webhook(
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    from models import ClubWebhook
+    _, club_id = ctx
+    for row in db.exec(
+        select(ClubWebhook)
+        .where(ClubWebhook.club_id == club_id)
+        .where(ClubWebhook.webhook_type == V.WEBHOOK_TYPE_VENUE)
+        .where(ClubWebhook.system_id.is_(None))
+    ).all():
+        db.delete(row)
+    db.commit()
+    return get_venue_profile(ctx=ctx, db=db)
+
+
+@router.post("/admin/webhook/test")
+def test_venue_webhook(
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Post a test message, so a venue finds out the webhook is wrong now rather
+    than the first time a booking goes unnoticed."""
+    import httpx
+
+    from database import resolve_webhook_url
+    _, club_id = ctx
+    url = resolve_webhook_url(db, club_id, V.WEBHOOK_TYPE_VENUE, None)
+    if not url:
+        raise HTTPException(status_code=404, detail="No webhook saved yet.")
+    club = db.get(Club, club_id)
+    try:
+        resp = httpx.post(
+            url,
+            json={"content": f"✅ Booking notifications for **{club.name}** are working.",
+                  "allowed_mentions": {"parse": []}},
+            timeout=httpx.Timeout(10.0, connect=5.0),
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Discord rejected that webhook ({resp.status_code}). "
+                       f"It may have been deleted — paste a fresh one.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't reach Discord just now.")
+    return {"ok": True}

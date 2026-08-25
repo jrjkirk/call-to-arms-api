@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 
 from models import (
     Club, ClubSystem, Pairing, SystemConfig, User, VenueBooking, VenueClubNight,
-    VenueConfig, VenueStaff, VenueTable, VenueSystemTable,
+    VenueConfig, VenueNightTable, VenueStaff, VenueTable,
 )
 
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday",
@@ -143,52 +143,94 @@ def hours_for(cfg: VenueConfig, day: date) -> Optional[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Which tables belong to which game
+# Club nights and their tables
 # ---------------------------------------------------------------------------
 
-def system_tables(db: Session, club_id: int) -> dict[int, dict[str, list[int]]]:
-    """system_id -> {"preferred": [...], "reserved": [...]}.
+def club_nights(db: Session, club_id: int) -> list[VenueClubNight]:
+    """Every night this venue hosts a plan for, in one list.
 
-    `preferred` is every table that suits the system, held ones included —
-    reserving a table is a stronger statement of the same thing, and a caller
-    asking "what suits this game" should never have to union two lists.
+    Both kinds sit here: nights Call to Arms runs (system_id set) and nights it
+    doesn't and may never — Magic, Bolt Action, Warmachine (system_id NULL).
+    """
+    return db.exec(
+        select(VenueClubNight)
+        .where(VenueClubNight.club_id == club_id)
+        .where(VenueClubNight.active == True)
+    ).all()
+
+
+def night_for_system(db: Session, club_id: int, system_id: int) -> Optional[VenueClubNight]:
+    return db.exec(
+        select(VenueClubNight)
+        .where(VenueClubNight.club_id == club_id)
+        .where(VenueClubNight.system_id == system_id)
+    ).first()
+
+
+def get_or_create_night_for_system(
+    db: Session, club_id: int, system_id: int
+) -> VenueClubNight:
+    """A system-backed night's plan row, made on demand.
+
+    Needed because table assignments hang off the night, and a venue may want
+    to hold tables for The Old World before it has any opinion about how many
+    tables that night needs.
+    """
+    row = night_for_system(db, club_id, system_id)
+    if row is not None:
+        return row
+    row = VenueClubNight(club_id=club_id, system_id=system_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def night_tables(db: Session, club_id: int) -> dict[int, dict[str, list[int]]]:
+    """club_night_id -> {"preferred": [...], "reserved": [...]}.
+
+    `preferred` includes held tables — reserving is a stronger statement of the
+    same thing, and a caller asking "what suits this night" should never have to
+    union two lists.
     """
     out: dict[int, dict[str, list[int]]] = {}
     for r in db.exec(
-        select(VenueSystemTable).where(VenueSystemTable.club_id == club_id)
+        select(VenueNightTable).where(VenueNightTable.club_id == club_id)
     ).all():
-        entry = out.setdefault(r.system_id, {"preferred": [], "reserved": []})
+        entry = out.setdefault(r.club_night_id, {"preferred": [], "reserved": []})
         entry["preferred"].append(r.table_id)
         if r.reserved:
             entry["reserved"].append(r.table_id)
     return out
 
 
+def tables_for_system(db: Session, club_id: int, system_id: Optional[int]) -> list[int]:
+    """The tables that suit one game system, for the booking form's
+    recommendations. Venue-only nights have no system, so they never match."""
+    if system_id is None:
+        return []
+    night = night_for_system(db, club_id, system_id)
+    if night is None:
+        return []
+    return night_tables(db, club_id).get(night.id, {}).get("preferred", [])
+
+
 def reserved_table_ids_on(db: Session, club_id: int, day: date) -> set[int]:
     """Tables held back from the public on one date, across every club night
-    running that day.
+    running that day — whether or not this app runs the game.
 
-    Keyed off which systems actually meet on that date, so a Wednesday
+    Keyed off which nights actually meet on that date, so a Wednesday
     reservation costs the venue nothing on a Tuesday.
     """
-    by_system = system_tables(db, club_id)
-    if not by_system:
+    by_night = night_tables(db, club_id)
+    if not by_night:
         return set()
-    running = {n["system_id"] for n in club_nights_on(db, club_id, day)}
+    running = {n["night_id"] for n in club_nights_on(db, club_id, day) if n["night_id"]}
     ids: set[int] = set()
-    for system_id, entry in by_system.items():
-        if system_id in running:
+    for night_id, entry in by_night.items():
+        if night_id in running:
             ids.update(entry["reserved"])
     return ids
-
-
-def club_night_plans(db: Session, club_id: int) -> dict[int, VenueClubNight]:
-    return {
-        row.system_id: row
-        for row in db.exec(
-            select(VenueClubNight).where(VenueClubNight.club_id == club_id)
-        ).all()
-    }
 
 
 def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
@@ -273,7 +315,7 @@ def free_tables_for(
 
     if system_id is not None:
         if preferred_ids is None:
-            preferred_ids = set(system_tables(db, club_id).get(system_id, {}).get("preferred", []))
+            preferred_ids = set(tables_for_system(db, club_id, system_id))
         out.sort(key=lambda t: (t.id not in preferred_ids, t.seats, t.sort_order, t.id))
     else:
         out.sort(key=lambda t: (t.seats, t.sort_order, t.id))
@@ -340,7 +382,7 @@ def availability(
     # twenty times for one evening.
     reserved_ids = reserved_table_ids_on(db, club_id, day)
     preferred_ids = (
-        set(system_tables(db, club_id).get(system_id, {}).get("preferred", []))
+        set(tables_for_system(db, club_id, system_id))
         if system_id is not None else set()
     )
 
@@ -385,16 +427,100 @@ def availability(
 # because those two facts lived in different places. Here they're one view.
 # ---------------------------------------------------------------------------
 
-def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
-    """The club sessions running at this venue on one date, with how many
-    players have signed up so far.
+class DiaryContext:
+    """Everything the diary needs, loaded ONCE for a whole date range.
 
-    Derived, not stored — recurring sessions come from each ClubSystem's
-    session_day/cadence exactly as the club calendar derives them, so a venue
-    never has to re-enter its own club nights and they can't drift apart.
+    A month view is thirty-one day_overview calls, and each of those wants the
+    club-night definitions, that week's signups, the day's bookings and the
+    table list. Done naively that is several hundred queries for one screen —
+    exactly the shape that exhausted the connection pool when /pairings was
+    scanning per request. So the range is fetched flat and the per-day work
+    becomes dictionary lookups.
+    """
+
+    def __init__(self, db: Session, club_id: int, first: date, last: date):
+        from week_logic import _fmt
+        from models import Signup
+
+        self.club_id = club_id
+        self.tables = active_tables(db, club_id)
+        self.plans = club_nights(db, club_id)
+        self.by_system = {p.system_id: p for p in self.plans if p.system_id is not None}
+        self.reserved = night_tables(db, club_id)
+        self.systems = db.exec(
+            select(ClubSystem, SystemConfig)
+            .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+            .where(ClubSystem.club_id == club_id)
+            .where(ClubSystem.enabled == True)
+            .where(SystemConfig.active == True)
+        ).all()
+
+        rows = db.exec(
+            select(VenueBooking)
+            .where(VenueBooking.club_id == club_id)
+            .where(VenueBooking.booking_date >= first)
+            .where(VenueBooking.booking_date <= last)
+            .where(VenueBooking.status.in_(BLOCKING_STATUSES))
+        ).all()
+        self.bookings: dict[date, list[VenueBooking]] = {}
+        for b in rows:
+            self.bookings.setdefault(b.booking_date, []).append(b)
+
+        # One query for every signup in the window, bucketed by (week, system).
+        weeks = set()
+        d = first
+        while d <= last:
+            weeks.add(_fmt(d))
+            d += timedelta(days=1)
+        sign_rows = db.exec(
+            select(Signup)
+            .where(Signup.club_id == club_id)
+            .where(Signup.week.in_(sorted(weeks)))
+        ).all()
+        self.signups: dict[tuple[str, str], int] = {}
+        for su in sign_rows:
+            key = (su.week, su.system)
+            self.signups[key] = self.signups.get(key, 0) + 1
+
+
+def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
+    """Every club night running at this venue on one date.
+
+    Two sources, deliberately merged here so nothing downstream has to know the
+    difference:
+
+      Call to Arms nights come from each ClubSystem's own schedule, exactly as
+        the club calendar derives them, so a venue never re-enters its own game
+        nights and the two can't drift apart. Signups are counted.
+      Venue-only nights (Magic, Bolt Action, Warmachine) come from
+        VenueClubNight, where staff entered the day and cadence themselves.
+        Nobody signs up to these, so `signups` is 0 and how much room they need
+        can only come from the plan or the tables held for them.
+
+    Every entry carries `night_id` (the VenueClubNight row, when there is one)
+    and `system_id` (None for venue-only). Reservations key on night_id;
+    anything about signups, pairings or the cross-sell keys on system_id and so
+    naturally skips a night this app knows nothing about.
     """
     from week_logic import sessions_in_range, _fmt  # local: avoids an import cycle
     from models import Signup
+
+    plans = club_nights(db, club_id)
+    by_system = {p.system_id: p for p in plans if p.system_id is not None}
+    reserved = night_tables(db, club_id)
+
+    def _runs_on(day_name: Optional[str], cadence: Optional[str],
+                 anchor: Optional[date]) -> bool:
+        if not day_name:
+            return False
+        try:
+            return bool(sessions_in_range(day_name, cadence or "weekly", anchor, day, day))
+        except (AssertionError, KeyError):
+            # Fortnightly with no anchor, or an unrecognised day name. One
+            # misconfigured night must not blank the venue's whole diary.
+            return False
+
+    out = []
 
     rows = db.exec(
         select(ClubSystem, SystemConfig)
@@ -403,29 +529,14 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
         .where(ClubSystem.enabled == True)
         .where(SystemConfig.active == True)
     ).all()
-
-    plans = club_night_plans(db, club_id)
-    reserved = system_tables(db, club_id)
-
-    out = []
     for cs, sc in rows:
-        try:
-            hits = sessions_in_range(
-                cs.session_day, cs.session_cadence, cs.cadence_anchor, day, day
-            )
-        except (AssertionError, KeyError):
-            # A fortnightly system with no anchor, or an unrecognised day name.
-            # One misconfigured system must not blank the venue's whole diary.
+        if not _runs_on(cs.session_day, cs.session_cadence, cs.cadence_anchor):
             continue
-        if not hits:
-            continue
-
-        week = _fmt(day)
         signups = db.exec(
             select(Signup)
             .where(Signup.club_id == club_id)
             .where(Signup.system == sc.legacy_system_name)
-            .where(Signup.week == week)
+            .where(Signup.week == _fmt(day))
         ).all()
 
         # Three ways to say how much room this night needs, best first:
@@ -433,17 +544,19 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
         #   the tables actually held for it
         #   two players to a table from signups (the fallback estimate, the
         #     same assumption TableBookingConfig defaults to)
-        plan = plans.get(sc.id)
-        held = len(reserved.get(sc.id, {}).get("reserved", []))
+        plan = by_system.get(sc.id)
+        held = len(reserved.get(plan.id, {}).get("reserved", [])) if plan else 0
         estimate = -(-len(signups) // 2)
         planned = plan.expected_tables if plan and plan.expected_tables else None
         out.append({
+            "night_id": plan.id if plan else None,
             "system_id": sc.id,
             "system": sc.name,
             "slug": sc.slug,
             "legacy_system_name": sc.legacy_system_name,
             "accent_color": cs.accent_color,
             "start_time": cs.session_start_time,
+            "app_managed": True,
             "signups": len(signups),
             "tables_planned": planned,
             "tables_held": held,
@@ -453,40 +566,83 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
             # set aside for it, while there's still time to lay out more.
             "outgrown": bool((planned or held) and estimate > (planned or held)),
         })
+
+    for p in plans:
+        if p.system_id is not None:
+            continue
+        if not _runs_on(p.session_day, p.session_cadence, p.cadence_anchor):
+            continue
+        held = len(reserved.get(p.id, {}).get("reserved", []))
+        planned = p.expected_tables or None
+        out.append({
+            "night_id": p.id,
+            "system_id": None,
+            "system": p.name or "Club night",
+            "slug": None,
+            "legacy_system_name": None,
+            "accent_color": None,
+            "start_time": p.start_time,
+            "app_managed": False,
+            # Nobody signs up to a night this app doesn't run, so there is no
+            # estimate to fall back on — 0 here is a fact, not a missing value,
+            # and `outgrown` can never fire for one.
+            "signups": 0,
+            "tables_planned": planned,
+            "tables_held": held,
+            "tables_estimated": 0,
+            "tables_expected": planned or held or 0,
+            "outgrown": False,
+        })
+
     return sorted(out, key=lambda r: (r["start_time"] or "", r["system"]))
 
 
-def table_review(db: Session, club_id: int, system_id: int, sessions: int = 8) -> dict:
+def table_review(db: Session, club_id: int, night: VenueClubNight,
+                 sessions: int = 8) -> dict:
     """Hold a club night's table forecast against what actually happened.
 
     A forecast nobody checks is a guess with better posture, so this compares
-    VenueClubNight.expected_tables with the real thing: PUBLISHED PAIRINGS, one
-    pairing to a table, over the last few sessions.
+    expected_tables with the real thing: PUBLISHED PAIRINGS, one pairing to a
+    table, over recent sessions.
 
     Pairings rather than signups deliberately. Signups are an intention — they
     include people who don't turn up and people who drop after the deadline —
     while a pairing is two players the club actually sat down opposite each
     other. A BYE has no opponent and takes no table, so it isn't counted.
 
-    Only sessions that produced pairings count as samples. A week with none was
-    a week nobody ran the numbers, not a week nobody came, and averaging zeros
-    into the figure would quietly advise the venue to lay out fewer tables.
+    A VENUE-ONLY NIGHT HAS NONE OF THIS. Magic and Bolt Action don't run
+    through this app, so there is nothing to measure and no honest average to
+    report. It says so plainly instead of returning zeros, which would read as
+    "your night is empty" and advise the venue to take tables away from it.
     """
+    if night.system_id is None:
+        return {
+            "night_id": night.id,
+            "system_id": None,
+            "system": night.name or "Club night",
+            "session_day": night.session_day,
+            "expected_tables": night.expected_tables,
+            "samples": [],
+            "average_tables": None,
+            "busiest_tables": None,
+            "measurable": False,
+            "advice": None,
+        }
+
     from week_logic import sessions_in_range, _fmt
 
     row = db.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
         .where(ClubSystem.club_id == club_id)
-        .where(ClubSystem.system_id == system_id)
+        .where(ClubSystem.system_id == night.system_id)
     ).first()
     if row is None:
-        return {"system_id": system_id, "samples": [], "advice": None}
+        return {"night_id": night.id, "system_id": night.system_id,
+                "samples": [], "measurable": False, "advice": None}
     cs, sc = row
 
-    plan = club_night_plans(db, club_id).get(system_id)
-    expected = plan.expected_tables if plan else None
-
+    expected = night.expected_tables
     today = club_now(db, club_id).date()
     # Fortnightly needs twice the calendar reach for the same sample count.
     span = sessions * (14 if cs.session_cadence == "fortnightly" else 7)
@@ -507,9 +663,12 @@ def table_review(db: Session, club_id: int, system_id: int, sessions: int = 8) -
             .where(Pairing.system == sc.legacy_system_name)
             .where(Pairing.week == week)
         ).all()
-        played = [p for p in pairings if p.b_signup_id is not None]
+        # A week with no pairings was a week nobody ran the numbers, not a week
+        # nobody came. Averaging that in as a zero would quietly advise the
+        # venue to lay out fewer tables.
         if not pairings:
             continue
+        played = [p for p in pairings if p.b_signup_id is not None]
         samples.append({"date": d.isoformat(), "week": week, "tables_used": len(played)})
 
     samples.reverse()
@@ -518,13 +677,15 @@ def table_review(db: Session, club_id: int, system_id: int, sessions: int = 8) -
     busiest = max(used) if used else None
 
     return {
-        "system_id": system_id,
+        "night_id": night.id,
+        "system_id": sc.id,
         "system": sc.name,
         "session_day": cs.session_day,
         "expected_tables": expected,
         "samples": samples,
         "average_tables": average,
         "busiest_tables": busiest,
+        "measurable": True,
         "advice": _table_advice(expected, average, busiest),
     }
 
@@ -567,7 +728,7 @@ def day_overview(db: Session, club_id: int, day: date) -> dict:
     nights = club_nights_on(db, club_id, day)
 
     booked_tables = len({b.table_id for b in bookings})
-    night_tables = sum(n["tables_expected"] for n in nights)
+    night_demand = sum(n["tables_expected"] for n in nights)
     total = len(tables)
 
     # A held table that has also been booked would otherwise be counted twice —
@@ -575,7 +736,7 @@ def day_overview(db: Session, club_id: int, day: date) -> dict:
     # table doing one job, not two tables' worth of demand.
     held_ids = reserved_table_ids_on(db, club_id, day)
     double_counted = len({b.table_id for b in bookings} & held_ids)
-    committed = booked_tables + night_tables - double_counted
+    committed = booked_tables + night_demand - double_counted
 
     return {
         "date": day.isoformat(),
@@ -583,7 +744,7 @@ def day_overview(db: Session, club_id: int, day: date) -> dict:
         "enabled": bool(cfg and cfg.enabled),
         "tables_total": total,
         "tables_booked": booked_tables,
-        "tables_club_night": night_tables,
+        "tables_club_night": night_demand,
         "tables_held": len(held_ids),
         "tables_committed": committed,
         # A night whose signups have outgrown the room set aside for it — the

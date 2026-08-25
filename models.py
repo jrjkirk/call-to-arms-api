@@ -1102,63 +1102,92 @@ class VenueStaff(SQLModel, table=True):
 
 
 class VenueClubNight(SQLModel, table=True):
-    """The venue's plan for one club night: how many tables it expects to need.
+    """One club night this venue hosts, and its table plan.
 
-    Owned by venue staff, not by the system's admin, which is why it isn't a
-    column on ClubSystem — the bar's capacity planning and the game night's
+    Covers BOTH kinds of night, because a venue's diary doesn't care whose
+    software runs the game:
+
+      system_id set   -- a night Call to Arms runs. Its schedule lives on
+          ClubSystem (session_day/cadence/anchor) and is read from there, so
+          the venue never re-enters it and the two can't drift apart. Signups
+          and pairings exist, so the table plan can be checked against reality.
+      system_id NULL  -- a night the venue hosts that this app has nothing to
+          do with, and may never: Magic, Bolt Action, Warmachine. Nobody signs
+          up here and no pairings are ever generated, so `name`, `session_day`,
+          `session_cadence`, `cadence_anchor` and `start_time` are entered by
+          venue staff and are the only record of it.
+
+    One table rather than two, so "what runs here on a Wednesday" is one query.
+    The alternative — a separate external-nights table — would have meant every
+    caller unioning two sources and getting it subtly wrong in one of them.
+
+    Owned by venue staff, not by the system's admin, which is why none of this
+    is a column on ClubSystem: the bar's capacity planning and the game night's
     configuration answer to different people.
 
     expected_tables is a forecast, and a forecast nobody checks is a guess with
-    better posture. venue.table_review() holds it against what actually
-    happened: published pairings, one pairing to a table, over recent sessions.
-    That's the number worth trusting — signups include people who don't turn
-    up, and a BYE occupies nobody's table.
+    better posture. venue.table_review() holds it against published pairings —
+    for a venue-only night there are none, so it reports the plan and says so
+    rather than inventing a comparison.
     """
     __tablename__ = "venue_club_nights"
     __table_args__ = {"extend_existing": True}
 
     id: Optional[int] = Field(default=None, primary_key=True)
     club_id: int = Field(foreign_key="clubs.id", index=True)
-    system_id: int = Field(foreign_key="systems.id", index=True)
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
 
-    # None = no plan set; the review still reports what actually happened, and
-    # the busyness view falls back to estimating from signups.
+    # Venue-only nights: the whole record of the night. Ignored when system_id
+    # is set, where SystemConfig and ClubSystem are the source of truth.
+    name: Optional[str] = None
+    session_day: Optional[str] = None            # "Wednesday"
+    session_cadence: Optional[str] = None        # "weekly" | "fortnightly"
+    cadence_anchor: Optional[date] = None        # only meaningful when fortnightly
+    start_time: Optional[str] = None             # "HH:MM"
+
+    # None = no plan set; the busyness view falls back to estimating from
+    # signups, and for a venue-only night to the tables held for it.
     expected_tables: Optional[int] = None
     notes: Optional[str] = None
+    active: bool = True
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-class VenueSystemTable(SQLModel, table=True):
-    """Which of the venue's tables suit a game system — and which are held back
-    for that system's club night.
+class VenueNightTable(SQLModel, table=True):
+    """Which of the venue's tables suit a club night — and which are held back
+    for it.
 
     One relationship, two strengths, because they're the same fact at different
     volume. "Table 3 is a 6x4, so it suits The Old World" and "Table 3 is The
-    Old World's on a Wednesday" both describe a table belonging to a game;
+    Old World's on a Wednesday" both describe a table belonging to a night;
     modelling them as separate features would mean two admin screens, two
     lookups and a way for them to disagree.
 
         reserved = False -- PREFERRED. Offered first to someone booking that
             game, and shown to them as recommended. No effect on anyone else.
         reserved = True  -- HELD. Preferred, and additionally not offered to the
-            public at all on the nights that system meets.
+            public at all on the nights that game meets.
 
-    A row per (system, table), not a list of ids on the system: a table can
-    belong to several systems, since each has its own night — table 3 can be
-    The Old World's on Wednesday and Kill Team's on Monday without those two
-    ever colliding. It also means deleting a table can't strand an id inside
+    Keyed on the NIGHT rather than the game system, so a venue-only night
+    (Magic, Bolt Action) can hold tables exactly like a Call to Arms one — it
+    has no system id to key on.
+
+    A row per (night, table), not a list of ids on the night: a table can belong
+    to several nights, since each has its own day — table 3 can be The Old
+    World's on Wednesday and Magic's on Thursday without those two ever
+    colliding. It also means deleting a table can't strand an id inside
     somebody's JSON array.
 
     Reservations bind the PUBLIC only. The staff console will still seat a
     walk-in on a held table, because someone standing in a half-empty room can
     see what the rule can't.
     """
-    __tablename__ = "venue_system_tables"
+    __tablename__ = "venue_night_tables"
     __table_args__ = {"extend_existing": True}
 
     id: Optional[int] = Field(default=None, primary_key=True)
     club_id: int = Field(foreign_key="clubs.id", index=True)
-    system_id: int = Field(foreign_key="systems.id", index=True)
+    club_night_id: int = Field(foreign_key="venue_club_nights.id", index=True)
     table_id: int = Field(foreign_key="venue_tables.id", index=True)
     reserved: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
