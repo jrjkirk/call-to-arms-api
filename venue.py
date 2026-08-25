@@ -939,14 +939,15 @@ WEBHOOK_TYPE_VENUE = "venue_booking"
 
 
 def staff_emails(db: Session, club_id: int, cfg: VenueConfig) -> list[str]:
-    """Where staff notifications go. Falls back to the club's contact address,
-    so a venue that has already told us where to write doesn't have to say it
-    twice, and turning notifications on can't silently send to nobody."""
-    listed = [e.strip() for e in (cfg.notify_emails or []) if (e or "").strip()]
-    if listed:
-        return listed
-    club = db.get(Club, club_id)
-    return [club.contact_email] if club and club.contact_email else []
+    """Where staff notifications go — ONLY what the venue typed here.
+
+    This used to fall back to Club.contact_email, which sounds helpful and
+    isn't: that address belongs to whoever registered the club, so a venue
+    ticking "email me bookings" would quietly start posting its bookings to a
+    person who never asked for them and might not work there. An empty list is
+    an honest answer, and the settings screen says so plainly.
+    """
+    return [e.strip() for e in (cfg.notify_emails or []) if (e or "").strip()]
 
 
 def describe_booking(db: Session, booking: VenueBooking) -> dict:

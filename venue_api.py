@@ -444,7 +444,6 @@ def get_venue_config(ctx=Depends(_require_venue_admin), db: Session = Depends(ge
         # So the settings screen can warn that email is on but points nowhere,
         # rather than letting the venue find out when a booking goes unseen.
         "effective_emails": V.staff_emails(db, club_id, cfg),
-        "club_contact_email": club.contact_email if club else None,
         "discord_webhook_configured": _venue_webhook_set(db, club_id),
     }
 
