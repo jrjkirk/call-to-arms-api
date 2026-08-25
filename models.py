@@ -1231,6 +1231,23 @@ class VenueEvent(SQLModel, table=True):
     # choose between blocking the room and telling the public why.
     public: bool = True
 
+    # "pending" | "approved" | "rejected".
+    #
+    # An event takes the room out of circulation for a whole evening, which is a
+    # bigger commitment than any single booking, so it needs a yes from someone
+    # who owns the venue rather than someone who works a shift. Same line as
+    # VenueStaff: the bar manager runs the diary, the club super-admin decides
+    # what the venue commits to.
+    #
+    # A PENDING EVENT STILL HOLDS ITS TABLES. That matches how a booking request
+    # behaves — an unanswered request keeps its slot — and the alternative is
+    # worse: a tournament that loses its room while waiting on an answer is a
+    # tournament that gets cancelled. Rejecting releases them immediately.
+    status: str = Field(default="pending", index=True)
+    rejection_reason: Optional[str] = None
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    approved_at: Optional[datetime] = None
+
     created_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

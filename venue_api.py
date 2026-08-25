@@ -38,6 +38,18 @@ def _require_venue_admin(
     return user, club_id
 
 
+def _is_venue_owner(user: User, club_id: int) -> bool:
+    """Whether this user owns the venue, as opposed to working in it.
+
+    Super-admin is a home-club power (see auth.admin_scopes): a super-admin of
+    one club is a plain punter at every other, and must not get to approve
+    another venue's events.
+    """
+    return bool(
+        user.is_platform_admin or (user.is_super_admin and user.club_id == club_id)
+    )
+
+
 def _require_venue_owner(
     user: User = Depends(require_user),
     club_id: int = Depends(active_club_id),
@@ -47,11 +59,11 @@ def _require_venue_owner(
     platform admin. Granting venue access is an ownership decision, not a
     day-to-day one — the bar manager runs the diary but doesn't get to hand out
     keys, and shouldn't be able to promote themselves' colleagues either."""
-    if user.is_platform_admin or (user.is_super_admin and user.club_id == club_id):
+    if _is_venue_owner(user, club_id):
         return user, club_id
     raise HTTPException(
         status_code=403,
-        detail="Only a club super-admin can change who has venue access.",
+        detail="Only a club super-admin can do that.",
     )
 
 
@@ -747,7 +759,7 @@ def admin_upcoming(
     """The next N days at a glance, plus anything waiting on staff. The
     `pending` list is deliberately unbounded by the date window: a request
     sitting unanswered is the one thing that must never scroll off."""
-    _, club_id = ctx
+    user, club_id = ctx
     first = V.club_now(db, club_id).date()
     pending = db.exec(
         select(VenueBooking)
@@ -756,9 +768,24 @@ def admin_upcoming(
         .where(VenueBooking.booking_date >= first)
         .order_by(VenueBooking.booking_date, VenueBooking.start_time)
     ).all()
+    from models import VenueEvent
+    pending_events = db.exec(
+        select(VenueEvent)
+        .where(VenueEvent.club_id == club_id)
+        .where(VenueEvent.status == "pending")
+        .where(VenueEvent.event_date >= first)
+        .order_by(VenueEvent.event_date, VenueEvent.start_time)
+    ).all()
     return {
         "days": V.range_overview(db, club_id, first, first + timedelta(days=days - 1)),
         "pending": [V.describe_booking(db, b) for b in pending],
+        # Deliberately not bounded by the date window: an event waiting on an
+        # answer is the one thing that must never scroll out of sight, and it's
+        # holding the room while it waits.
+        "pending_events": [_event_payload(db, e) for e in pending_events],
+        # Whether the person looking can actually decide, so the page shows
+        # Approve/Reject rather than buttons that would 403.
+        "can_approve": _is_venue_owner(user, club_id),
     }
 
 
@@ -1365,6 +1392,8 @@ def _event_payload(db: Session, event) -> dict:
     return {
         "id": event.id,
         "name": event.name,
+        "status": event.status,
+        "rejection_reason": event.rejection_reason,
         "description": event.description,
         "date": event.event_date.isoformat(),
         "start_time": event.start_time,
@@ -1378,6 +1407,27 @@ def _event_payload(db: Session, event) -> dict:
         # asked for, and the venue needs to know that now, not on the night.
         "short_by": max(0, event.tables_needed - len(held)),
     }
+
+
+def _hold_event_tables(db: Session, event, user: User) -> None:
+    """Put this event's tables aside, as ordinary bookings carrying its id.
+
+    for_public=False: an event may take a table held for a club night. Staff
+    know what they're doing to their own room.
+    """
+    start, end = V.to_minutes(event.start_time), V.to_minutes(event.end_time)
+    free = V.free_tables_for(
+        db, event.club_id, event.event_date, start, end, for_public=False,
+    )
+    for table in free[:event.tables_needed]:
+        db.add(VenueBooking(
+            club_id=event.club_id, table_id=table.id, booking_date=event.event_date,
+            start_time=event.start_time, end_time=event.end_time,
+            party_size=1, user_id=user.id, contact_name=event.name,
+            notes=event.description, status="confirmed",
+            created_by_staff=True, event_id=event.id,
+        ))
+    db.commit()
 
 
 class EventBody(BaseModel):
@@ -1419,29 +1469,24 @@ def create_event(
     if not (1 <= body.tables_needed <= 200):
         raise HTTPException(status_code=422, detail="Tables needed must be 1–200.")
 
+    # An owner approving their own event would be theatre — they are the
+    # approver, and the click adds nothing but a step.
+    owner = _is_venue_owner(user, club_id)
     event = VenueEvent(
         club_id=club_id, name=body.name.strip(),
         description=(body.description or "").strip() or None,
         event_date=day, start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
         tables_needed=body.tables_needed, public=body.public,
         created_by_user_id=user.id,
+        status="approved" if owner else "pending",
+        approved_by_user_id=user.id if owner else None,
+        approved_at=datetime.utcnow() if owner else None,
     )
     db.add(event)
     db.commit()
     db.refresh(event)
 
-    # for_public=False: an event may take a table held for a club night. Staff
-    # know what they're doing to their own room.
-    free = V.free_tables_for(db, club_id, day, start, end, for_public=False)
-    for table in free[:body.tables_needed]:
-        db.add(VenueBooking(
-            club_id=club_id, table_id=table.id, booking_date=day,
-            start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
-            party_size=1, user_id=user.id, contact_name=event.name,
-            notes=event.description, status="confirmed",
-            created_by_staff=True, event_id=event.id,
-        ))
-    db.commit()
+    _hold_event_tables(db, event, user)
     return _event_payload(db, event)
 
 
@@ -1474,6 +1519,15 @@ def patch_event(
              or V.to_hhmm(end) != event.end_time
              or body.tables_needed != event.tables_needed)
 
+    # Moving an approved event, or growing what it takes, re-opens the question
+    # that was approved. Letting a bar manager edit a signed-off event into
+    # twice the room on a different night would make approval decorative. An
+    # owner's edit re-approves itself, for the same reason their creation does.
+    if moved and event.status == "approved" and not _is_venue_owner(user, club_id):
+        event.status = "pending"
+        event.approved_by_user_id = None
+        event.approved_at = None
+
     event.name = body.name.strip() or event.name
     event.description = (body.description or "").strip() or None
     event.event_date, event.start_time, event.end_time = day, V.to_hhmm(start), V.to_hhmm(end)
@@ -1488,15 +1542,10 @@ def patch_event(
         ).all():
             db.delete(b)
         db.commit()
-        free = V.free_tables_for(db, club_id, day, start, end, for_public=False)
-        for table in free[:body.tables_needed]:
-            db.add(VenueBooking(
-                club_id=club_id, table_id=table.id, booking_date=day,
-                start_time=V.to_hhmm(start), end_time=V.to_hhmm(end),
-                party_size=1, user_id=user.id, contact_name=event.name,
-                notes=event.description, status="confirmed",
-                created_by_staff=True, event_id=event.id,
-            ))
+        # A rejected event holds nothing; re-holding here would quietly give it
+        # the room back through the edit form.
+        if event.status != "rejected":
+            _hold_event_tables(db, event, user)
     db.commit()
     db.refresh(event)
     return _event_payload(db, event)
@@ -1519,3 +1568,71 @@ def delete_event(
     db.delete(event)
     db.commit()
     return {"ok": True}
+
+
+class EventDecisionBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/admin/events/{event_id}/approve")
+def approve_event(
+    event_id: int,
+    ctx=Depends(_require_venue_owner),
+    db: Session = Depends(get_session),
+):
+    """Sign off an event. Owner only — the whole point of the gate."""
+    from models import VenueEvent
+    user, club_id = ctx
+    event = db.get(VenueEvent, event_id)
+    if event is None or event.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    if event.status == "approved":
+        return _event_payload(db, event)
+
+    # A rejected event released its tables. Approving it later has to take them
+    # back, and the room may have filled in the meantime — hence the shortfall
+    # in the payload rather than a silent half-booked event.
+    if event.status == "rejected":
+        _hold_event_tables(db, event, user)
+
+    event.status = "approved"
+    event.rejection_reason = None
+    event.approved_by_user_id = user.id
+    event.approved_at = datetime.utcnow()
+    event.updated_at = datetime.utcnow()
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return _event_payload(db, event)
+
+
+@router.post("/admin/events/{event_id}/reject")
+def reject_event(
+    event_id: int,
+    body: EventDecisionBody,
+    ctx=Depends(_require_venue_owner),
+    db: Session = Depends(get_session),
+):
+    """Turn an event down and release its tables straight away.
+
+    The event row stays, carrying the reason. Deleting it would lose the fact
+    that someone asked and was told no, which is exactly what the person who
+    proposed it needs to see.
+    """
+    from models import VenueEvent
+    _, club_id = ctx
+    event = db.get(VenueEvent, event_id)
+    if event is None or event.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Event not found.")
+
+    for b in db.exec(select(VenueBooking).where(VenueBooking.event_id == event_id)).all():
+        db.delete(b)
+    event.status = "rejected"
+    event.rejection_reason = (body.reason or "").strip() or None
+    event.approved_by_user_id = None
+    event.approved_at = None
+    event.updated_at = datetime.utcnow()
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return _event_payload(db, event)
