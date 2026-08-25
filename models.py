@@ -1022,6 +1022,27 @@ class VenueTable(SQLModel, table=True):
     sort_order: int = 0
     notes: Optional[str] = None                 # staff-facing only
 
+    # ---- Where it physically is (the floor plan) -------------------------
+    #
+    # A venue selling table space is selling a ROOM, and a list of names can't
+    # answer "is the far corner free" or "are those two next to each other".
+    # These put each table somewhere real, so the same plan serves as the
+    # editor, the booking picture and the view of tonight.
+    #
+    # UNITS ARE FEET throughout, because that is the only unit a wargaming
+    # venue thinks in — tables are 6x4, rooms are "about thirty by twenty".
+    # Storing centimetres and converting would mean rounding a 6x4 into
+    # 182.88cm and back, and showing someone 5.99ft.
+    room_id: Optional[int] = Field(default=None, foreign_key="venue_rooms.id", index=True)
+    # CENTRE position, not a corner: rotation is then a single SVG transform
+    # about (pos_x, pos_y) with no offset arithmetic, and a table stays put
+    # when it's turned.
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
+    width_ft: float = 6.0
+    depth_ft: float = 4.0
+    rotation: float = 0.0                       # degrees clockwise
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -1251,3 +1272,54 @@ class VenueEvent(SQLModel, table=True):
     created_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueRoom(SQLModel, table=True):
+    """A room in the venue, and the canvas its tables are laid out on.
+
+    Venues are rarely one open space — a main hall, a back room, a mezzanine —
+    and staff talk about them by name ("put them in the back room"). Modelling
+    rooms rather than one big canvas also keeps each plan legible: a 60ft hall
+    and a 12ft snug drawn to the same scale on one page would waste most of it.
+
+    Dimensions are in FEET, matching VenueTable (see the note there).
+    """
+    __tablename__ = "venue_rooms"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+
+    name: str = "Main room"
+    width_ft: float = 30.0
+    depth_ft: float = 20.0
+    sort_order: int = 0
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueFeature(SQLModel, table=True):
+    """Something in a room that isn't a table: the bar, a pillar, the door,
+    the terrain shelves.
+
+    Not bookable and not counted in capacity — it exists so the plan looks like
+    the actual room. That matters more than it sounds: a floor plan a member of
+    staff can't recognise at a glance is one they won't trust, and "the table by
+    the door" only means something if the door is drawn.
+    """
+    __tablename__ = "venue_features"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    room_id: int = Field(foreign_key="venue_rooms.id", index=True)
+
+    label: Optional[str] = None
+    # "wall" | "bar" | "door" | "pillar" | "shelves" | "stairs" | "toilets"
+    kind: str = "wall"
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    width_ft: float = 4.0
+    depth_ft: float = 2.0
+    rotation: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)

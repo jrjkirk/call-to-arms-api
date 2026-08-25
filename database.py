@@ -38,6 +38,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "venue_staff",    # who may open Venue Admin without being a super-admin
     "venue_club_nights",     # per-club-night table forecast, checked against
                              # real pairings by venue.table_review()
+    "venue_rooms",           # rooms in the venue, the canvas the floor plan
+                             # lays tables out on
+    "venue_features",        # non-bookable fixtures on the plan: bar, door,
+                             # pillars — so the drawing looks like the room
     "venue_events",          # venue-run events; their tables are held as
                              # ordinary venue_bookings carrying the event id
     "venue_night_tables",    # which tables suit a club night, and which are

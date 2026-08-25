@@ -1150,3 +1150,207 @@ def club_night_pitch(db: Session, club_id: int, booking: VenueBooking) -> Option
         "same_evening": False,
         "date": nxt.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# The floor plan
+#
+# Everything here works in FEET (see the note on VenueTable). Positions are the
+# CENTRE of a thing, so rotation is one transform about that point.
+# ---------------------------------------------------------------------------
+
+STANDARD_TABLE = (6.0, 4.0)
+DEFAULT_ROOM = (30.0, 20.0)
+
+
+def rooms_for(db: Session, club_id: int) -> list:
+    from models import VenueRoom
+    return db.exec(
+        select(VenueRoom)
+        .where(VenueRoom.club_id == club_id)
+        .order_by(VenueRoom.sort_order, VenueRoom.id)
+    ).all()
+
+
+def ensure_default_room(db: Session, club_id: int):
+    """Give a venue somewhere to put things the first time they open the plan,
+    and lay their existing tables out in it.
+
+    A venue that already has eight tables shouldn't be met with an empty canvas
+    and a filing job — the tables exist, they're just not placed yet. Arranging
+    them in tidy rows turns the first visit into "drag these into the right
+    places" rather than "build your venue from nothing".
+    """
+    from models import VenueRoom, VenueTable
+
+    existing = rooms_for(db, club_id)
+    if existing:
+        return existing[0]
+
+    room = VenueRoom(club_id=club_id, name="Main room",
+                     width_ft=DEFAULT_ROOM[0], depth_ft=DEFAULT_ROOM[1])
+    db.add(room)
+    db.commit()
+    db.refresh(room)
+    autoplace(db, club_id, room)
+    return room
+
+
+def autoplace(db: Session, club_id: int, room) -> int:
+    """Lay every unplaced table out in rows inside a room, and widen the room if
+    they don't fit. Returns how many were placed.
+
+    Deliberately grows the room rather than overlapping or dropping tables: a
+    venue's real room is whatever size it is, and a plan that silently loses
+    table 9 is worse than one that starts too big and gets resized.
+    """
+    from models import VenueTable
+
+    unplaced = db.exec(
+        select(VenueTable)
+        .where(VenueTable.club_id == club_id)
+        .where(VenueTable.room_id.is_(None))
+        .order_by(VenueTable.sort_order, VenueTable.id)
+    ).all()
+    if not unplaced:
+        return 0
+
+    gap = 3.0                      # walking room between tables
+    margin = 2.0                   # from the walls
+    x = margin
+    y = margin
+    row_depth = 0.0
+    placed = 0
+
+    for t in unplaced:
+        w = t.width_ft or STANDARD_TABLE[0]
+        d = t.depth_ft or STANDARD_TABLE[1]
+        if x + w + margin > room.width_ft and x > margin:
+            x = margin
+            y += row_depth + gap
+            row_depth = 0.0
+        t.room_id = room.id
+        t.pos_x = round(x + w / 2, 1)
+        t.pos_y = round(y + d / 2, 1)
+        t.width_ft, t.depth_ft = w, d
+        t.rotation = t.rotation or 0.0
+        db.add(t)
+        x += w + gap
+        row_depth = max(row_depth, d)
+        placed += 1
+
+    needed = y + row_depth + margin
+    if needed > room.depth_ft:
+        room.depth_ft = round(needed, 1)
+        db.add(room)
+
+    db.commit()
+    return placed
+
+
+def size_label_for(width_ft: float, depth_ft: float) -> str:
+    """"6x4" from the dimensions, so the label can't disagree with the shape.
+
+    It used to be typed by hand next to a seat count, which meant a table could
+    read "6x4" on the booking page while being drawn 4ft square on the plan.
+    """
+    def fmt(v: float) -> str:
+        return str(int(v)) if float(v).is_integer() else f"{v:g}"
+    return f"{fmt(width_ft)}x{fmt(depth_ft)}"
+
+
+def layout(db: Session, club_id: int) -> dict:
+    """The whole plan: rooms, their tables, and their fixtures."""
+    from models import VenueFeature, VenueTable
+
+    rooms = rooms_for(db, club_id)
+    tables = db.exec(
+        select(VenueTable)
+        .where(VenueTable.club_id == club_id)
+        .order_by(VenueTable.sort_order, VenueTable.id)
+    ).all()
+    features = db.exec(
+        select(VenueFeature).where(VenueFeature.club_id == club_id)
+    ).all()
+
+    return {
+        "rooms": [
+            {"id": r.id, "name": r.name, "width_ft": r.width_ft,
+             "depth_ft": r.depth_ft, "sort_order": r.sort_order, "notes": r.notes}
+            for r in rooms
+        ],
+        "tables": [
+            {"id": t.id, "name": t.name, "room_id": t.room_id,
+             "pos_x": t.pos_x, "pos_y": t.pos_y,
+             "width_ft": t.width_ft, "depth_ft": t.depth_ft,
+             "rotation": t.rotation, "seats": t.seats, "active": t.active,
+             "size_label": t.size_label, "notes": t.notes,
+             "sort_order": t.sort_order}
+            for t in tables
+        ],
+        "features": [
+            {"id": f.id, "room_id": f.room_id, "kind": f.kind, "label": f.label,
+             "pos_x": f.pos_x, "pos_y": f.pos_y, "width_ft": f.width_ft,
+             "depth_ft": f.depth_ft, "rotation": f.rotation}
+            for f in features
+        ],
+    }
+
+
+def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) -> dict:
+    """What each table is doing on a date — the plan as a view of tonight.
+
+    This is the reason the floor plan is worth building rather than a list.
+    Staff standing at the door with "is anything free at eight" get an answer
+    shaped like the room they're looking at, not a table of times.
+
+    `at` narrows it to one moment ("what's on right now"); without it the whole
+    day's bookings come back per table.
+    """
+    from models import VenueEvent
+
+    rows = bookings_on(db, club_id, day)
+    moment = None
+    if at:
+        try:
+            moment = to_minutes(at)
+        except ValueError:
+            moment = None
+
+    events = {
+        e.id: e for e in db.exec(
+            select(VenueEvent).where(VenueEvent.club_id == club_id)
+            .where(VenueEvent.event_date == day)
+        ).all()
+    }
+
+    per_table: dict[int, list[dict]] = {}
+    for b in rows:
+        try:
+            s, e = to_minutes(b.start_time), to_minutes(b.end_time)
+        except ValueError:
+            continue
+        if moment is not None and not (s <= moment < e):
+            continue
+        ev = events.get(b.event_id) if b.event_id else None
+        per_table.setdefault(b.table_id, []).append({
+            "booking_id": b.id,
+            "start": b.start_time,
+            "end": b.end_time,
+            "name": ev.name if ev else b.contact_name,
+            "party_size": b.party_size,
+            "status": b.status,
+            "is_event": ev is not None,
+            "event_status": ev.status if ev else None,
+        })
+
+    held = reserved_table_ids_on(db, club_id, day)
+    nights = club_nights_on(db, club_id, day)
+    return {
+        "date": day.isoformat(),
+        "at": at,
+        "tables": {str(k): v for k, v in per_table.items()},
+        "held_table_ids": sorted(held),
+        "club_nights": [{"system": n["system"], "start_time": n["start_time"],
+                         "accent_color": n["accent_color"]} for n in nights],
+    }

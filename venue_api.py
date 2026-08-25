@@ -1636,3 +1636,216 @@ def reject_event(
     db.commit()
     db.refresh(event)
     return _event_payload(db, event)
+
+
+# ---- the floor plan ----
+
+@router.get("/admin/layout")
+def get_layout(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
+    """The venue's plan. Creates a first room and lays existing tables out in
+    it, so nobody is met with an empty canvas and a filing job."""
+    _, club_id = ctx
+    V.ensure_default_room(db, club_id)
+    return V.layout(db, club_id)
+
+
+class RoomBody(BaseModel):
+    id: Optional[int] = None
+    name: str = "Room"
+    width_ft: float = 30.0
+    depth_ft: float = 20.0
+    notes: Optional[str] = None
+
+
+@router.post("/admin/layout/rooms")
+def save_room(
+    body: RoomBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    from models import VenueRoom
+    _, club_id = ctx
+    if not (4 <= body.width_ft <= 400 and 4 <= body.depth_ft <= 400):
+        raise HTTPException(status_code=422, detail="Rooms run from 4 to 400 feet a side.")
+    if body.id is None:
+        room = VenueRoom(club_id=club_id, sort_order=len(V.rooms_for(db, club_id)))
+    else:
+        room = db.get(VenueRoom, body.id)
+        if room is None or room.club_id != club_id:
+            raise HTTPException(status_code=404, detail="Room not found.")
+    room.name = body.name.strip() or room.name
+    room.width_ft, room.depth_ft = body.width_ft, body.depth_ft
+    room.notes = (body.notes or "").strip() or None
+    db.add(room)
+    db.commit()
+    return V.layout(db, club_id)
+
+
+@router.delete("/admin/layout/rooms/{room_id}")
+def delete_room(
+    room_id: int,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Remove a room. Its tables are unplaced rather than deleted — the room
+    closing doesn't mean the tables stopped existing, and they carry bookings
+    and history that must not vanish with a wall."""
+    from models import VenueFeature, VenueRoom
+    _, club_id = ctx
+    room = db.get(VenueRoom, room_id)
+    if room is None or room.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Room not found.")
+    if len(V.rooms_for(db, club_id)) <= 1:
+        raise HTTPException(status_code=409, detail="A venue needs at least one room.")
+
+    moved = 0
+    for t in db.exec(select(VenueTable).where(VenueTable.room_id == room_id)).all():
+        t.room_id, t.pos_x, t.pos_y = None, None, None
+        db.add(t)
+        moved += 1
+    for f in db.exec(select(VenueFeature).where(VenueFeature.room_id == room_id)).all():
+        db.delete(f)
+    db.delete(room)
+    db.commit()
+    out = V.layout(db, club_id)
+    out["unplaced"] = moved
+    return out
+
+
+class PlanTable(BaseModel):
+    id: Optional[int] = None
+    name: str
+    room_id: Optional[int] = None
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
+    width_ft: float = 6.0
+    depth_ft: float = 4.0
+    rotation: float = 0.0
+    seats: int = 2
+    active: bool = True
+    notes: Optional[str] = None
+
+
+class PlanFeature(BaseModel):
+    id: Optional[int] = None
+    room_id: int
+    kind: str = "wall"
+    label: Optional[str] = None
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    width_ft: float = 4.0
+    depth_ft: float = 2.0
+    rotation: float = 0.0
+
+
+class LayoutBody(BaseModel):
+    tables: list[PlanTable] = []
+    features: list[PlanFeature] = []
+    deleted_table_ids: list[int] = []
+    deleted_feature_ids: list[int] = []
+
+
+@router.post("/admin/layout")
+def save_layout(
+    body: LayoutBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Save the whole plan in one go.
+
+    One request rather than a call per drag, because a floor plan is edited as
+    a single act — nudge three tables, turn one, rename another — and a save per
+    interaction would mean a half-applied layout whenever the network blinked.
+
+    Deletion still refuses a table with bookings against it, exactly as the old
+    list did: the plan is a nicer way to edit the same inventory, not a way
+    round the rule that protects its history.
+    """
+    from models import VenueFeature, VenueRoom
+    _, club_id = ctx
+
+    valid_rooms = {r.id for r in V.rooms_for(db, club_id)}
+
+    for tid in body.deleted_table_ids:
+        t = db.get(VenueTable, tid)
+        if t is None or t.club_id != club_id:
+            continue
+        used = db.exec(select(VenueBooking).where(VenueBooking.table_id == tid)).first()
+        if used is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{t.name} has bookings against it. Turn it off instead of deleting "
+                       f"it — that stops new bookings and keeps the old ones readable.",
+            )
+        for row in db.exec(
+            select(VenueNightTable).where(VenueNightTable.table_id == tid)
+        ).all():
+            db.delete(row)
+        db.delete(t)
+
+    for fid in body.deleted_feature_ids:
+        f = db.get(VenueFeature, fid)
+        if f is not None and f.club_id == club_id:
+            db.delete(f)
+
+    for i, row in enumerate(body.tables):
+        if row.room_id is not None and row.room_id not in valid_rooms:
+            raise HTTPException(status_code=422, detail="Unknown room.")
+        if not (1 <= row.width_ft <= 100 and 1 <= row.depth_ft <= 100):
+            raise HTTPException(status_code=422, detail="Tables run from 1 to 100 feet a side.")
+        if row.id is None:
+            t = VenueTable(club_id=club_id)
+        else:
+            t = db.get(VenueTable, row.id)
+            if t is None or t.club_id != club_id:
+                continue
+        t.name = row.name.strip() or t.name or "Table"
+        t.room_id = row.room_id
+        t.pos_x, t.pos_y = row.pos_x, row.pos_y
+        t.width_ft, t.depth_ft = row.width_ft, row.depth_ft
+        # Kept in [0, 360) so "is it turned?" is one comparison and the UI never
+        # shows a table at -90 degrees.
+        t.rotation = float(row.rotation) % 360
+        t.seats = max(1, row.seats)
+        t.active = row.active
+        t.notes = (row.notes or "").strip() or None
+        t.sort_order = i
+        # Derived, never typed: the label and the shape can't disagree.
+        t.size_label = V.size_label_for(row.width_ft, row.depth_ft)
+        db.add(t)
+
+    for row in body.features:
+        if row.room_id not in valid_rooms:
+            raise HTTPException(status_code=422, detail="Unknown room.")
+        if row.id is None:
+            f = VenueFeature(club_id=club_id, room_id=row.room_id)
+        else:
+            f = db.get(VenueFeature, row.id)
+            if f is None or f.club_id != club_id:
+                continue
+        f.room_id = row.room_id
+        f.kind = row.kind
+        f.label = (row.label or "").strip() or None
+        f.pos_x, f.pos_y = row.pos_x, row.pos_y
+        f.width_ft, f.depth_ft = row.width_ft, row.depth_ft
+        f.rotation = float(row.rotation) % 360
+        db.add(f)
+
+    db.commit()
+    return V.layout(db, club_id)
+
+
+@router.get("/admin/layout/occupancy")
+def layout_occupancy(
+    date_str: str = Query(..., alias="date"),
+    at: Optional[str] = None,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """What every table is doing on a date — the plan as tonight's view."""
+    _, club_id = ctx
+    try:
+        day = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD.")
+    return V.occupancy(db, club_id, day, at)
