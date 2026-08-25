@@ -65,20 +65,32 @@ def main() -> None:
             ))
             print(f"  added {col}")
 
+        # NOTE: every catalogue read below goes through `conn`, never through
+        # inspect(engine). SQLAlchemy's inspector checks out its OWN connection,
+        # and asking it about a table this transaction has just ALTERed means
+        # waiting on the ACCESS EXCLUSIVE lock we are ourselves holding — which
+        # is a self-deadlock that ends at the statement timeout. It did exactly
+        # that on the first prod run, after the six ADD COLUMNs had landed.
+
         # system_id was NOT NULL when every night came from a game system. A
         # venue-only night has none, so the constraint has to go or Magic and
         # Bolt Action can never be saved.
-        nullable = [
-            c["nullable"] for c in inspect(engine).get_columns("venue_club_nights")
-            if c["name"] == "system_id"
-        ]
-        if nullable and not nullable[0]:
+        is_nullable = conn.execute(text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'venue_club_nights' AND column_name = 'system_id'"
+        )).scalar()
+        if is_nullable == "NO":
             conn.execute(text(
                 "ALTER TABLE venue_club_nights ALTER COLUMN system_id DROP NOT NULL"
             ))
             print("  system_id is now nullable (venue-only nights have no system)")
+        else:
+            print("  system_id already nullable")
 
-        if "venue_system_tables" in inspect(engine).get_table_names():
+        stale = conn.execute(text(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'venue_system_tables'"
+        )).first()
+        if stale:
             n = conn.execute(text("SELECT count(*) FROM venue_system_tables")).scalar()
             if n:
                 # Refuse rather than guess. Nothing should be in here, and if
