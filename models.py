@@ -1328,7 +1328,14 @@ class VenueFeature(SQLModel, table=True):
     room_id: int = Field(foreign_key="venue_rooms.id", index=True)
 
     label: Optional[str] = None
-    # "wall" | "bar" | "door" | "pillar" | "shelves" | "stairs" | "toilets"
+    # "enclosure" | "wall" | "bar" | "door" | "pillar" | "shelves" | "stairs"
+    # | "toilets"
+    #
+    # `enclosure` is a room drawn as a BOX — four walls with a hollow middle —
+    # rather than four separate wall segments. Venues are made of rooms, not of
+    # line segments, and asking someone to assemble a back room out of four
+    # rectangles they have to line up by hand is the slowest possible way to
+    # describe something they could draw in one drag.
     kind: str = "wall"
     shape: str = "rect"
     pos_x: float = 0.0
