@@ -105,10 +105,12 @@ def pairing_context(db: Session, club_id: int, night: VenueClubNight, day: date)
     ids = {p.a_signup_id for p in pairings} | {p.b_signup_id for p in pairings if p.b_signup_id}
     names: dict[int, str] = {}
     factions: dict[int, Optional[str]] = {}
+    etas: dict[int, Optional[str]] = {}
     if ids:
         for s in db.exec(select(Signup).where(Signup.id.in_(ids))).all():
             names[s.id] = s.player_name
             factions[s.id] = s.faction
+            etas[s.id] = s.eta
 
     games, byes = [], []
     for p in pairings:
@@ -118,6 +120,10 @@ def pairing_context(db: Session, club_id: int, night: VenueClubNight, day: date)
             "b": names.get(p.b_signup_id) if p.b_signup_id else None,
             "a_faction": p.a_faction or factions.get(p.a_signup_id),
             "b_faction": p.b_faction or (factions.get(p.b_signup_id) if p.b_signup_id else None),
+            # When each of them said they'd arrive. Staff standing at a table at
+            # ten past seven want to know whether to give it away or wait.
+            "a_eta": etas.get(p.a_signup_id),
+            "b_eta": etas.get(p.b_signup_id) if p.b_signup_id else None,
             "prearranged": bool(p.prearranged),
         }
         (games if p.b_signup_id is not None else byes).append(entry)
@@ -438,10 +444,17 @@ def seated_table_ids_on(db: Session, club_id: int, day: date) -> dict[int, dict]
             out[s.table_id] = {
                 "night_id": seating.club_night_id,
                 "night": night["system"],
+                "system": night["system"],
                 "color": night["color"],
+                "start_time": night["start_time"],
                 "a": g["a"],
                 "b": g["b"],
+                "a_faction": g["a_faction"],
+                "b_faction": g["b_faction"],
+                "a_eta": g["a_eta"],
+                "b_eta": g["b_eta"],
                 "pairing_id": g["pairing_id"],
+                "locked": bool(s.locked),
             }
     return out
 
@@ -494,3 +507,44 @@ def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
             for t in candidate_tables(db, club_id, night, day, window)
         ],
     }
+
+
+def lay_out_on_publish(db: Session, club_id: int, system: str, week: str) -> Optional[dict]:
+    """Lay the room out the moment a week's pairings are published.
+
+    Venue staff shouldn't have to know that pairings happened, let alone press
+    a button about it. The pairings ARE the answer to "how many tables does
+    tonight need", so publishing them is exactly when the room can be laid out,
+    and the diary should simply be right when someone opens it.
+
+    Idempotent by construction: generate() keeps every seat that's still valid
+    and moves nobody, so publishing twice — or publishing, editing, publishing
+    again — adds the new games and leaves the rest alone.
+
+    `week` is the pairing key ("02/09/2026") and also the date the night runs,
+    which is what makes this cheap: no calendar arithmetic, just the night whose
+    system matches.
+
+    Never raises. A venue-side convenience must not be able to fail a publish —
+    that would be an admin unable to release pairings because a floor plan is
+    misconfigured.
+    """
+    try:
+        sc = db.exec(select(SystemConfig).where(SystemConfig.legacy_system_name == system)).first()
+        if sc is None:
+            return None
+        night = V.night_for_system(db, club_id, sc.id)
+        if night is None:
+            return None
+
+        day = datetime.strptime(week, "%d/%m/%Y").date()
+        # Only if the night actually meets that day. A pairing week is normally
+        # the session date, but nothing enforces it, and laying out a Wednesday
+        # club night on a Tuesday would put phantom games on the diary.
+        if not any(n["night_id"] == night.id for n in V.club_nights_on(db, club_id, day)):
+            return None
+
+        result = generate(db, club_id, night, day)
+        return result if result.get("ok") else None
+    except Exception:
+        return None

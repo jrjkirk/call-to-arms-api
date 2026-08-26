@@ -136,6 +136,18 @@ def main() -> None:
 
                         maybe_send_table_booking(db, club_id, system, target_week)
 
+                        # Same as the manual publish in admin.py: the pairings
+                        # are what tell the venue how many tables tonight needs,
+                        # so lay the floor out now. Most clubs never publish by
+                        # hand, so without this the automation path would be the
+                        # one that leaves the diary stale.
+                        try:
+                            from venue_seating import lay_out_on_publish
+
+                            lay_out_on_publish(db, club_id, system, target_week)
+                        except Exception as exc:
+                            print(f"[{system} club={club_id}] seating skipped — {exc}")
+
                         posted = post_pairings_image_for(db, system, target_week, club_id=club_id)
                         print(f"[{system} club={club_id}] DONE — pairings generated+published for {target_week}, image_posted={posted}")
 

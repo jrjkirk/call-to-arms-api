@@ -1152,6 +1152,16 @@ def pairings_publish(
     db.commit()
     if body.published:
         maybe_send_table_booking(db, user.club_id, body.system, body.week)
+        # The pairings ARE the answer to "how many tables does tonight need",
+        # so this is the moment the venue's floor can be laid out — without
+        # anyone on the venue side having to know pairings happened. Swallows
+        # its own errors: a floor plan must never be able to block a publish.
+        try:
+            from venue_seating import lay_out_on_publish
+
+            lay_out_on_publish(db, user.club_id, body.system, body.week)
+        except Exception as e:
+            capture(e, kind="venue_seating_on_publish", system=body.system)
         # Levels are derived from pairings, so publishing is the moment a
         # week's games become official and someone's bar moves. Announcing
         # here means the "ding" lands alongside the pairings post rather than
