@@ -22,17 +22,29 @@ what's already built, plus a public variant of the occupancy endpoint.
 The biggest jump in perceived quality for the least new code, and the thing a
 venue will point at when explaining why they use us.
 
-### 2. Seat the pairings
-The app already generates pairings for club nights, and already knows which
-tables are held for them (`VenueNightTable.reserved`). Assign each pairing to a
-real table and the Discord post becomes "Joel vs Shaun — Table 6".
+### 2. Seat the pairings — BUILT (2026-08-26)
 
-No competitor can copy this, because it needs both halves of the product. It
-also makes the held-tables feature visibly pay off, and gives the table plan a
-job on a night nobody booked anything.
+Shipped as `venue_seating.py`, `VenueSeating` / `VenueSeat`, and the Tonight's
+tables card on the Diary. Each game is assigned to a real table, held tables the
+night turns out not to need are reported as spare, and staff can put them back
+on sale — which is where the money is.
 
-Touches: `pairings_engine` output → a `table_id` on `Pairing`, the pairings
-image renderer, and the published-pairings post.
+Two decisions worth remembering, both narrower than this entry originally
+assumed:
+
+* **No `table_id` on `Pairing`, and nothing in the Discord post.** Seating is
+  venue-side only. A table number in a published post goes stale the moment
+  staff move a game and there is nobody standing in the room to correct it.
+  Telling players where to sit is a separate feature with its own failure mode;
+  if it's ever wanted, it should read from `VenueSeat` at post time rather than
+  writing back onto the pairing.
+* **Releasing spare tables is a human decision, not a calculation.** Handing
+  four tables back is a promise the venue can't quietly take back when a late
+  pairing turns up, so the surplus is shown and a person presses the button.
+
+What's still open: seating the pairings for a night the app DOESN'T run (Magic,
+Bolt Action) — there are no pairings to read, so it would need staff to enter
+the games, which may not be worth it.
 
 ### 3. Check-in on the Tonight view
 Staff tap a table: arrived → seated → finished. One status field on

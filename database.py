@@ -46,6 +46,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
                              # ordinary venue_bookings carrying the event id
     "venue_night_tables",    # which tables suit a club night, and which are
                              # held back from the public when it runs
+    "venue_seatings",        # one club night's table plan for one date, built
+                             # from that week's published pairings
+    "venue_seats",           # one pairing at one table — venue-side only, never
+                             # shown to players
     "players",        # create-profile inserts; admin edit updates name/titles/
                       # notes and the two visibility switches (active,
                       # league_visible); admin delete removes history-free rows

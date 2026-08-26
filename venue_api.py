@@ -21,7 +21,7 @@ from auth import active_club_id, current_user, require_user
 from database import get_session
 from models import (
     Club, SystemConfig, ClubSystem, User, VenueBooking, VenueClubNight,
-    VenueConfig, VenueNightTable, VenueStaff, VenueTable, Player,
+    VenueConfig, VenueNightTable, VenueSeat, VenueStaff, VenueTable, Player,
 )
 from database import active_player_id_for
 
@@ -1879,3 +1879,180 @@ def layout_occupancy(
     except ValueError:
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD.")
     return V.occupancy(db, club_id, day, at)
+
+
+# ---------------------------------------------------------------------------
+# Seating: where the pairings meet the room. See venue_seating.py.
+# ---------------------------------------------------------------------------
+
+def _night_or_404(db: Session, club_id: int, night_id: int) -> VenueClubNight:
+    night = db.get(VenueClubNight, night_id)
+    if night is None or night.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Club night not found.")
+    return night
+
+
+def _day_or_422(date_str: str) -> date:
+    try:
+        return date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD.")
+
+
+@router.get("/admin/seating")
+def get_seating(
+    night_id: int,
+    date_str: str = Query(..., alias="date"),
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """One club night's table plan for one date: what tonight needs, where each
+    game is sitting, and which held tables are going spare."""
+    import venue_seating as S
+
+    _, club_id = ctx
+    night = _night_or_404(db, club_id, night_id)
+    return S.view(db, club_id, night, _day_or_422(date_str))
+
+
+class SeatingBody(BaseModel):
+    night_id: int
+    date: str
+
+
+@router.post("/admin/seating/generate")
+def generate_seating(
+    body: SeatingBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Lay tonight's games out on tonight's tables.
+
+    Safe to run again: locked seats stay put and everything already placed
+    keeps its table, so a late signup adds one game rather than reshuffling the
+    room. See venue_seating.generate.
+    """
+    import venue_seating as S
+
+    _, club_id = ctx
+    night = _night_or_404(db, club_id, body.night_id)
+    day = _day_or_422(body.date)
+
+    result = S.generate(db, club_id, night, day)
+    if not result["ok"]:
+        raise HTTPException(
+            status_code=422,
+            detail="This night doesn't run through Call to Arms, so there are no pairings "
+                   "to lay out. Hold its tables by hand on the Club nights tab.",
+        )
+    return S.view(db, club_id, night, day)
+
+
+class SeatMoveBody(BaseModel):
+    night_id: int
+    date: str
+    pairing_id: int
+    # None un-seats the game: it stays on the list with no table, which is how
+    # staff say "this one is playing on the floor" without deleting anything.
+    table_id: Optional[int] = None
+
+
+@router.post("/admin/seating/move")
+def move_seat(
+    body: SeatMoveBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Put one game on a specific table.
+
+    Marks the seat LOCKED, because a human chose it — regenerating must not
+    quietly undo a decision someone made while standing in the room.
+    """
+    import venue_seating as S
+
+    _, club_id = ctx
+    night = _night_or_404(db, club_id, body.night_id)
+    day = _day_or_422(body.date)
+
+    seating = S.get_seating(db, club_id, night.id, day)
+    if seating is None:
+        raise HTTPException(status_code=404, detail="Lay the tables out first.")
+
+    seats = {s.pairing_id: s for s in S.seats_for(db, seating.id)}
+    seat = seats.get(body.pairing_id)
+
+    if body.table_id is None:
+        if seat is not None:
+            db.delete(seat)
+            db.commit()
+        return S.view(db, club_id, night, day)
+
+    table = db.get(VenueTable, body.table_id)
+    if table is None or table.club_id != club_id or not table.active:
+        raise HTTPException(status_code=404, detail="Table not found.")
+
+    # Two games on one table is the one thing this screen must never allow.
+    # Swap rather than refuse: staff dragging game A onto game B's table mean
+    # "these two switch", and making them clear one first is busywork.
+    other = next((s for s in seats.values()
+                  if s.table_id == table.id and s.pairing_id != body.pairing_id), None)
+    if other is not None:
+        if seat is None:
+            db.delete(other)
+        else:
+            other.table_id, seat.table_id = seat.table_id, table.id
+            other.locked = True
+            seat.locked = True
+            db.add(other)
+            db.add(seat)
+            db.commit()
+            return S.view(db, club_id, night, day)
+
+    if seat is None:
+        seat = VenueSeat(club_id=club_id, seating_id=seating.id,
+                         pairing_id=body.pairing_id, table_id=table.id, locked=True)
+    else:
+        seat.table_id = table.id
+        seat.locked = True
+    db.add(seat)
+    db.commit()
+    return S.view(db, club_id, night, day)
+
+
+class ReleaseBody(BaseModel):
+    night_id: int
+    date: str
+    released: bool = True
+
+
+@router.post("/admin/seating/release")
+def release_spare(
+    body: ReleaseBody,
+    ctx=Depends(_require_venue_admin),
+    db: Session = Depends(get_session),
+):
+    """Hand this night's spare tables back to the public, or take them back.
+
+    Deliberately a decision rather than a calculation — see VenueSeating's
+    docstring. Taking them back can't cancel a booking someone has already
+    made on one, so the response says how many are still genuinely free.
+    """
+    import venue_seating as S
+
+    _, club_id = ctx
+    night = _night_or_404(db, club_id, body.night_id)
+    day = _day_or_422(body.date)
+
+    seating = S.get_seating(db, club_id, night.id, day)
+    if seating is None:
+        raise HTTPException(status_code=404, detail="Lay the tables out first.")
+
+    seating.released = bool(body.released)
+    db.add(seating)
+    db.commit()
+
+    view = S.view(db, club_id, night, day)
+    if not body.released:
+        booked = {b.table_id for b in V.bookings_on(db, club_id, day)}
+        view["taken_back_but_booked"] = sorted(set(view["spare_table_ids"]) & booked)
+    return view

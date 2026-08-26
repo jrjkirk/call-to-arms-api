@@ -264,7 +264,17 @@ def reserved_table_ids_on(db: Session, club_id: int, day: date) -> set[int]:
     for night_id, entry in by_night.items():
         if night_id in running:
             ids.update(entry["reserved"])
-    return ids
+
+    # Tables the night has worked out it doesn't need tonight and handed back.
+    # Subtracted HERE, at the single point every caller already asks, so a
+    # released table is bookable on the public form, in the availability grid
+    # and on the staff diary at the same moment — rather than in whichever
+    # screen remembered to ask a second question.
+    #
+    # Imported inside the function: venue_seating reads this module's helpers,
+    # and at module scope the two would import each other.
+    from venue_seating import released_table_ids_on
+    return ids - released_table_ids_on(db, club_id, day)
 
 
 def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
@@ -543,6 +553,10 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
     by_system = {p.system_id: p for p in plans if p.system_id is not None}
     reserved = night_tables(db, club_id)
 
+    from venue_seating import seatings_on, seat_tables
+    seatings = seatings_on(db, club_id, day)
+    seated = seat_tables(db, [s.id for s in seatings.values()])
+
     def _runs_on(day_name: Optional[str], cadence: Optional[str],
                  anchor: Optional[date]) -> bool:
         if not day_name:
@@ -629,6 +643,28 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
             "tables_expected": planned or held or 0,
             "outgrown": False,
         })
+
+    # A forecast is only the best answer until a better one exists. Once the
+    # pairings for this date are laid out, the number of tables the night needs
+    # is not an estimate at all — it is a count — and every screen that asks
+    # how busy tonight is should be using it.
+    for row in out:
+        seating = seatings.get(row["night_id"]) if row["night_id"] else None
+        if seating is None:
+            row["seating"] = None
+            continue
+        used = seated.get(seating.id, set())
+        spare = sorted(set(reserved.get(row["night_id"], {}).get("reserved", [])) - used)
+        row["tables_expected"] = seating.tables_needed
+        # It can't outgrow a plan it has already been laid out against.
+        row["outgrown"] = False
+        row["seating"] = {
+            "tables_needed": seating.tables_needed,
+            "tables_seated": len(used),
+            "spare_table_ids": spare,
+            "released": seating.released,
+            "week": seating.week,
+        }
 
     return sorted(out, key=lambda r: (r["start_time"] or "", r["system"]))
 
@@ -767,6 +803,10 @@ def range_overview(db: Session, club_id: int, first: date, last: date) -> list[d
     plans = club_nights(db, club_id)
     by_system = {p.system_id: p for p in plans if p.system_id is not None}
     reserved = night_tables(db, club_id)
+
+    from venue_seating import seatings_between, seat_tables
+    seatings = seatings_between(db, club_id, first, last)
+    seated_tables = seat_tables(db, [s.id for s in seatings.values()])
     systems = db.exec(
         select(ClubSystem, SystemConfig)
         .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
@@ -848,12 +888,32 @@ def range_overview(db: Session, club_id: int, first: date, last: date) -> list[d
             })
         nights.sort(key=lambda r: (r["start_time"] or "", r["system"]))
 
+        # Same substitution as club_nights_on: where tonight's games have been
+        # laid out, the count replaces the forecast, and tables the night has
+        # handed back stop counting against the room. See there for why.
+        for n in nights:
+            seating = seatings.get((n["night_id"], day)) if n["night_id"] else None
+            if seating is None:
+                n["seating"] = None
+                continue
+            used = seated_tables.get(seating.id, set())
+            n["tables_expected"] = seating.tables_needed
+            n["outgrown"] = False
+            n["seating"] = {"tables_needed": seating.tables_needed,
+                            "tables_seated": len(used),
+                            "released": seating.released}
+
         day_bookings = bookings_by_day.get(day, [])
         booked_ids = {b.table_id for b in day_bookings}
         held_ids: set[int] = set()
         for n in nights:
-            if n["night_id"]:
-                held_ids.update(reserved.get(n["night_id"], {}).get("reserved", []))
+            if not n["night_id"]:
+                continue
+            held = set(reserved.get(n["night_id"], {}).get("reserved", []))
+            seating = seatings.get((n["night_id"], day))
+            if seating is not None and seating.released:
+                held &= seated_tables.get(seating.id, set())
+            held_ids.update(held)
         night_demand = sum(n["tables_expected"] for n in nights)
         committed = len(booked_ids) + night_demand - len(booked_ids & held_ids)
 
@@ -1378,11 +1438,17 @@ def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) ->
     # four game nights needs to see that the far corner belongs to Kill Team on
     # a Wednesday, and a single "held" colour can't say that.
     by_night = night_tables(db, club_id)
+    # Held means held RIGHT NOW, so a released table stops being gold here at
+    # the same moment it becomes bookable. Anything else and the plan would go
+    # on showing a table as the club night's while the public books it.
+    still_held = reserved_table_ids_on(db, club_id, day)
     held_by: dict[str, dict] = {}
     for n in nights:
         if not n["night_id"]:
             continue
         for table_id in by_night.get(n["night_id"], {}).get("reserved", []):
+            if table_id not in still_held:
+                continue
             held_by[str(table_id)] = {
                 "night_id": n["night_id"],
                 "name": n["system"],
@@ -1390,12 +1456,32 @@ def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) ->
                 "start_time": n["start_time"],
             }
 
+    # Once the pairings are out, a held table splits in two: one the night is
+    # definitely using, and one it is merely holding. The venue sells the
+    # second kind, so the plan has to be able to tell them apart.
+    from venue_seating import seated_table_ids_on, get_seating, spare_tables
+    seated = seated_table_ids_on(db, club_id, day)
+    spare: dict[str, dict] = {}
+    for n in nights:
+        if not n["night_id"]:
+            continue
+        row = db.get(VenueClubNight, n["night_id"])
+        seating = get_seating(db, club_id, n["night_id"], day)
+        if row is None or seating is None:
+            continue
+        for table_id in spare_tables(db, club_id, row, day, seating):
+            spare[str(table_id)] = {"night_id": n["night_id"], "name": n["system"],
+                                    "color": n["color"],
+                                    "released": bool(seating.released)}
+
     return {
         "date": day.isoformat(),
         "at": at,
         "tables": {str(k): v for k, v in per_table.items()},
         "held_table_ids": sorted(int(k) for k in held_by),
         "held_by": held_by,
+        "seated_by": {str(k): v for k, v in seated.items()},
+        "spare_by": spare,
         "club_nights": [{"night_id": n["night_id"], "system": n["system"],
                          "start_time": n["start_time"], "color": n["color"],
                          "accent_color": n["accent_color"]} for n in nights],

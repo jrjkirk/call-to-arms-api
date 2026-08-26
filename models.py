@@ -1368,3 +1368,80 @@ class VenueFeature(SQLModel, table=True):
     flip_v: bool = False
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueSeating(SQLModel, table=True):
+    """One club night's table plan for ONE DATE, once its pairings exist.
+
+    VenueClubNight says what a night needs in general — "The Old World wants
+    about six tables, and these ten are held for it". This says what it needs
+    on the 12th, which is a different and much better-informed question: the
+    pairings are out, thirteen people turned up, that's six games and one bye.
+    Six tables, not ten.
+
+    Separate from VenueClubNight because it is per-date and disposable. The
+    standing plan is the venue's policy; this is one evening's arithmetic, and
+    re-running it must never edit the policy.
+
+    THE VENUE SIDE ONLY. Players are told who they're playing by the pairings
+    post; the table they end up on is a room-management detail that would just
+    be one more thing to get wrong in a Discord message. Nothing here reaches
+    the pairings page, the pairings post or any notification — deliberately.
+
+    `released` is the surplus decision, and it is a decision rather than a
+    calculation: handing four held tables back to the public is a promise the
+    venue can't quietly take back if a late pairing turns up, so a human makes
+    it. Until then the tables stay held and merely LOOK spare.
+    """
+    __tablename__ = "venue_seatings"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    club_night_id: int = Field(foreign_key="venue_club_nights.id", index=True)
+    on_date: date = Field(index=True)
+
+    # The pairing key this was built from — "12/08/2026" and the legacy system
+    # name, the pair every pairing row is filed under. Stored rather than
+    # recomputed so a plan built on Tuesday can still say what it was built
+    # from on Wednesday, when the week has moved on.
+    week: str
+    system: Optional[str] = None
+
+    # Games needing a table when this was generated. A bye needs no table and
+    # is not counted; the count is the honest answer to "how many tables does
+    # tonight actually need".
+    tables_needed: int = 0
+
+    # Surplus handed back to the public. See the class docstring.
+    released: bool = False
+
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueSeat(SQLModel, table=True):
+    """One pairing at one table, on one date.
+
+    A row per pairing rather than a list of ids on the seating, because staff
+    move ONE game — "put Dave on the big table, he's brought a siege" — and a
+    list can't record that without rewriting the lot.
+
+    `locked` marks a seat a human placed by hand. Regenerating the plan (a late
+    signup, someone drops out) reshuffles everything else around it and leaves
+    a locked seat exactly where it was put. Without this, auto-assign would
+    quietly undo every manual fix the moment anything changed, which is the
+    fastest way to make staff stop trusting it.
+    """
+    __tablename__ = "venue_seats"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    seating_id: int = Field(foreign_key="venue_seatings.id", index=True)
+
+    # No FK to pairings: pairings are regenerated wholesale by the admin tools,
+    # and a seat pointing at a deleted pairing should be ignorable rather than
+    # a constraint violation on somebody else's screen.
+    pairing_id: int = Field(index=True)
+    table_id: int = Field(foreign_key="venue_tables.id", index=True)
+    locked: bool = False
