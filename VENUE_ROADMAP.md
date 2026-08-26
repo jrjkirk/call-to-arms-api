@@ -11,16 +11,30 @@ that already exist** rather than building new machinery.
 
 ## Tier 1 — what you sell on
 
-### 1. Let bookers pick their table on the plan
-Today the booking form offers a list of table cards. Show them the actual room
-and let them choose "the corner one by the window".
+### 1. Let bookers pick their table on the plan — BUILT (2026-08-26)
 
-Everything needed exists: the plan, `PlanObject`, and
-`GET /venue/admin/layout/occupancy`. This is largely a read-only public mode of
-what's already built, plus a public variant of the occupancy endpoint.
+Shipped as `GET /venue/plan` (`V.public_layout`) and
+`BookingPlanPicker.svelte`. The booking form draws the room for the chosen
+slot; free tables are pressable, ones that suit the chosen game are green, and
+unavailable ones carry their reason.
 
-The biggest jump in perceived quality for the least new code, and the thing a
-venue will point at when explaining why they use us.
+Three decisions worth remembering:
+
+* **The public payload is built from scratch, not filtered out of `layout()`.**
+  The difference between "what the room looks like" and "what the venue knows
+  about the room" is exactly what leaks when one endpoint serves both. Adding a
+  private field to `layout()` can't widen the public one.
+* **`tables-for-slot` says WHY a table isn't on offer** — booked, club_night,
+  too_small. Greying them all identically makes everything look booked, and
+  only one of those reasons is worth changing your party size over.
+* **The card list stays.** It's the keyboard and screen-reader path, not a
+  fallback; a picture with no text equivalent would make the form unusable
+  without a mouse.
+
+Still open: the plan is booker-facing but not anonymous — it needs a Discord
+login like the rest of the booking flow, because `active_club_id` resolves the
+club from the session. A genuinely public "how busy tonight" view (see Smaller
+wins) would need club resolution from the subdomain alone.
 
 ### 2. Seat the pairings — BUILT (2026-08-26)
 
@@ -96,8 +110,9 @@ support it; this is mostly roll-up reporting.
 
 ## Smaller wins
 
-- **Tonight's sheet** — one-page print of the plan plus bookings and club
-  nights, for behind the bar. The PNG export is most of it already.
+- ~~**Tonight's sheet**~~ — DONE (2026-08-26). The Diary's plan has zoom and an
+  Export PNG that captions the sheet with the room, the date and what the
+  colours mean.
 - **Public "how busy tonight"** page, no login, to pull in walk-ins.
 - **Capacity-aware signup** — `day_overview` already computes `outgrown`; warn
   the system admin AT SIGNUP TIME when a club night outgrows its held tables,
@@ -111,3 +126,9 @@ support it; this is mostly roll-up reporting.
 Items 1 and 2 are what you sell on. Items 3 and 4 are what stops them
 cancelling six months in. Everything below that is worth having and none of it
 is what closes the first deal.
+
+**Status, 2026-08-26.** Both of the things you sell on are built. Item 3
+(check-in) got cheaper as a side effect — the Diary already knows which game is
+on which table, so the states have somewhere real to attach — and item 4 still
+depends on it. Benched by decision on 2026-08-26; the rest of this file is a
+record of what was considered, not a queue.
