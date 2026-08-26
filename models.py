@@ -1180,9 +1180,14 @@ class VenueClubNight(SQLModel, table=True):
     # is set, where SystemConfig and ClubSystem are the source of truth.
     name: Optional[str] = None
     session_day: Optional[str] = None            # "Wednesday"
-    session_cadence: Optional[str] = None        # "weekly" | "fortnightly"
+    session_cadence: Optional[str] = None        # "weekly" | "fortnightly" | "monthly"
     cadence_anchor: Optional[date] = None        # only meaningful when fortnightly
     start_time: Optional[str] = None             # "HH:MM"
+
+    # Palette token, same set as VenueTable.color. A venue running four game
+    # nights wants to see WHICH one has the far corner on a Wednesday, and one
+    # shade of gold for "held" can't say that.
+    color: str = "amber"
 
     # None = no plan set; the busyness view falls back to estimating from
     # signups, and for a venue-only night to the tables held for it.

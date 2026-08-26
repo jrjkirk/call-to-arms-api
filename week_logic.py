@@ -47,6 +47,45 @@ def _next_fortnightly(day_name: str, cadence_anchor: date, today: date) -> date:
     return candidate
 
 
+def _nth_weekday_of_month(year: int, month: int, weekday: int, nth: int) -> Optional[date]:
+    """The nth occurrence of a weekday in a month, or None if there isn't one.
+
+    nth is 1-based. A month with only four Wednesdays has no fifth, and
+    returning None rather than spilling into the next month is what keeps
+    "first Wednesday" meaning the first Wednesday.
+    """
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    day = 1 + offset + (nth - 1) * 7
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _next_monthly(day_name: str, cadence_anchor: date, today: date) -> date:
+    """Next occurrence of "the nth <weekday> of the month", on or after today.
+
+    Which nth comes from the ANCHOR: a club that told us it last met on the
+    second Wednesday meets on the second Wednesday. Asking separately for an
+    ordinal would be a second question about a fact they've already given us.
+
+    A month without that many of the weekday is skipped rather than
+    approximated — a "fifth Friday" club genuinely doesn't meet that month.
+    """
+    weekday = _DAY_NAME_TO_INT[day_name]
+    nth = (cadence_anchor.day - 1) // 7 + 1
+    year, month = today.year, today.month
+    for _ in range(14):                      # a year and a bit of headroom
+        candidate = _nth_weekday_of_month(year, month, weekday, nth)
+        if candidate is not None and candidate >= today:
+            return candidate
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return _next_weekly(day_name, today)     # unreachable in practice
+
+
 def next_session_date(
     session_day: str, session_cadence: str, cadence_anchor: Optional[date], today: date
 ) -> date:
@@ -55,6 +94,9 @@ def next_session_date(
     if session_cadence == "fortnightly":
         assert cadence_anchor is not None
         return _next_fortnightly(session_day, cadence_anchor, today)
+    if session_cadence == "monthly":
+        assert cadence_anchor is not None
+        return _next_monthly(session_day, cadence_anchor, today)
     return _next_weekly(session_day, today)
 
 
@@ -65,7 +107,20 @@ def sessions_in_range(
     """All session dates for a club's system falling within [start, end]
     (inclusive), for the Club-page calendar's auto-derived recurring
     sessions. Weekly: every occurrence of session_day in range. Fortnightly:
-    every occurrence on the cadence_anchor's 14-day cycle in range."""
+    every occurrence on the cadence_anchor's 14-day cycle in range. Monthly:
+    the nth weekday of each month, where n comes from the anchor."""
+    if session_cadence == "monthly":
+        assert cadence_anchor is not None
+        dates = []
+        candidate = _next_monthly(session_day, cadence_anchor, start)
+        while candidate <= end:
+            dates.append(candidate)
+            # Step into next month and re-derive, rather than adding 28 days:
+            # four weeks drifts off "the second Wednesday" within a year.
+            nxt = candidate.replace(day=1) + timedelta(days=32)
+            candidate = _next_monthly(session_day, cadence_anchor, nxt.replace(day=1))
+        return dates
+
     if session_cadence == "fortnightly":
         assert cadence_anchor is not None
         dates: list[date] = []

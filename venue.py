@@ -589,6 +589,7 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
             "slug": sc.slug,
             "legacy_system_name": sc.legacy_system_name,
             "accent_color": cs.accent_color,
+            "color": plan.color if plan else "amber",
             "start_time": cs.session_start_time,
             "app_managed": True,
             "signups": len(signups),
@@ -615,6 +616,7 @@ def club_nights_on(db: Session, club_id: int, day: date) -> list[dict]:
             "slug": None,
             "legacy_system_name": None,
             "accent_color": None,
+            "color": p.color,
             "start_time": p.start_time,
             "app_managed": False,
             # Nobody signs up to a night this app doesn't run, so there is no
@@ -838,7 +840,8 @@ def range_overview(db: Session, club_id: int, first: date, last: date) -> list[d
             planned = p.expected_tables or None
             nights.append({
                 "night_id": p.id, "system_id": None, "system": p.name or "Club night",
-                "accent_color": None, "start_time": p.start_time, "app_managed": False,
+                "accent_color": None, "color": p.color,
+                "start_time": p.start_time, "app_managed": False,
                 "signups": 0, "tables_planned": planned, "tables_held": held,
                 "tables_estimated": 0, "tables_expected": planned or held or 0,
                 "outgrown": False,
@@ -1369,13 +1372,31 @@ def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) ->
             "event_status": ev.status if ev else None,
         })
 
-    held = reserved_table_ids_on(db, club_id, day)
     nights = club_nights_on(db, club_id, day)
+
+    # WHICH night holds each table, not merely that one does. A venue running
+    # four game nights needs to see that the far corner belongs to Kill Team on
+    # a Wednesday, and a single "held" colour can't say that.
+    by_night = night_tables(db, club_id)
+    held_by: dict[str, dict] = {}
+    for n in nights:
+        if not n["night_id"]:
+            continue
+        for table_id in by_night.get(n["night_id"], {}).get("reserved", []):
+            held_by[str(table_id)] = {
+                "night_id": n["night_id"],
+                "name": n["system"],
+                "color": n["color"],
+                "start_time": n["start_time"],
+            }
+
     return {
         "date": day.isoformat(),
         "at": at,
         "tables": {str(k): v for k, v in per_table.items()},
-        "held_table_ids": sorted(held),
-        "club_nights": [{"system": n["system"], "start_time": n["start_time"],
+        "held_table_ids": sorted(int(k) for k in held_by),
+        "held_by": held_by,
+        "club_nights": [{"night_id": n["night_id"], "system": n["system"],
+                         "start_time": n["start_time"], "color": n["color"],
                          "accent_color": n["accent_color"]} for n in nights],
     }

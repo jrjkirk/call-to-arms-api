@@ -973,6 +973,10 @@ def _night_payload(db: Session, club_id: int, night, cs=None, sc=None) -> dict:
         "app_managed": night.system_id is not None,
         "expected_tables": night.expected_tables,
         "notes": night.notes,
+        # How this night's held tables are drawn on the Diary. On the row for
+        # BOTH kinds of night: the schedule may belong to ClubSystem, but the
+        # colour is the venue's own call about its own floor.
+        "color": night.color,
         "preferred_table_ids": sorted(assigned["preferred"]),
         "reserved_table_ids": sorted(assigned["reserved"]),
         "review": V.table_review(db, club_id, night),
@@ -1050,6 +1054,7 @@ class ClubNightBody(BaseModel):
     start_time: Optional[str] = None
 
     expected_tables: Optional[int] = None
+    color: Optional[str] = None
     notes: Optional[str] = None
     # Every table this night may use, and the subset held back from the public
     # when it runs. Sent whole rather than as add/remove operations — the admin
@@ -1094,8 +1099,10 @@ def save_club_night(
                 raise HTTPException(status_code=422, detail="Pick a day of the week.")
             night.session_day = body.session_day
         if body.session_cadence is not None:
-            if body.session_cadence not in ("weekly", "fortnightly"):
-                raise HTTPException(status_code=422, detail="Cadence must be weekly or fortnightly.")
+            if body.session_cadence not in ("weekly", "fortnightly", "monthly"):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Cadence must be weekly, fortnightly or monthly.")
             night.session_cadence = body.session_cadence
         if body.cadence_anchor is not None:
             try:
@@ -1115,15 +1122,25 @@ def save_club_night(
             raise HTTPException(status_code=422, detail="Pick the day this night runs.")
         # A fortnightly night with no anchor can't be placed on a calendar at
         # all, so it would silently never appear. Refuse it at the door.
-        if (night.session_cadence or "weekly") == "fortnightly" and night.cadence_anchor is None:
+        # Both need an anchor, for different reasons: a fortnightly night to
+        # know which weeks it falls on, a monthly one to know WHICH weekday of
+        # the month it is — the ordinal is read off the date it last ran rather
+        # than asked for separately.
+        if (night.session_cadence or "weekly") in ("fortnightly", "monthly") \
+                and night.cadence_anchor is None:
             raise HTTPException(
                 status_code=422,
-                detail="A fortnightly night needs a date it last ran, so we know which weeks it falls on.",
+                detail="A fortnightly or monthly night needs a date it last ran, so we know "
+                       "which weeks it falls on.",
             )
 
     if body.expected_tables is not None and not (0 <= body.expected_tables <= 200):
         raise HTTPException(status_code=422, detail="Expected tables must be 0–200.")
     night.expected_tables = body.expected_tables
+    # Both kinds of night own their colour — unlike the schedule, it says
+    # nothing about the game, only about how the venue reads its own floor.
+    if body.color is not None:
+        night.color = body.color if body.color in V.TABLE_COLORS else "amber"
     if body.notes is not None:
         night.notes = body.notes.strip() or None
     night.updated_at = datetime.utcnow()
