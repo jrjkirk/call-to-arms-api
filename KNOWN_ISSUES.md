@@ -104,3 +104,33 @@ re-measure rather than assume.
 
 **Code.** `database.py` (pool), `Dockerfile` (limit-concurrency),
 `call-to-arms-web/src/routes/admin/+page.svelte` (`ensureSystemScope`).
+
+---
+
+## 3. A taken call-out books no table
+
+**Symptom.** Two players agree an ad-hoc game through a call-out — one system,
+one date, one time, both named — and the venue side knows nothing about it. No
+booking, no table, nothing on the diary. They turn up to a room that isn't
+expecting them.
+
+**Cause.** `CallOut` has no link to a table or a booking, and no place field at
+all: the model carries `game_at` and nothing about where. Nothing joins the two
+halves of the product here.
+
+**Why it's left.** Deliberate, decided 2026-08-26. Booking a table
+automatically when a call-out is *posted* would hold a table for a game that may
+never be taken up, which costs the venue exactly the thing the booking feature
+exists to sell. Booking on *take-up* is more defensible but still guesses at a
+duration, a table size and a venue the call-out never named — and a booking made
+on someone's behalf that they then can't find is worse than no booking.
+
+Instead the call-out form says plainly that a call-out reserves nothing, and
+links to the booking page. The prompt is the honest version of the connection.
+
+**Revisit when.** Call-outs get a place/venue field, or venues start reporting
+turn-ups they weren't expecting. If it's built, the natural shape is a prompt on
+*take-up* that pre-fills the booking form rather than anything automatic.
+
+**Code.** `models.py::CallOut`, `call_outs.py`,
+`call-to-arms-web/src/routes/signup/+page.svelte` (the `.callout-book` prompt).
