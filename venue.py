@@ -1410,6 +1410,56 @@ def layout(db: Session, club_id: int) -> dict:
     }
 
 
+def public_layout(db: Session, club_id: int) -> dict:
+    """The room as a booker would see it walking in — and nothing else.
+
+    "Public" here means booker-facing, not unauthenticated: booking requires a
+    Discord login like every other venue endpoint. What it means is that the
+    payload assumes the reader is a customer rather than staff.
+
+    Deliberately NOT layout() with a filter. That payload carries staff notes
+    and sort orders, and the difference between "what the room looks like" and
+    "what the venue knows about the room" is exactly the sort of thing that
+    leaks when one endpoint serves both. This builds the public shape from
+    scratch so adding a private field to layout() can never widen it.
+
+    Geometry only: no bookings, no names, no club-night seating. Which tables
+    are free is a question about a SLOT, and tables-for-slot answers it.
+
+    Retired tables are dropped rather than greyed: a table that no longer exists
+    isn't part of the room, and drawing it invites someone to ask for it.
+    """
+    from models import VenueFeature, VenueTable
+
+    rooms = rooms_for(db, club_id)
+    tables = active_tables(db, club_id)
+    features = db.exec(
+        select(VenueFeature).where(VenueFeature.club_id == club_id)
+    ).all()
+
+    return {
+        "rooms": [
+            {"id": r.id, "name": r.name, "width_ft": r.width_ft, "depth_ft": r.depth_ft}
+            for r in rooms
+        ],
+        "tables": [
+            {"id": t.id, "name": t.name, "room_id": t.room_id, "shape": t.shape,
+             "color": t.color, "pos_x": t.pos_x, "pos_y": t.pos_y,
+             "width_ft": t.width_ft, "depth_ft": t.depth_ft, "rotation": t.rotation,
+             "seats": t.seats, "size_label": t.size_label}
+            for t in tables
+        ],
+        "features": [
+            {"id": f.id, "room_id": f.room_id, "kind": f.kind, "label": f.label,
+             "shape": f.shape, "color": f.color,
+             "pos_x": f.pos_x, "pos_y": f.pos_y, "width_ft": f.width_ft,
+             "depth_ft": f.depth_ft, "rotation": f.rotation,
+             "flip_h": f.flip_h, "flip_v": f.flip_v}
+            for f in features
+        ],
+    }
+
+
 def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) -> dict:
     """What each table is doing on a date — the plan as a view of tonight.
 

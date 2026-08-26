@@ -169,14 +169,60 @@ def tables_for_slot(
         db, club_id, day, start, start + duration,
         party_size=party_size, system_id=system_id,
     )
+    free_ids = {t.id for t in free}
+
+    # WHY each other table isn't on offer, so the plan can grey it honestly
+    # rather than making every unavailable table look booked. A 4x4 that's too
+    # small for six people and a table someone else has taken are different
+    # answers, and only one of them is worth changing your party size over.
+    held = V.reserved_table_ids_on(db, club_id, day)
+    taken: set[int] = set()
+    for b in V.bookings_on(db, club_id, day):
+        try:
+            if V._overlaps(start, start + duration,
+                           V.to_minutes(b.start_time), V.to_minutes(b.end_time)):
+                taken.add(b.table_id)
+        except ValueError:
+            taken.add(b.table_id)
+
+    unavailable = []
+    for t in V.active_tables(db, club_id):
+        if t.id in free_ids:
+            continue
+        if t.id in taken:
+            reason = "booked"
+        elif t.id in held:
+            reason = "club_night"
+        elif t.seats < party_size:
+            reason = "too_small"
+        else:
+            reason = "unavailable"
+        unavailable.append({"id": t.id, "reason": reason})
+
     return {
         "tables": [
             {"id": t.id, "name": t.name, "size_label": t.size_label, "seats": t.seats,
              "recommended": t.id in preferred}
             for t in free
         ],
-        "held_for_club_night": sorted(V.reserved_table_ids_on(db, club_id, day)),
+        "unavailable": unavailable,
+        "held_for_club_night": sorted(held),
     }
+
+
+@router.get("/plan")
+def public_plan(
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """The room, drawn to scale, for the booking form's table picker.
+
+    Geometry only and slot-independent, so it's fetched once and reused as the
+    booker changes date and time — what's free that evening comes from
+    tables-for-slot. See V.public_layout for what's deliberately not in here.
+    """
+    _require_enabled(db, club_id)
+    return V.public_layout(db, club_id)
 
 
 @router.get("/busy")
