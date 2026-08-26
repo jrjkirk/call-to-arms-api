@@ -836,6 +836,21 @@ def submit_signup(
     return {"ok": True, "created": created, "signup": su}
 
 
+def _resync_venue_floor(db: Session, club_id: int, system: str, week: str) -> None:
+    """Keep the venue's table plan in step after this week's pairings change.
+
+    Only ever touches a plan that already exists — see venue_seating.resync.
+    Swallows everything: a player must be able to drop out of a game whatever
+    state the floor plan is in.
+    """
+    try:
+        from venue_seating import resync
+
+        resync(db, club_id, system, week)
+    except Exception as e:
+        capture(e, kind="venue_seating_resync", system=system)
+
+
 @router.delete("/mine")
 def drop_signup(
     system: str,
@@ -910,6 +925,11 @@ def drop_signup(
             app_url=APP_PUBLIC_URL,
         )
         _post_webhook(db, club_id, system, content)
+
+        # The venue laid this week out from the pairings, and one of them has
+        # just been deleted. Without this the dropped game's table stays
+        # occupied by a game nobody is playing, so the venue can't sell it.
+        _resync_venue_floor(db, club_id, system, week)
 
         return {"ok": True, "dropped": True, "published": True}
 
@@ -1306,6 +1326,10 @@ def swap_signups(
         app_url=APP_PUBLIC_URL,
     )
     _post_webhook(db, club_id, body.system, content)
+
+    # Two pairings became one game and two byes, all with new ids. Re-lay the
+    # floor or the diary shows a table demanding a decision that isn't real.
+    _resync_venue_floor(db, club_id, body.system, week)
 
     # 14. Return
     return {

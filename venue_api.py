@@ -638,6 +638,13 @@ def patch_table(
     t.notes = (body.notes or "").strip() or None
     db.add(t)
     db.commit()
+    # Retiring a table can strand a game sitting on it. See resync_night.
+    try:
+        from venue_seating import resync_all_nights
+
+        resync_all_nights(db, club_id)
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -870,6 +877,9 @@ def admin_create_booking(
     free = V.free_tables_for(
         db, club_id, day, start, end, system_id=body.system_id, for_public=False,
     )
+    # A table with a club-night game on it is the last one to hand out. Staff
+    # may still pick it deliberately; auto-assignment never should.
+    seated = _seated_tables_on(db, club_id, day)
     if body.table_id is not None:
         chosen = next((t for t in free if t.id == body.table_id), None)
         if chosen is None:
@@ -878,7 +888,8 @@ def admin_create_booking(
         candidates = [t for t in free if t.seats >= body.party_size] or free
         if not candidates:
             raise HTTPException(status_code=409, detail="No table free for that slot.")
-        chosen = min(candidates, key=lambda t: (t.seats, t.sort_order, t.id))
+        chosen = min(candidates,
+                     key=lambda t: (t.id in seated, t.seats, V.natural_key(t.name), t.id))
 
     b = VenueBooking(
         club_id=club_id, table_id=chosen.id, booking_date=day,
@@ -895,8 +906,24 @@ def admin_create_booking(
     db.add(b)
     db.commit()
     db.refresh(b)
+
+    # If this landed on a game's table, move the game rather than leaving two
+    # parties with a claim on one board — and say whose game moved.
+    displaced_game = seated.get(chosen.id)
+    if displaced_game:
+        try:
+            from venue_seating import resync_all_nights
+
+            resync_all_nights(db, club_id)
+        except Exception:
+            pass
     # No notification: staff entered this themselves and don't need telling.
-    return {"ok": True, "booking": V.describe_booking(db, b)}
+    return {
+        "ok": True,
+        "booking": V.describe_booking(db, b),
+        "displaced": (f'{displaced_game["a"]} v {displaced_game["b"]}'
+                      if displaced_game else None),
+    }
 
 
 # ---- staff access ----
@@ -1178,6 +1205,18 @@ def save_club_night(
             ))
         db.commit()
 
+    # Anything about this night that could invalidate a plan already made:
+    # tables taken off it, or a schedule change that moves it off a date it was
+    # laid out for. Un-holding a table a game was sitting on used to leave the
+    # game there AND offer the table to the public — two parties with a claim on
+    # one board until somebody noticed.
+    try:
+        from venue_seating import resync_night
+
+        resync_night(db, club_id, night)
+    except Exception:
+        pass
+
     return get_club_nights(ctx=ctx, db=db)
 
 
@@ -1426,17 +1465,40 @@ def _event_payload(db: Session, event) -> dict:
     }
 
 
-def _hold_event_tables(db: Session, event, user: User) -> None:
+def _seated_tables_on(db: Session, club_id: int, day: date) -> dict:
+    """table_id -> the club-night game sitting on it that day, if any."""
+    try:
+        from venue_seating import tonight
+
+        return tonight(db, club_id, day)["seated"]
+    except Exception:
+        return {}
+
+
+def _hold_event_tables(db: Session, event, user: User) -> list[str]:
     """Put this event's tables aside, as ordinary bookings carrying its id.
 
     for_public=False: an event may take a table held for a club night. Staff
     know what they're doing to their own room.
+
+    But it takes the EMPTY ones first. A held table with a game already seated
+    on it is the last thing an event should swallow, and taking one silently is
+    how a pair of players arrive to find a tournament on their board. Any game
+    that does get displaced is named in the return value and moved by the
+    re-lay below.
     """
     start, end = V.to_minutes(event.start_time), V.to_minutes(event.end_time)
     free = V.free_tables_for(
         db, event.club_id, event.event_date, start, end, for_public=False,
     )
+    seated = _seated_tables_on(db, event.club_id, event.event_date)
+    free.sort(key=lambda t: t.id in seated)          # empty tables first
+
+    displaced: list[str] = []
     for table in free[:event.tables_needed]:
+        g = seated.get(table.id)
+        if g:
+            displaced.append(f'{g["a"]} v {g["b"]} ({table.name})')
         db.add(VenueBooking(
             club_id=event.club_id, table_id=table.id, booking_date=event.event_date,
             start_time=event.start_time, end_time=event.end_time,
@@ -1445,6 +1507,15 @@ def _hold_event_tables(db: Session, event, user: User) -> None:
             created_by_staff=True, event_id=event.id,
         ))
     db.commit()
+
+    if displaced:
+        try:
+            from venue_seating import resync_all_nights
+
+            resync_all_nights(db, event.club_id)
+        except Exception:
+            pass
+    return displaced
 
 
 class EventBody(BaseModel):
@@ -1503,8 +1574,10 @@ def create_event(
     db.commit()
     db.refresh(event)
 
-    _hold_event_tables(db, event, user)
-    return _event_payload(db, event)
+    displaced = _hold_event_tables(db, event, user)
+    # Named, not silent: a game moved off its table is something staff have to
+    # know at the moment they cause it, not on the night.
+    return {**_event_payload(db, event), "displaced": displaced}
 
 
 @router.patch("/admin/events/{event_id}")
@@ -1863,6 +1936,13 @@ def save_layout(
         db.add(f)
 
     db.commit()
+    # Saving the plan can retire a table a game was seated on. See resync_night.
+    try:
+        from venue_seating import resync_all_nights
+
+        resync_all_nights(db, club_id)
+    except Exception:
+        pass
     return V.layout(db, club_id)
 
 

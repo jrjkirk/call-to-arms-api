@@ -1050,6 +1050,22 @@ def pairings_preview(
     return {"rows": display, "preview": True, "summary": summary}
 
 
+def _resync_venue_floor(db: Session, club_id: int, system: str, week: str) -> None:
+    """Keep the venue's table plan in step after this week's pairings change.
+
+    Regenerating or deleting pairings gives every game a new id, which orphans
+    every seat pointing at the old ones — the plan then shows an empty room
+    while demanding a table for each game. Only ever touches a plan that
+    already exists, so this is inert before the week is published.
+    """
+    try:
+        from venue_seating import resync
+
+        resync(db, club_id, system, week)
+    except Exception as e:
+        capture(e, kind="venue_seating_resync", system=system)
+
+
 @router.post("/pairings/generate")
 def pairings_generate(
     body: PairingsWeekBody,
@@ -1081,6 +1097,8 @@ def pairings_generate(
         .where(Pairing.system == body.system)
         .where(Pairing.prearranged == True)
     ).all()
+
+    _resync_venue_floor(db, user.club_id, body.system, body.week)
 
     signups_by_id = _collect_signups_for_rows(new_pairings, db, user.club_id)
     config = _get_system_config(db, body.system)
@@ -1159,6 +1177,8 @@ def pairings_publish(
         try:
             from venue_seating import lay_out_on_publish
 
+            # create=True: publishing is the one moment allowed to lay a floor
+            # out from nothing. Every later change only keeps it in step.
             lay_out_on_publish(db, user.club_id, body.system, body.week)
         except Exception as e:
             capture(e, kind="venue_seating_on_publish", system=body.system)
@@ -1278,6 +1298,7 @@ def pairings_delete(
 
     if deleted:
         db.commit()
+        _resync_venue_floor(db, user.club_id, body.system, body.week)
     return {"deleted": deleted}
 
 

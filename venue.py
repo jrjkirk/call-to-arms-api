@@ -1484,26 +1484,16 @@ def occupancy(db: Session, club_id: int, day: date, at: Optional[str] = None) ->
     # Once the pairings are out, a held table splits in two: one the night is
     # definitely using, and one it is merely holding. The venue sells the
     # second kind, so the plan has to be able to tell them apart.
-    from venue_seating import seated_table_ids_on, get_seating, spare_tables, seats_for
-    seated = seated_table_ids_on(db, club_id, day)
-    spare: dict[str, dict] = {}
-    # Games over the night's allocation, with no table until someone picks one.
-    # On the plan's key and on the printed sheet, because a plan that quietly
-    # omits a homeless game is worse than no plan: everything looks fine and
-    # two people turn up with nowhere to go.
-    unseated = 0
-    for n in nights:
-        if not n["night_id"]:
-            continue
-        row = db.get(VenueClubNight, n["night_id"])
-        seating = get_seating(db, club_id, n["night_id"], day)
-        if row is None or seating is None:
-            continue
-        unseated += max(0, seating.tables_needed - len(seats_for(db, seating.id)))
-        for table_id in spare_tables(db, club_id, row, day, seating):
-            spare[str(table_id)] = {"night_id": n["night_id"], "name": n["system"],
-                                    "color": n["color"],
-                                    "released": bool(seating.released)}
+    # Seated, spare and homeless in one pass — the same numbers the seating card
+    # uses, from the same source, so the plan's key and the printed sheet can't
+    # disagree with the screen. A plan that quietly omits a homeless game is
+    # worse than no plan: everything looks fine and two people turn up with
+    # nowhere to go.
+    from venue_seating import tonight
+    state = tonight(db, club_id, day)
+    seated = state["seated"]
+    spare = {str(k): v for k, v in state["spare"].items()}
+    unseated = state["unseated"]
 
     return {
         "date": day.isoformat(),

@@ -357,6 +357,16 @@ def generate(db: Session, club_id: int, night: VenueClubNight, day: date) -> dic
     return {"ok": True, "seated": len(seated), "unseated": len(unseated), **ctx}
 
 
+def resync_all_nights(db: Session, club_id: int) -> int:
+    """Re-lay every club night's future plans. For changes to the TABLES
+    themselves — retiring one, or redrawing the floor — which can invalidate
+    any night's plan rather than one night's."""
+    total = 0
+    for night in V.club_nights(db, club_id):
+        total += resync_night(db, club_id, night)
+    return total
+
+
 def spare_tables(db: Session, club_id: int, night: VenueClubNight, day: date,
                  seating: Optional[VenueSeating] = None) -> list[int]:
     """Tables held for this night that tonight's games don't need, and that the
@@ -432,15 +442,25 @@ def released_table_ids_on(db: Session, club_id: int, day: date) -> set[int]:
     return out
 
 
-def seated_table_ids_on(db: Session, club_id: int, day: date) -> dict[int, dict]:
-    """table_id -> the game sitting on it, for every club night meeting today.
+def tonight(db: Session, club_id: int, day: date) -> dict:
+    """What every club night meeting today has done with its tables.
 
-    Powers the "required tonight" flag on the diary: a seated table is one the
-    club night is definitely using, as opposed to one it is merely holding.
+    One pass, three answers, because they all need the same expensive lookup —
+    each night's pairings — and computing them separately is how the diary and
+    the printed sheet ended up disagreeing about the same room:
+
+        seated    table_id -> the game sitting on it
+        spare     table_id -> held for a night that doesn't need it
+        unseated  games with no table, COUNTED FROM THE GAMES
+
+    That last one is the fix for a real bug. It used to be `tables_needed`
+    minus the number of seat rows, which counts a seat pointing at a deleted
+    pairing as if it were a real one — so after a drop-out the plan's key said
+    everything was fine while the seating card was asking for six decisions.
     """
     running = {n["night_id"]: n for n in V.club_nights_on(db, club_id, day) if n["night_id"]}
     if not running:
-        return {}
+        return {"seated": {}, "spare": {}, "unseated": 0}
 
     rows = db.exec(
         select(VenueSeating)
@@ -448,19 +468,28 @@ def seated_table_ids_on(db: Session, club_id: int, day: date) -> dict[int, dict]
         .where(VenueSeating.on_date == day)
     ).all()
 
-    out: dict[int, dict] = {}
+    seated: dict[int, dict] = {}
+    spare: dict[int, dict] = {}
+    unseated = 0
+
     for seating in rows:
         if seating.club_night_id not in running:
             continue
         night = running[seating.club_night_id]
-        n = db.get(VenueClubNight, seating.club_night_id)
-        ctx = pairing_context(db, club_id, n, day) if n else {"games": []}
+        row = db.get(VenueClubNight, seating.club_night_id)
+        if row is None:
+            continue
+
+        ctx = pairing_context(db, club_id, row, day)
         games = {g["pairing_id"]: g for g in ctx["games"]}
+        placed: set[int] = set()
+
         for s in seats_for(db, seating.id):
             g = games.get(s.pairing_id)
             if g is None:
-                continue
-            out[s.table_id] = {
+                continue                       # a seat left over from a deleted game
+            placed.add(s.pairing_id)
+            seated[s.table_id] = {
                 "night_id": seating.club_night_id,
                 "night": night["system"],
                 "system": night["system"],
@@ -475,14 +504,33 @@ def seated_table_ids_on(db: Session, club_id: int, day: date) -> dict[int, dict]
                 "pairing_id": g["pairing_id"],
                 "locked": bool(s.locked),
             }
-    return out
+
+        unseated += len(games) - len(placed)
+
+        for table_id in spare_tables(db, club_id, row, day, seating):
+            spare[table_id] = {"night_id": seating.club_night_id, "name": night["system"],
+                               "color": night["color"], "released": bool(seating.released)}
+
+    return {"seated": seated, "spare": spare, "unseated": unseated}
+
+
+def seated_table_ids_on(db: Session, club_id: int, day: date) -> dict[int, dict]:
+    """table_id -> the game sitting on it. See tonight()."""
+    return tonight(db, club_id, day)["seated"]
 
 
 def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
     """Everything one night's seating screen needs, in one call."""
     ctx = pairing_context(db, club_id, night, day)
     seating = get_seating(db, club_id, night.id, day)
-    tables = {t.id: t for t in V.active_tables(db, club_id)}
+    # ALL tables, not just active ones. A table retired under a seated game
+    # still has to resolve to a name, or the card lists a game with a blank
+    # table beside it until someone re-checks.
+    from models import VenueTable
+
+    tables = {
+        t.id: t for t in db.exec(select(VenueTable).where(VenueTable.club_id == club_id)).all()
+    }
     held_ids = set(V.night_tables(db, club_id).get(night.id, {}).get("reserved", []))
     held = sorted(held_ids)
 
@@ -549,25 +597,36 @@ def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
     }
 
 
-def lay_out_on_publish(db: Session, club_id: int, system: str, week: str) -> Optional[dict]:
-    """Lay the room out the moment a week's pairings are published.
+def resync(db: Session, club_id: int, system: str, week: str,
+           create: bool = False) -> Optional[dict]:
+    """Bring the floor back into step with the pairings for one week.
 
-    Venue staff shouldn't have to know that pairings happened, let alone press
-    a button about it. The pairings ARE the answer to "how many tables does
-    tonight need", so publishing them is exactly when the room can be laid out,
-    and the diary should simply be right when someone opens it.
+    THE FLOOR IS NOT COMPUTED ONCE. Publishing lays it out, but pairings keep
+    moving afterwards — someone drops out and their opponent gets a bye, two
+    players swap, an admin regenerates to fix a bad match — and every one of
+    those paths deletes pairing rows and writes new ones. Seats key on
+    pairing_id, so without this they end up pointing at pairings that no longer
+    exist: the table stays occupied by a game nobody is playing, and the venue
+    can't sell it. Call this from anywhere that changes a published week's
+    pairings.
+
+    `create` separates the two callers. Publishing lays the floor out for the
+    first time and passes True. Everything afterwards passes False, which keeps
+    an existing plan in step but never invents one — a club that generates
+    pairings on Monday and publishes on Tuesday shouldn't get a diary full of
+    provisional games in between.
 
     Idempotent by construction: generate() keeps every seat that's still valid
-    and moves nobody, so publishing twice — or publishing, editing, publishing
-    again — adds the new games and leaves the rest alone.
+    and moves nobody, so calling it twice adds the new games and leaves the rest
+    alone.
 
     `week` is the pairing key ("02/09/2026") and also the date the night runs,
     which is what makes this cheap: no calendar arithmetic, just the night whose
     system matches.
 
-    Never raises. A venue-side convenience must not be able to fail a publish —
-    that would be an admin unable to release pairings because a floor plan is
-    misconfigured.
+    Never raises. A venue-side convenience must not be able to fail a publish or
+    a drop-out — that would be a player unable to withdraw because a floor plan
+    is misconfigured.
     """
     try:
         sc = db.exec(select(SystemConfig).where(SystemConfig.legacy_system_name == system)).first()
@@ -584,7 +643,56 @@ def lay_out_on_publish(db: Session, club_id: int, system: str, week: str) -> Opt
         if not any(n["night_id"] == night.id for n in V.club_nights_on(db, club_id, day)):
             return None
 
+        if not create and get_seating(db, club_id, night.id, day) is None:
+            return None
+
         result = generate(db, club_id, night, day)
         return result if result.get("ok") else None
     except Exception:
         return None
+
+
+def lay_out_on_publish(db: Session, club_id: int, system: str, week: str) -> Optional[dict]:
+    """Publishing is the first time the floor gets laid out. See resync."""
+    return resync(db, club_id, system, week, create=True)
+
+
+def resync_night(db: Session, club_id: int, night: VenueClubNight,
+                 today: Optional[date] = None) -> int:
+    """Re-lay every future plan for one club night, and bin the ones whose date
+    it no longer meets.
+
+    For changes on the VENUE's side rather than the pairings' — un-holding a
+    table, retiring one, moving the night from Wednesday to Friday. Without
+    this, un-holding a table a game is sitting on left the game there AND
+    offered the table to the public: two parties with a claim on one board.
+
+    Past dates are left exactly as they were. A finished night's plan is a
+    record of what happened, and re-laying it against today's tables would
+    quietly rewrite history.
+    """
+    today = today or V.club_now(db, club_id).date()
+    rows = db.exec(
+        select(VenueSeating)
+        .where(VenueSeating.club_id == club_id)
+        .where(VenueSeating.club_night_id == night.id)
+        .where(VenueSeating.on_date >= today)
+    ).all()
+
+    touched = 0
+    for seating in rows:
+        runs = any(n["night_id"] == night.id
+                   for n in V.club_nights_on(db, club_id, seating.on_date))
+        if not runs:
+            # The night moved. Its plan for a day it no longer meets is not a
+            # record of anything — it never happened.
+            for seat in seats_for(db, seating.id):
+                db.delete(seat)
+            db.delete(seating)
+            touched += 1
+            continue
+        generate(db, club_id, night, seating.on_date)
+        touched += 1
+    if touched:
+        db.commit()
+    return touched
