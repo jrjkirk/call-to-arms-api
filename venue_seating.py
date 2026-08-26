@@ -157,19 +157,29 @@ def _reading_order(t: VenueTable) -> tuple:
 
 
 def candidate_tables(db: Session, club_id: int, night: VenueClubNight, day: date,
-                     window: tuple[int, int]) -> list[VenueTable]:
+                     window: tuple[int, int],
+                     allocated_only: bool = False) -> list[VenueTable]:
     """Tables this night may seat games on, best first.
 
-    Three tiers, and the order is the whole point of the feature:
+    Three tiers:
 
-      1. HELD for this night. The venue already decided these are its tables.
-      2. Preferred for it — right size, right part of the room.
-      3. Anything else that's free, because a night that outgrows its plan
-         should spill onto real tables rather than report a shortfall while
-         eight boards sit empty.
+      1. ALLOCATED — held for this night. The venue already decided these are
+         its tables, so seating a game on one asks nobody's permission.
+      2. Preferred for it — right size, right part of the room, but NOT held:
+         the public can still book these.
+      3. Anything else that's free.
 
-    Tables another night has held on the same day never appear: two club nights
-    on one evening must not be handed the same table.
+    `allocated_only` is the automatic pool, and the distinction is the whole
+    point. A club night helping itself to a table nobody allocated to it is the
+    venue giving away stock it might have sold, or quietly taking a table
+    another night wanted — a decision with money attached, and not one an
+    algorithm should make at half past six on its own. So generate() stops at
+    tier 1; the games left over are reported, and a venue admin puts each one
+    somewhere deliberately. Tiers 2 and 3 exist only to fill that picker, best
+    option first.
+
+    Tables another night has held on the same day never appear at all: two club
+    nights on one evening must not be handed the same table.
     """
     tables = V.active_tables(db, club_id)
     by_night = V.night_tables(db, club_id)
@@ -201,6 +211,8 @@ def candidate_tables(db: Session, club_id: int, night: VenueClubNight, day: date
         return 2
 
     out = [t for t in tables if t.id not in others and t.id not in taken]
+    if allocated_only:
+        out = [t for t in out if t.id in held]
     out.sort(key=lambda t: (tier(t),) + _reading_order(t))
     return out
 
@@ -275,13 +287,20 @@ def generate(db: Session, club_id: int, night: VenueClubNight, day: date) -> dic
 
     Which means the common case — one extra game — adds one table and touches
     nothing else.
+
+    It seats games ONLY on tables allocated to this night. Eleven games and ten
+    held tables leaves one game unseated, waiting for a venue admin to put it
+    somewhere; it does not help itself to table eleven. That table might be
+    sold tonight, and only a person can weigh that.
     """
     ctx = pairing_context(db, club_id, night, day)
     if not ctx["measurable"]:
         return {"ok": False, "reason": "no_system", **ctx}
 
     window = night_window(db, club_id, night, day)
-    candidates = candidate_tables(db, club_id, night, day, window)
+    # ONLY the tables allocated to this night. A game with nowhere to go inside
+    # that allocation is left unseated on purpose — see candidate_tables.
+    candidates = candidate_tables(db, club_id, night, day, window, allocated_only=True)
     by_id = {t.id: t for t in candidates}
 
     seating = get_seating(db, club_id, night.id, day)
@@ -464,9 +483,15 @@ def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
     ctx = pairing_context(db, club_id, night, day)
     seating = get_seating(db, club_id, night.id, day)
     tables = {t.id: t for t in V.active_tables(db, club_id)}
-    held = sorted(V.night_tables(db, club_id).get(night.id, {}).get("reserved", []))
+    held_ids = set(V.night_tables(db, club_id).get(night.id, {}).get("reserved", []))
+    held = sorted(held_ids)
 
     seats = {s.pairing_id: s for s in seats_for(db, seating.id)} if seating else {}
+    by_pairing = {g["pairing_id"]: g for g in ctx["games"]}
+    taken_by = {
+        s.table_id: f'{by_pairing[s.pairing_id]["a"]} v {by_pairing[s.pairing_id]["b"]}'
+        for s in seats.values() if s.pairing_id in by_pairing
+    }
     rows = []
     for g in ctx["games"]:
         s = seats.get(g["pairing_id"])
@@ -496,14 +521,23 @@ def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
         "byes": ctx["byes"],
         "games": rows,
         "unseated": [r["pairing_id"] for r in rows if r["table_id"] is None],
+        # The exceptions, whole — these are the only games anyone has to do
+        # anything about, and the screen shows just these rather than all of
+        # them. Everything that landed on an allocated table is on the plan.
+        "needs_table": [r for r in rows if r["table_id"] is None],
         "spare_table_ids": spare,
         "spare_tables": [tables[i].name for i in spare if i in tables],
         "released": bool(seating and seating.released),
         "generated_at": seating.generated_at.isoformat() if seating else None,
-        # Every table staff can move a game onto, so the picker offers real
-        # choices rather than a free-text box.
+        # Every table staff can move a game onto, best first, and honest about
+        # what picking it costs: whether it's one of this night's own, and
+        # whether a game is already sitting there. Choosing an occupied table
+        # moves that game off it — a legitimate thing to want, and not
+        # something anyone should discover afterwards.
         "table_options": [
-            {"id": t.id, "name": t.name, "size": t.size_label}
+            {"id": t.id, "name": t.name, "size": t.size_label,
+             "allocated": t.id in held_ids,
+             "taken_by": taken_by.get(t.id)}
             for t in candidate_tables(db, club_id, night, day, window)
         ],
     }
