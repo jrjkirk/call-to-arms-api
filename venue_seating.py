@@ -534,11 +534,17 @@ def view(db: Session, club_id: int, night: VenueClubNight, day: date) -> dict:
         # whether a game is already sitting there. Choosing an occupied table
         # moves that game off it — a legitimate thing to want, and not
         # something anyone should discover afterwards.
+        # Sorted by NAME within each group, not by position. candidate_tables
+        # orders by where a table is, which is right for deciding what gets the
+        # next game and wrong for a human hunting "Table 23" in a list of forty.
         "table_options": [
             {"id": t.id, "name": t.name, "size": t.size_label,
              "allocated": t.id in held_ids,
              "taken_by": taken_by.get(t.id)}
-            for t in candidate_tables(db, club_id, night, day, window)
+            for t in sorted(
+                candidate_tables(db, club_id, night, day, window),
+                key=lambda t: (t.id not in held_ids, V.natural_key(t.name)),
+            )
         ],
     }
 

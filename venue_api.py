@@ -587,11 +587,10 @@ class TableBody(BaseModel):
 @router.get("/admin/tables")
 def list_tables(ctx=Depends(_require_venue_admin), db: Session = Depends(get_session)):
     _, club_id = ctx
-    rows = db.exec(
-        select(VenueTable)
-        .where(VenueTable.club_id == club_id)
-        .order_by(VenueTable.sort_order, VenueTable.id)
-    ).all()
+    rows = sorted(
+        db.exec(select(VenueTable).where(VenueTable.club_id == club_id)).all(),
+        key=lambda t: (V.natural_key(t.name), t.sort_order, t.id),
+    )
     return [
         {"id": t.id, "name": t.name, "size_label": t.size_label, "seats": t.seats,
          "active": t.active, "sort_order": t.sort_order, "notes": t.notes}
@@ -698,11 +697,12 @@ def admin_day(
         .where(VenueBooking.booking_date == day)
         .order_by(VenueBooking.start_time)
     ).all()
-    tables = db.exec(
-        select(VenueTable)
-        .where(VenueTable.club_id == club_id)
-        .order_by(VenueTable.sort_order, VenueTable.id)
-    ).all()
+    # Includes inactive tables, so the day's history still names them, but in
+    # the same name order as everywhere else — see V.natural_key.
+    tables = sorted(
+        db.exec(select(VenueTable).where(VenueTable.club_id == club_id)).all(),
+        key=lambda t: (V.natural_key(t.name), t.sort_order, t.id),
+    )
 
     return {
         **overview,
@@ -1028,11 +1028,12 @@ def get_club_nights(ctx=Depends(_require_venue_admin), db: Session = Depends(get
         if night.system_id is None:
             out.append(_night_payload(db, club_id, night))
 
-    tables = db.exec(
-        select(VenueTable)
-        .where(VenueTable.club_id == club_id)
-        .order_by(VenueTable.sort_order, VenueTable.id)
-    ).all()
+    # Includes inactive tables, so the day's history still names them, but in
+    # the same name order as everywhere else — see V.natural_key.
+    tables = sorted(
+        db.exec(select(VenueTable).where(VenueTable.club_id == club_id)).all(),
+        key=lambda t: (V.natural_key(t.name), t.sort_order, t.id),
+    )
     return {
         "club_nights": out,
         "tables": [

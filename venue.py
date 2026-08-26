@@ -16,6 +16,7 @@ timezone, matching ClubEvent.start_time and TableBookingConfig.cutoff_time.
 They are only converted to real datetimes at the edges (lead-time checks,
 notification rendering). Minutes-since-midnight is the working unit inside.
 """
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -293,12 +294,30 @@ def bookings_on(db: Session, club_id: int, day: date) -> list[VenueBooking]:
     ).all()
 
 
+def natural_key(name: Optional[str]) -> tuple:
+    """Sort "Table 2" before "Table 10", the way a person reading a list does.
+
+    sort_order is insertion order, and it stops matching the names the first
+    time anyone duplicates or renames a table — which is why the pickers were
+    running 8, 15, 16, 13, 14. Names are what staff actually search by, so the
+    NAME decides, split into text and number runs so the numbers compare as
+    numbers.
+
+    Digits sort before letters within a run so "Table 3" precedes "Table 3a",
+    and the whole thing is case-insensitive.
+    """
+    parts = re.split(r"(\d+)", (name or "").strip().lower())
+    return tuple((1, int(p)) if p.isdigit() else (0, p) for p in parts if p != "")
+
+
 def active_tables(db: Session, club_id: int) -> list[VenueTable]:
-    return db.exec(
+    rows = db.exec(
         select(VenueTable)
         .where(VenueTable.club_id == club_id, VenueTable.active == True)
-        .order_by(VenueTable.sort_order, VenueTable.id)
     ).all()
+    # Sorted here rather than in SQL: Postgres has no natural sort, and a club
+    # has tens of tables, not thousands.
+    return sorted(rows, key=lambda t: (natural_key(t.name), t.sort_order, t.id))
 
 
 def free_tables_for(
@@ -360,9 +379,9 @@ def free_tables_for(
     if system_id is not None:
         if preferred_ids is None:
             preferred_ids = set(tables_for_system(db, club_id, system_id))
-        out.sort(key=lambda t: (t.id not in preferred_ids, t.seats, t.sort_order, t.id))
+        out.sort(key=lambda t: (t.id not in preferred_ids, t.seats, natural_key(t.name), t.id))
     else:
-        out.sort(key=lambda t: (t.seats, t.sort_order, t.id))
+        out.sort(key=lambda t: (t.seats, natural_key(t.name), t.id))
     return out
 
 
@@ -1292,12 +1311,17 @@ def autoplace(db: Session, club_id: int, room) -> int:
     """
     from models import VenueTable
 
-    unplaced = db.exec(
-        select(VenueTable)
-        .where(VenueTable.club_id == club_id)
-        .where(VenueTable.room_id.is_(None))
-        .order_by(VenueTable.sort_order, VenueTable.id)
-    ).all()
+    # Placed in NAME order, so an auto-laid-out room reads 1, 2, 3 across the
+    # front row rather than in whatever order the rows happen to have been
+    # inserted.
+    unplaced = sorted(
+        db.exec(
+            select(VenueTable)
+            .where(VenueTable.club_id == club_id)
+            .where(VenueTable.room_id.is_(None))
+        ).all(),
+        key=lambda t: (natural_key(t.name), t.sort_order, t.id),
+    )
     if not unplaced:
         return 0
 
@@ -1350,11 +1374,12 @@ def layout(db: Session, club_id: int) -> dict:
     from models import VenueFeature, VenueTable
 
     rooms = rooms_for(db, club_id)
-    tables = db.exec(
-        select(VenueTable)
-        .where(VenueTable.club_id == club_id)
-        .order_by(VenueTable.sort_order, VenueTable.id)
-    ).all()
+    # Includes inactive tables — the editor still draws them — but ordered the
+    # way every other list is, so "Table 10" is never between 1 and 2.
+    tables = sorted(
+        db.exec(select(VenueTable).where(VenueTable.club_id == club_id)).all(),
+        key=lambda t: (natural_key(t.name), t.sort_order, t.id),
+    )
     features = db.exec(
         select(VenueFeature).where(VenueFeature.club_id == club_id)
     ).all()
