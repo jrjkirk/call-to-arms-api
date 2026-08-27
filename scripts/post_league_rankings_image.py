@@ -80,6 +80,9 @@ def main() -> None:
             files={"file": ("league_rankings.png", buf, "image/png")},
             timeout=30,
         )
+        # Checked, not just printed. Without this a 404 from a deleted webhook
+        # logged "Posted league rankings (404)." and the job went green.
+        resp.raise_for_status()
         print(f"[{slug}] Posted league rankings ({resp.status_code}).")
 
 

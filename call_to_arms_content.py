@@ -101,12 +101,33 @@ Complete the online form if you are coming this Wednesday {session_date}. The re
 }
 
 
+# What a system with no bespoke copy starts with. "Degrades gracefully to an
+# empty string" was not graceful: the admin screen showed an empty message box,
+# and a club that enabled the schedule without typing one posted nothing at all
+# — Discord rejects an empty message. A plain, working call is a far better
+# starting point than a blank page, and it still reads as something to edit.
+GENERIC_TEMPLATE = (
+    "\u2694\ufe0f **{system} \u2014 Call to Arms** \u2694\ufe0f\n\n"
+    "Next session: **{session_date}**\n\n"
+    "Sign up here: {signup_url}"
+)
+
+
 def default_template(system: str) -> str:
-    # System copy is code-owned content (like the systems/ faction registry),
-    # not catalogue data. A system with no entry here degrades gracefully to
-    # an empty default template (no crash); adding a new system means adding
-    # its DEFAULT_TEMPLATES / SCENARIO_DATA entry above.
-    return DEFAULT_TEMPLATES.get(system, "")
+    """The starting message for a system, before any club edits it.
+
+    System copy is code-owned content (like the systems/ faction registry),
+    not catalogue data — a bespoke entry in DEFAULT_TEMPLATES is still the
+    better answer for a system anyone actually plays. This is the floor, so a
+    newly-added system is usable on day one instead of silently posting
+    nothing.
+    """
+    bespoke = DEFAULT_TEMPLATES.get(system)
+    if bespoke:
+        return bespoke
+    # {system} isn't a render() token — it's fixed at this point and would only
+    # be one more thing for a club to break by editing.
+    return GENERIC_TEMPLATE.replace("{system}", system)
 
 
 def available_tokens(system: str, has_missions: Optional[bool] = None) -> list[str]:
@@ -209,25 +230,43 @@ def _post_to_discord(
     payload: dict = {"content": content}
     if embed_image_url:
         payload["embeds"] = [{"image": {"url": embed_image_url}}]
+
     if image_path:
         try:
             with open(image_path, "rb") as f:
                 files = {"file": (os.path.basename(image_path), f, "image/png")}
-                httpx.post(
+                resp = httpx.post(
                     webhook_url,
                     data={"payload_json": json.dumps(payload)},
                     files=files,
                     timeout=10,
                 )
+            resp.raise_for_status()
             print(f"Posted call-to-arms with image ({os.path.basename(image_path)}).")
             return
         except Exception as e:
+            # Only the IMAGE attempt falls back. If Discord is refusing the
+            # message itself the text attempt will refuse it too, and say so.
             print(f"Failed to post with image, falling back to text: {e}")
-    try:
-        httpx.post(webhook_url, json=payload, timeout=10)
-        print("Posted call-to-arms (text).")
-    except Exception as e:
-        print(f"Failed to post call-to-arms: {e}")
+
+    # RAISES on failure, deliberately. This used to swallow everything and
+    # print "Posted call-to-arms (text)." whatever came back — httpx doesn't
+    # raise on 4xx — so a deleted webhook, a rate limit or an empty message
+    # all reported success. The scheduler then wrote last_week and that
+    # session's call-to-arms was never sent and never retried, with nothing
+    # anywhere saying so. The caller decides what to do; it must be told.
+    resp = httpx.post(webhook_url, json=payload, timeout=10)
+    if resp.status_code >= 400:
+        detail = ""
+        try:
+            detail = (resp.json() or {}).get("message", "")
+        except Exception:
+            detail = (resp.text or "")[:200]
+        raise RuntimeError(
+            f"Discord rejected the call-to-arms post ({resp.status_code})"
+            + (f": {detail}" if detail else "")
+        )
+    print("Posted call-to-arms (text).")
 
 
 def post(
