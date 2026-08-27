@@ -3,13 +3,17 @@ on:
   workflow_dispatch:
     inputs:
       system:
-        description: 'System'
+        # A free-text string, NOT a choice list. It was a choice of the three
+        # original systems, so dispatching for any system added later — Age of
+        # Sigmar, Warhammer 40,000, Middle Earth — was rejected by GitHub with
+        # a 422 and the admin page just said "Post to Discord" had failed.
+        #
+        # The value has to match SystemConfig.legacy_system_name exactly. A
+        # dropdown that has to be edited every time a club adds a game is a
+        # dropdown that will be wrong again; the app is the caller that matters
+        # and it sends the name straight from the catalogue.
+        description: 'System — exactly as it appears in the catalogue, e.g. The Old World'
         required: true
-        type: choice
-        options:
-          - 'The Old World'
-          - 'The Horus Heresy'
-          - 'Kill Team'
       week:
         description: 'Week (DD/MM/YYYY)'
         required: true

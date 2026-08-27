@@ -1445,7 +1445,20 @@ def pairings_post_discord(
         return {"posted": False, "reason": "GitHub API request failed"}
 
     if resp.status_code != 204:
-        return {"posted": False, "reason": f"GitHub API returned {resp.status_code}"}
+        # GitHub puts the actual reason in the body — "Provided value ... is not
+        # a valid option", "Required input not provided", "No ref found". The
+        # bare status code sent an admin to the logs to find out that a system
+        # name wasn't in a dropdown, so pass the message through.
+        detail = ""
+        try:
+            detail = (resp.json() or {}).get("message", "")
+        except Exception:
+            pass
+        return {
+            "posted": False,
+            "reason": f"GitHub API returned {resp.status_code}"
+                      + (f": {detail}" if detail else ""),
+        }
 
     return {"posted": True, "queued": True}
 
