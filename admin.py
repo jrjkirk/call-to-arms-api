@@ -8,6 +8,7 @@ Permission model:
 import os
 import re
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
 import httpx
@@ -31,7 +32,7 @@ from auth import (
     valid_scopes,
 )
 import discord_guild
-from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id
+from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -62,11 +63,16 @@ from signups import (
     _validate_week,
     signup_cap,
 )
-from week_logic import _DAY_NAME_TO_INT
+from week_logic import _DAY_NAME_TO_INT, next_session_date
 
 GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "")
 GH_REPO = os.environ.get("GH_REPO", "jrjkirk/call-to-arms-api")
 GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-image.yml"
+
+
+# Where the sign-up link in a call-to-arms post points. Same env var the
+# scheduled job reads, so a manual post carries the same URL.
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -950,6 +956,109 @@ def post_call_to_arms_settings(
             _upsert_setting(db, user.club_id, key, stored)
     db.commit()
     return {"ok": True}
+
+
+class CallToArmsPostNowBody(BaseModel):
+    system: str
+
+
+@router.post("/call-to-arms-post-now")
+def call_to_arms_post_now(
+    body: CallToArmsPostNowBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Post this system's call-to-arms message now, whatever the schedule says.
+
+    A temporary override and a test button: for checking a template change
+    renders the way you meant, or shouting about a session the schedule is
+    about to be too late for.
+
+    WRITES NOTHING. It reads `enabled`, `days_before`, `time` and `last_week`
+    not at all, and changes none of them, so the schedule is bit-for-bit as it
+    was and keeps running exactly as before — including for this session. If
+    that means the same call goes out twice this week, that's the intended
+    behaviour of an override, not an accident: whoever pressed the button knew
+    the scheduled one was still coming.
+
+    Everything about the message itself (template, image, mission pool, session
+    date) is resolved exactly as scripts/run_call_to_arms_check.py resolves it,
+    so what goes out is what would have gone out.
+    """
+    _require_system_scope(body.system, user, db)
+    _require_system_enabled(db, user.club_id, body.system)
+
+    config = _get_system_config(db, body.system)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Unknown system.")
+
+    cs = db.exec(
+        scoped(ClubSystem, user.club_id).where(ClubSystem.system_id == config.id)
+    ).first()
+    if cs is None or not cs.session_day:
+        raise HTTPException(
+            status_code=422,
+            detail="This system has no session day set, so there's no session to call people to.",
+        )
+
+    webhook_url = resolve_webhook_url(db, user.club_id, "call_to_arms", config.id)
+    if not webhook_url:
+        raise HTTPException(
+            status_code=422,
+            detail="No call-to-arms webhook set for this system. Add one in the Discord panel first.",
+        )
+
+    # UK time, exactly as scripts/run_call_to_arms_check.py works it out. The
+    # manual post and the scheduled one must agree on which session is next, or
+    # posting by hand near midnight could target a different week to the cron.
+    today = datetime.now(ZoneInfo("Europe/London")).date()
+    try:
+        next_session = next_session_date(
+            cs.session_day, cs.session_cadence, cs.cadence_anchor, today,
+        )
+    except AssertionError:
+        raise HTTPException(
+            status_code=422,
+            detail="This system runs fortnightly or monthly but has no anchor date, "
+                   "so the next session can't be worked out.",
+        )
+
+    slug = _slug(body.system)
+    template = (
+        _get_setting(db, user.club_id, f"call_to_arms_{slug}_template")
+        or cta_content.default_template(body.system)
+    )
+    image_mode, image_url = cta_content.parse_image_setting(
+        _get_setting(db, user.club_id, f"call_to_arms_{slug}_image")
+    )
+    missions = None
+    if cs.missions_enabled:
+        missions = [
+            {"name": m.name, "secondary_objectives": m.secondary_objectives,
+             "image_url": m.image_url}
+            for m in db.exec(
+                select(Mission)
+                .where(Mission.club_id == user.club_id)
+                .where(Mission.system_id == config.id)
+                .where(Mission.active == True)
+            ).all()
+        ]
+
+    try:
+        cta_content.post(
+            webhook_url, template, body.system, next_session, APP_PUBLIC_URL,
+            image_mode=image_mode, image_url=image_url, missions=missions,
+        )
+    except Exception as e:
+        capture(e, kind="call_to_arms_manual_post", system=body.system)
+        raise HTTPException(
+            status_code=502,
+            detail="Discord wouldn't take the message. Check the webhook is still valid.",
+        )
+
+    # Deliberately no _upsert_setting here: see the docstring. The schedule is
+    # untouched, so the automatic post still goes out on its own day.
+    return {"ok": True, "session_date": next_session.strftime("%d/%m/%Y")}
 
 
 class PairingsWeekBody(BaseModel):
