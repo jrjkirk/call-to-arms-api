@@ -148,7 +148,16 @@ def main() -> None:
                         except Exception as exc:
                             print(f"[{system} club={club_id}] seating skipped — {exc}")
 
-                        posted = post_pairings_image_for(db, system, target_week, club_id=club_id)
+                        # Same switch the manual button obeys, so turning
+                        # pairings posts off silences the automation too rather
+                        # than only the button.
+                        from database import posting_enabled
+
+                        if posting_enabled(db, club_id, system, "pairings"):
+                            posted = post_pairings_image_for(db, system, target_week, club_id=club_id)
+                        else:
+                            posted = False
+                            print(f"[{system} club={club_id}] pairings post switched off, not posting")
                         print(f"[{system} club={club_id}] DONE — pairings generated+published for {target_week}, image_posted={posted}")
 
                     except Exception as exc:

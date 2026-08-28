@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
-from database import active_player_id_for, get_session, sibling_player_ids, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
+from database import active_player_id_for, posting_enabled, get_session, sibling_player_ids, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
 import discord_guild
 from experience import summary as experience_summary
@@ -502,6 +502,11 @@ def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
     system_id = system_config.id if system_config else None
     url = resolve_webhook_url(db, club_id, "signup", system_id)
     if not url:
+        return
+    # A club still setting up can silence its channel without unpicking the
+    # webhook it just pasted in. Defaults on, so nothing changes for anyone
+    # who has not deliberately turned it off.
+    if not posting_enabled(db, club_id, system, "signup"):
         return
     try:
         resp = httpx.post(

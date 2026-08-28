@@ -32,7 +32,7 @@ from auth import (
     valid_scopes,
 )
 import discord_guild
-from database import scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url
+from database import scoped, posting_enabled, posting_key, POSTING_KINDS, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -964,6 +964,43 @@ def post_call_to_arms_settings(
     return {"ok": True}
 
 
+class PostSwitchBody(BaseModel):
+    system: str
+    kind: str
+    enabled: bool
+
+
+@router.get("/post-switches")
+def get_post_switches(
+    system: str,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Which Discord posts are switched on for this system. All default on."""
+    _require_system_scope(system, user, db)
+    return {k: posting_enabled(db, user.club_id, system, k) for k in POSTING_KINDS}
+
+
+@router.post("/post-switches")
+def set_post_switch(
+    body: PostSwitchBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Turn one kind of Discord post on or off for one system.
+
+    Separate from the webhook itself on purpose: turning posts off keeps the
+    URL, so a club going live does not have to go and find it again.
+    """
+    _require_system_scope(body.system, user, db)
+    if body.kind not in POSTING_KINDS:
+        raise HTTPException(status_code=422, detail=f"Unknown post kind: {body.kind}")
+    _upsert_setting(db, user.club_id, posting_key(body.kind, body.system),
+                    "true" if body.enabled else "false")
+    db.commit()
+    return {"ok": True, body.kind: body.enabled}
+
+
 class CallToArmsPostNowBody(BaseModel):
     system: str
 
@@ -1432,6 +1469,11 @@ def pairings_post_discord(
     install takes roughly 30-60 seconds to run in CI.
     """
     _require_system_scope(body.system, user, db)
+
+    if not posting_enabled(db, user.club_id, body.system, "pairings"):
+        return {"posted": False,
+                "reason": "Pairings posts are switched off for this system. "
+                          "Turn them back on above the pairings grid."}
 
     if not GH_DISPATCH_TOKEN:
         return {"posted": False, "reason": "no dispatch token configured"}

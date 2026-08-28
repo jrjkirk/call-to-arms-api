@@ -565,6 +565,29 @@ def system_setting_slug(system: str) -> str:
     return system.replace(" ", "").replace("'", "")
 
 
+# Which Discord posts a club has switched off for one game system.
+#
+# A club setting up does not want its channel filling with test signups and
+# practice pairings while it works out what it is doing, and the alternative
+# was deleting the webhook and pasting it back later. These default to ON, so
+# every existing club is unaffected and a new one turns things off deliberately.
+#
+# Deliberately NOT the same thing as having a webhook: the webhook is where a
+# post goes, this is whether it goes at all. Turning posts off keeps the
+# webhook so nobody has to find it again.
+POSTING_KINDS: tuple[str, ...] = ("signup", "pairings")
+
+
+def posting_key(kind: str, system: str) -> str:
+    return f"post_{kind}_{system_setting_slug(system)}_enabled"
+
+
+def posting_enabled(db: Session, club_id: int, system: str, kind: str) -> bool:
+    """Whether this club posts `kind` to Discord for `system`. Defaults True."""
+    raw = get_setting(db, club_id, posting_key(kind, system), "true")
+    return (raw or "true").strip().lower() != "false"
+
+
 def get_setting(db: Session, club_id: int, key: str, default: Optional[str] = None) -> Optional[str]:
     row = db.get(ClubSetting, (club_id, key))
     return row.value if row is not None else default
