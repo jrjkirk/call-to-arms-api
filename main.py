@@ -26,7 +26,8 @@ from services import (
     ACHIEVEMENT_DESCRIPTIONS,
 )
 from auth import router as auth_router, require_user, current_user, active_club_id
-from signups import router as signups_router, CANONICAL_VIBES, _get_system_config, signup_cap
+from signups import (router as signups_router, CANONICAL_VIBES, _get_system_config,
+                     signup_cap, normalise_vibe, normalise_vibes)
 from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
 from analytics import router as analytics_router
@@ -148,7 +149,8 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
         default_vibe = club_system.default_vibe or (vibe_options[0] if vibe_options else None)
     # Only surface canonical vibes — drops any stale/removed value (e.g. the
     # retired "Escalation") still lingering in catalogue data.
-    vibe_options = [v for v in (vibe_options or []) if v in CANONICAL_VIBES]
+    vibe_options = [v for v in normalise_vibes(vibe_options) if v in CANONICAL_VIBES]
+    default_vibe = normalise_vibe(default_vibe)
     if default_vibe not in vibe_options:
         default_vibe = vibe_options[0] if vibe_options else None
     return {
@@ -885,11 +887,15 @@ def _public_vibe_display(a_vibe, b_vibe):
     bv_l = bv.lower()
     if av_l == "intro" or bv_l == "intro":
         return "Intro"
-    if av_l == "either" and bv_l == "either":
-        return "Either"
-    if av_l == "either" and bv:
+    # "Open" was "Either" before 2026-08-28 and old signups still say so, so a
+    # pairing from an archived week resolves the same way it always did.
+    a_open = av_l in ("open", "either")
+    b_open = bv_l in ("open", "either")
+    if a_open and b_open:
+        return "Open"
+    if a_open and bv:
         return bv
-    if bv_l == "either" and av:
+    if b_open and av:
         return av
     return av or bv or None
 

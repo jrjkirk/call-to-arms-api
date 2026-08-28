@@ -42,14 +42,40 @@ EXPERIENCE_OPTIONS = {"New", "Some", "Experienced", "Veteran"}
 # seed/seed_systems_config.py can cross-check that the original seed matched
 # these values; safe to delete once that historical script is retired.
 SYSTEMS = set(SYSTEM_RULES)
-TOW_VIBES = {"Casual", "Competitive", "Intro", "Either"}
+TOW_VIBES = {"Casual", "Competitive", "Intro", "Open"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}
 
 # Platform-level canonical vibe palette. Per-club vibe configuration
 # (ClubSystem.vibe_options) is chosen from this fixed set — "Intro" (drives
 # the pairing intro pre-pass) and "Standard" (baseline) are protected members.
-CANONICAL_VIBES = ["Casual", "Competitive", "Standard", "Intro", "Either"]
+# "Open" was called "Either" until 2026-08-28. Renamed because it has to read
+# on its own on the signup form — "Either" answers a question the label doesn't
+# ask. The stored value changed with it (see migrations/rename_either_to_open.py),
+# but 200-odd historical signups carried the old string, so every read path
+# normalises rather than trusting the data to be clean. Keep OLD_VIBE_ALIASES
+# even after the migration: it costs nothing and a missed row would otherwise
+# silently stop being treated as flexible by the matcher.
+OLD_VIBE_ALIASES = {"either": "Open"}
+
+CANONICAL_VIBES = ["Casual", "Competitive", "Standard", "Intro", "Open"]
+
+
+def normalise_vibe(value):
+    """Map a stored vibe onto its current name. None and unknown pass through."""
+    if not value:
+        return value
+    return OLD_VIBE_ALIASES.get(value.strip().lower(), value)
+
+
+def normalise_vibes(values):
+    """Same, for a list — de-duplicated, order preserved."""
+    out = []
+    for v in values or []:
+        n = normalise_vibe(v)
+        if n not in out:
+            out.append(n)
+    return out
 
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
 
@@ -125,7 +151,8 @@ def _effective_vibe_config(db: Session, club_id: int, config: SystemConfig) -> t
         options, default = config.vibe_options, config.default_vibe
     # Only canonical vibes — drops any stale/removed value (e.g. the retired
     # "Escalation") that may still linger in catalogue data.
-    options = [v for v in (options or []) if v in CANONICAL_VIBES]
+    options = [v for v in normalise_vibes(options) if v in CANONICAL_VIBES]
+    default = normalise_vibe(default)
     if default not in options:
         default = options[0] if options else None
     return options, default

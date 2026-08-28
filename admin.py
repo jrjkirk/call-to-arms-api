@@ -55,6 +55,8 @@ from systems import factions_for, icon_folder_for
 from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
     CANONICAL_VIBES,
+    normalise_vibe,
+    normalise_vibes,
     _discord_gate_mode,
     EXPERIENCE_OPTIONS,
     _effective_vibe_config,
@@ -635,11 +637,15 @@ def _public_vibe_display(a_vibe, b_vibe):
     bv_l = bv.lower()
     if av_l == "intro" or bv_l == "intro":
         return "Intro"
-    if av_l == "either" and bv_l == "either":
-        return "Either"
-    if av_l == "either" and bv:
+    # "Open" was "Either" before 2026-08-28 and old signups still say so, so a
+    # pairing from an archived week resolves the same way it always did.
+    a_open = av_l in ("open", "either")
+    b_open = bv_l in ("open", "either")
+    if a_open and b_open:
+        return "Open"
+    if a_open and bv:
         return bv
-    if bv_l == "either" and av:
+    if b_open and av:
         return av
     return av or bv or None
 
@@ -2912,6 +2918,7 @@ def update_club_system_schedule(
     # canonical palette and stores as this club's override.
     vibe_fields: dict = {}
     if body.vibe_options is not None:
+        body.vibe_options = normalise_vibes(body.vibe_options)
         invalid = [v for v in body.vibe_options if v not in CANONICAL_VIBES]
         if invalid:
             raise HTTPException(

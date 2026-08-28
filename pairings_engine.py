@@ -273,12 +273,19 @@ def _mirror_flag(a: MatcherSignup, b: MatcherSignup) -> int:
     return 1 if (af and bf and af == bf) else 0
 
 
+# Lowercased. Both spellings of the "happy with anything" vibe — see
+# signups.OLD_VIBE_ALIASES.
+_FLEXIBLE_VIBES = {"open", "either"}
+
+
 def _vibe_distance_override(a: MatcherSignup, b: MatcherSignup, base: int) -> int:
     av = (a.row.vibe or "").lower().strip()
     bv = (b.row.vibe or "").lower().strip()
     if av == "intro" or bv == "intro":
         return base
-    if av == "either" or bv == "either":
+    # "Open" was "Either" before 2026-08-28; historical signups still carry the
+    # old string, and a flexible player must stay flexible in old weeks too.
+    if av in _FLEXIBLE_VIBES or bv in _FLEXIBLE_VIBES:
         return 0
     return 0 if av == bv else 1
 
@@ -642,7 +649,8 @@ def summarize_pairings(
 
         av = (a.vibe or "").strip().lower()
         bv = (b.vibe or "").strip().lower()
-        if av and bv and av != bv and "either" not in (av, bv) and "intro" not in (av, bv):
+        if (av and bv and av != bv
+                and not (_FLEXIBLE_VIBES & {av, bv}) and "intro" not in (av, bv)):
             vibe_mismatches += 1
 
     return {
