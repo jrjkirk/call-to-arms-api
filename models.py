@@ -955,6 +955,14 @@ class VenueConfig(SQLModel, table=True):
     # Configurable rather than fixed: the whole complaint is staff losing time
     # to booking admin, but a busy Saturday may still want a human gate.
     confirm_mode: str = "instant"
+    # Whether people without an account can book at all, and on what terms.
+    # Guests default to "request" even where members book instantly: an account
+    # used to be the abuse control, and with it gone a human looking at each
+    # booking from a stranger is what replaces it. A venue that would rather
+    # take the bookings and sort it out later can set this to "instant".
+    guest_bookings: bool = True
+    guest_confirm_mode: str = "request"
+    require_phone: bool = True
 
     # Booking grid. slot_minutes is the granularity start times snap to;
     # min/max duration are what a booker may ask for. Wargames run long, hence
@@ -1069,7 +1077,7 @@ class VenueTable(SQLModel, table=True):
 
 
 class VenueBooking(SQLModel, table=True):
-    """A table booked at a club's venue, by a logged-in user.
+    """A table booked at a club's venue, by a member or by a guest.
 
     Times are local "HH:MM" strings against the club's timezone, matching the
     convention already used by ClubEvent.start_time and
@@ -1101,12 +1109,24 @@ class VenueBooking(SQLModel, table=True):
     system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
     game_note: Optional[str] = None             # free text when system_id is NULL
 
-    user_id: int = Field(foreign_key="users.id", index=True)
+    # NULL for a guest booking: a venue sells tables to the public, and most of
+    # that public has no reason to hold a Discord account. What identifies a
+    # guest is contact_email plus manage_token, not a row in users.
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
     player_id: Optional[int] = Field(default=None, foreign_key="players.id", index=True)
     contact_name: str
+    # Required for a guest (it is the only way to reach them, and the only
+    # handle abuse limits can count against); still optional for a member,
+    # whose account is the contact route.
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
     notes: Optional[str] = None                 # booker's own message to staff
+
+    # Secret in the guest's confirmation email that lets them see and cancel
+    # this one booking without an account. Every booking gets one so the cancel
+    # link in an email works the same whoever booked. Unguessable and scoped to
+    # a single row, so leaking it costs one booking rather than an account.
+    manage_token: Optional[str] = Field(default=None, index=True)
 
     # "requested" (awaiting staff, only in confirm_mode="request")
     # "confirmed" | "cancelled" | "no_show"

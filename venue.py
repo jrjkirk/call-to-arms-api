@@ -1056,7 +1056,7 @@ def describe_booking(db: Session, booking: VenueBooking) -> dict:
     }
 
 
-def _staff_email_html(club: Club, d: dict, needs_action: bool) -> str:
+def _staff_email_html(club: Club, d: dict, status: str) -> str:
     rows = [
         ("When", f"{d['date']}, {d['time']}"),
         ("Table", d["table"] + (f" ({d['table_size']})" if d["table_size"] else "")),
@@ -1076,8 +1076,10 @@ def _staff_email_html(club: Club, d: dict, needs_action: bool) -> str:
         f'<td style="padding:4px 0"><strong>{v}</strong></td></tr>'
         for k, v in rows
     )
-    lead = ("A table has been requested and is waiting for you to confirm it."
-            if needs_action else "A table has been booked.")
+    lead = {
+        "requested": "A table has been requested and is waiting for you to confirm it.",
+        "cancelled": "A booking has been cancelled.",
+    }.get(status, "A table has been booked.")
     return (
         f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
         f"<p>{lead}</p>"
@@ -1087,8 +1089,11 @@ def _staff_email_html(club: Club, d: dict, needs_action: bool) -> str:
     )
 
 
-def _staff_discord_text(club: Club, d: dict, needs_action: bool) -> str:
-    head = "📋 **Table requested**" if needs_action else "✅ **Table booked**"
+def _staff_discord_text(club: Club, d: dict, status: str) -> str:
+    head = {
+        "requested": "📋 **Table requested**",
+        "cancelled": "❌ **Booking cancelled**",
+    }.get(status, "✅ **Table booked**")
     lines = [
         f"{head} at {club.name}",
         f"🗓️ {d['date']} · ⏰ {d['time']}",
@@ -1097,7 +1102,7 @@ def _staff_discord_text(club: Club, d: dict, needs_action: bool) -> str:
     ]
     if d["notes"]:
         lines.append(f"📝 {d['notes']}")
-    if needs_action:
+    if status == "requested":
         lines.append("_Waiting for staff to confirm._")
     return "\n".join(lines)
 
@@ -1119,7 +1124,7 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
         return result
 
     d = describe_booking(db, booking)
-    needs_action = booking.status == "requested"
+    status = booking.status
 
     if cfg.notify_email:
         recipients = staff_emails(db, club_id, cfg)
@@ -1128,11 +1133,11 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
         else:
             try:
                 from emailer import send_email
-                verb = "requested" if needs_action else "booked"
+                verb = {"requested": "requested", "cancelled": "cancelled"}.get(status, "booked")
                 send_email(
                     to=recipients,
                     subject=f"Table {verb}: {d['date']} {d['time']} — {d['name']}",
-                    html=_staff_email_html(club, d, needs_action),
+                    html=_staff_email_html(club, d, status),
                 )
                 result["email"] = "sent"
             except Exception as e:
@@ -1147,7 +1152,7 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
             try:
                 resp = httpx.post(
                     url,
-                    json={"content": _staff_discord_text(club, d, needs_action),
+                    json={"content": _staff_discord_text(club, d, status),
                           "allowed_mentions": {"parse": []}},
                     timeout=httpx.Timeout(10.0, connect=5.0),
                 )
@@ -1159,6 +1164,118 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
                 result["discord"] = "failed"
 
     return result
+
+
+def club_base_url(club: Club) -> str:
+    """The club's own public address, which is where a booker was already
+    standing when they booked. Built from the slug rather than FRONTEND_URL:
+    that env var is a single fixed root domain, so it would send every venue's
+    customers to the same host regardless of whose table they booked."""
+    from database import _PRIMARY_DOMAIN
+    return f"https://{club.slug}.{_PRIMARY_DOMAIN}"
+
+
+def manage_url(club: Club, booking: VenueBooking) -> Optional[str]:
+    """Where a booker goes to see or cancel this booking. None when the row
+    predates manage tokens, so a caller renders the email without the link
+    rather than one that 404s."""
+    if not booking.manage_token:
+        return None
+    return f"{club_base_url(club)}/book/manage?token={booking.manage_token}"
+
+
+# What the booker is told, keyed by what just happened to their booking. Each
+# entry is (subject verb, opening line). Kept as data because the four mails
+# differ only in these two strings -- the booking details table below them is
+# identical, and building it once is what stops the venue describing the same
+# booking two different ways.
+BOOKER_EVENTS = {
+    "requested": (
+        "Table requested",
+        "Thanks for your request. {club} will confirm it shortly, and you'll "
+        "get another email when they do.",
+    ),
+    "confirmed": (
+        "Table confirmed",
+        "You're booked in at {club}. See you then.",
+    ),
+    "cancelled": (
+        "Booking cancelled",
+        "Your booking at {club} has been cancelled.",
+    ),
+    "no_show": (
+        "Booking closed",
+        "Your booking at {club} was marked as a no-show.",
+    ),
+}
+
+
+def _booker_email_html(club: Club, d: dict, event: str, link: Optional[str]) -> str:
+    _, lead = BOOKER_EVENTS[event]
+    rows = [
+        ("When", f"{d['date']}, {d['time']}"),
+        ("Table", d["table"] + (f" ({d['table_size']})" if d["table_size"] else "")),
+        ("Playing", d["game"]),
+        ("Party", f"{d['party_size']} player{'s' if d['party_size'] != 1 else ''}"),
+    ]
+    cells = "".join(
+        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{k}</td>'
+        f'<td style="padding:4px 0"><strong>{v}</strong></td></tr>'
+        for k, v in rows
+    )
+    # No cancel link on a booking that is already over as far as the venue is
+    # concerned -- offering to cancel a cancellation is just confusing.
+    tail = ""
+    if link and event in ("requested", "confirmed"):
+        tail = (
+            f'<p style="font-size:13px">Need to change or cancel it? '
+            f'<a href="{link}">Manage this booking</a>.</p>'
+        )
+    return (
+        f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
+        f"<p>{lead.format(club=club.name)}</p>"
+        f'<table style="border-collapse:collapse">{cells}</table>'
+        f"{tail}"
+        f'<p style="color:#666;font-size:13px">{club.name} — sent by Call to Arms.</p>'
+        f"</div>"
+    )
+
+
+def notify_booker(db: Session, club_id: int, booking: VenueBooking, event: str) -> Optional[str]:
+    """Tell the person who booked what just happened to their table.
+
+    Every notification in this system used to point one way, at staff, which
+    left a guest who booked in "request" mode reading "the venue will confirm
+    this shortly" and then never hearing another word. This is the return leg.
+
+    Never raises, and always called AFTER the commit, for the same reason
+    notify_staff is: the booking is the record, and it has to survive a slow
+    Resend call or a missing API key. Returns what happened for logging.
+    """
+    from observability import capture
+
+    if not booking.contact_email:
+        return "no_address"
+    if event not in BOOKER_EVENTS:
+        return "unknown_event"
+
+    club = db.get(Club, club_id)
+    if club is None:
+        return "no_club"
+
+    subject_verb, _ = BOOKER_EVENTS[event]
+    d = describe_booking(db, booking)
+    try:
+        from emailer import send_email
+        send_email(
+            to=booking.contact_email,
+            subject=f"{subject_verb}: {d['date']}, {d['time']} at {club.name}",
+            html=_booker_email_html(club, d, event, manage_url(club, booking)),
+        )
+        return "sent"
+    except Exception as e:
+        capture(e, kind="venue_booker_email", club_id=club_id)
+        return "failed"
 
 
 def club_night_pitch(db: Session, club_id: int, booking: VenueBooking) -> Optional[dict]:

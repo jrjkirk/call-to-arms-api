@@ -9,10 +9,13 @@ Two audiences, one router:
   /venue/*        the player booking a table (login required, no admin rights)
   /venue/admin/*  staff (can_admin_venue)
 """
+import re
+import secrets
+import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -110,6 +113,9 @@ def venue_info(
         "address": club.address if club else None,
         "booking_blurb": cfg.booking_blurb,
         "confirm_mode": cfg.confirm_mode,
+        "guest_bookings": cfg.guest_bookings,
+        "guest_confirm_mode": cfg.guest_confirm_mode,
+        "require_phone": cfg.require_phone,
         "slot_minutes": cfg.slot_minutes,
         "min_duration_minutes": cfg.min_duration_minutes,
         "max_duration_minutes": cfg.max_duration_minutes,
@@ -245,6 +251,40 @@ def get_busy(
                      for i in range(days)]}
 
 
+# Rate limiting for people with no account, deliberately modest and in-process.
+# It resets on every deploy and is per-machine, so it is a speed bump against
+# someone scripting the form with throwaway addresses, not a wall. The wall is
+# guest_confirm_mode: a human at the venue looks at each booking from a
+# stranger before the table is really theirs.
+_GUEST_HITS: dict[str, list[float]] = {}
+_GUEST_WINDOW_SECONDS = 3600
+_GUEST_MAX_PER_WINDOW = 6
+
+# Good enough to catch a typo and a pasted sentence. Deliberately not RFC 5322:
+# an over-strict pattern rejects real addresses, and the confirmation email is
+# what actually proves an address works.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _throttle_guest(request: Request) -> None:
+    ip = (request.client.host if request.client else "") or "unknown"
+    now = time.time()
+    hits = [t for t in _GUEST_HITS.get(ip, []) if now - t < _GUEST_WINDOW_SECONDS]
+    if len(hits) >= _GUEST_MAX_PER_WINDOW:
+        raise HTTPException(
+            status_code=429,
+            detail="That's a lot of bookings from one place. Try again later, "
+                   "or give the venue a ring.",
+        )
+    hits.append(now)
+    _GUEST_HITS[ip] = hits
+    # Bound the dict so a long-running machine can't accumulate every IP that
+    # ever touched the form.
+    if len(_GUEST_HITS) > 2000:
+        for stale in [k for k, v in _GUEST_HITS.items() if not v or now - v[-1] > _GUEST_WINDOW_SECONDS]:
+            _GUEST_HITS.pop(stale, None)
+
+
 class CreateBookingBody(BaseModel):
     date: str
     start_time: str
@@ -262,19 +302,45 @@ class CreateBookingBody(BaseModel):
 @router.post("/bookings")
 def create_booking(
     body: CreateBookingBody,
-    user: User = Depends(require_user),
-    club_id: int = Depends(active_club_id),
+    request: Request,
+    user: Optional[User] = Depends(current_user),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
-    """Book a table. Login required, so the account is the abuse control: no
-    rate limiting by IP, no email-confirmation round trip, and a real person to
-    talk to if they no-show.
+    """Book a table, with or without an account.
+
+    Login used to be the whole abuse model here: the account proved someone
+    real was behind the booking, gave the venue a way to reach them, and left
+    consequences for a no-show. A venue selling tables to the public cannot
+    require it — most of that public has no reason to hold a Discord account —
+    so each of those three jobs is now done separately:
+
+      identity      a working email address, which the confirmation mail
+                    proves; a fake or mistyped one never hears back
+      reachability  email always, plus a phone number when the venue asks
+                    for one, because a no-show you can ring is a table you
+                    might still sell
+      consequences  guests land in "requested" by default, so a human sees
+                    each booking from a stranger before the table is theirs
+
+    with a modest per-IP throttle underneath to stop the form being scripted.
 
     Every constraint is re-checked here rather than trusted from the grid the
     browser was shown — that grid may be minutes old, and two people can want
     the same table at once.
     """
     cfg = _require_enabled(db, club_id)
+
+    # Guests are held to the venue's guest policy; a signed-in member keeps
+    # exactly the terms they had before.
+    is_guest = user is None
+    if is_guest:
+        if not cfg.guest_bookings:
+            raise HTTPException(
+                status_code=403,
+                detail="This venue only takes bookings from signed-in members.",
+            )
+        _throttle_guest(request)
 
     try:
         day = date.fromisoformat(body.date)
@@ -325,13 +391,42 @@ def create_booking(
             detail=f"Bookings open {cfg.max_advance_days} days ahead.",
         )
 
-    held = db.exec(
+    # Contact details. A guest must leave a way to be reached, because there is
+    # no account behind them to fall back on; a member may, and their account
+    # covers what they leave out.
+    email = (body.contact_email or "").strip().lower() or None
+    phone = (body.contact_phone or "").strip() or None
+    if is_guest:
+        if not (body.contact_name or "").strip():
+            raise HTTPException(status_code=422, detail="Please give your name.")
+        if not email:
+            raise HTTPException(
+                status_code=422,
+                detail="Please give an email address — it's where your confirmation goes.",
+            )
+        if not _EMAIL_RE.match(email):
+            raise HTTPException(status_code=422, detail="That email address doesn't look right.")
+        if cfg.require_phone and not phone:
+            raise HTTPException(
+                status_code=422,
+                detail="Please give a phone number so the venue can reach you on the day.",
+            )
+
+    # The cap on how many tables one person can be holding at once. A member is
+    # counted by account; a guest by email address, which is the only stable
+    # handle they have. Same limit either way, so the account is no longer what
+    # decides how much of the room one person can tie up.
+    held_q = (
         select(VenueBooking)
         .where(VenueBooking.club_id == club_id)
-        .where(VenueBooking.user_id == user.id)
         .where(VenueBooking.booking_date >= now.date())
         .where(VenueBooking.status.in_(V.BLOCKING_STATUSES))
-    ).all()
+    )
+    held_q = held_q.where(
+        VenueBooking.contact_email == email if is_guest
+        else VenueBooking.user_id == user.id
+    )
+    held = db.exec(held_q).all()
     if len(held) >= cfg.max_active_bookings_per_user:
         raise HTTPException(
             status_code=409,
@@ -355,10 +450,14 @@ def create_booking(
         # then the smallest that still fits, so a pair doesn't eat the only 6x4.
         chosen = free[0]
 
-    player_id = active_player_id_for(db, user, club_id)
+    player_id = active_player_id_for(db, user, club_id) if user else None
     player = db.get(Player, player_id) if player_id else None
     name = (body.contact_name or "").strip() or (player.name if player else None) \
-        or user.discord_name or "Guest"
+        or (user.discord_name if user else None) or "Guest"
+
+    # Guests follow guest_confirm_mode, members follow confirm_mode. A venue
+    # can take members instantly while still eyeballing every stranger.
+    mode = cfg.guest_confirm_mode if is_guest else cfg.confirm_mode
 
     booking = VenueBooking(
         club_id=club_id,
@@ -369,28 +468,103 @@ def create_booking(
         party_size=body.party_size,
         system_id=body.system_id,
         game_note=(body.game_note or "").strip() or None,
-        user_id=user.id,
+        user_id=user.id if user else None,
         player_id=player_id,
         contact_name=name,
-        contact_email=(body.contact_email or "").strip() or None,
-        contact_phone=(body.contact_phone or "").strip() or None,
+        contact_email=email,
+        contact_phone=phone,
         notes=(body.notes or "").strip() or None,
-        status="requested" if cfg.confirm_mode == "request" else "confirmed",
+        status="requested" if mode == "request" else "confirmed",
+        # Every booking gets one, so the cancel link in an email works the same
+        # whoever booked. token_urlsafe(32) is 256 bits: not worth guessing.
+        manage_token=secrets.token_urlsafe(32),
     )
     db.add(booking)
     db.commit()
     db.refresh(booking)
 
     # After the commit on purpose: the booking is the record and must survive a
-    # slow Resend call or a revoked webhook. notify_staff never raises.
+    # slow Resend call or a revoked webhook. Neither notify call raises.
     delivery = V.notify_staff(db, club_id, booking)
+    booker = V.notify_booker(db, club_id, booking, booking.status)
 
     return {
         "ok": True,
         "booking": V.describe_booking(db, booking),
         "notified": delivery,
+        "emailed_booker": booker,
+        "manage_token": booking.manage_token,
         "club_night": V.club_night_pitch(db, club_id, booking),
     }
+
+
+# NOTE: these two must stay ABOVE @router.delete("/bookings/{booking_id}").
+# FastAPI matches in registration order, and "by-token" is a perfectly good
+# {booking_id} as far as the router is concerned — with them below, every
+# guest cancel got answered by the members-only route with a 401.
+def _booking_for_token(db: Session, club_id: int, token: str) -> VenueBooking:
+    """The one booking a manage token opens, or 404.
+
+    Deliberately NOT gated on _require_enabled: a venue that switches bookings
+    off still has people holding tables it already sold, and they must be able
+    to cancel. Scoped to the club whose page the link was opened on, so a token
+    is useless anywhere but the venue that issued it.
+    """
+    token = (token or "").strip()
+    if len(token) < 20:
+        raise HTTPException(status_code=404, detail="That link isn't valid.")
+    b = db.exec(
+        select(VenueBooking)
+        .where(VenueBooking.club_id == club_id)
+        .where(VenueBooking.manage_token == token)
+    ).first()
+    if b is None:
+        raise HTTPException(status_code=404, detail="That link isn't valid.")
+    return b
+
+
+@router.get("/bookings/by-token")
+def booking_by_token(
+    token: str = Query(...),
+    club_id: int = Depends(public_club_id),
+    db: Session = Depends(get_session),
+):
+    """What a booker sees when they follow the link in their email. No account
+    involved: holding the token IS the proof, which is the whole point of
+    letting people book without one."""
+    b = _booking_for_token(db, club_id, token)
+    return {"booking": V.describe_booking(db, b), "can_cancel": b.status in V.BLOCKING_STATUSES}
+
+
+@router.delete("/bookings/by-token")
+def cancel_booking_by_token(
+    token: str = Query(...),
+    club_id: int = Depends(public_club_id),
+    db: Session = Depends(get_session),
+):
+    """Cancel from the link in the confirmation email.
+
+    Attributed to the booker, not to staff: cancelled_by_user_id stays NULL for
+    a guest, and the venue's own console shows staff-attributed cancellations
+    separately, so "they changed their mind" never reads as "we cancelled it".
+    """
+    b = _booking_for_token(db, club_id, token)
+    if b.status == "cancelled":
+        return {"ok": True, "already": True}
+    if b.status not in V.BLOCKING_STATUSES:
+        raise HTTPException(status_code=409, detail="That booking can no longer be cancelled.")
+
+    b.status = "cancelled"
+    b.cancelled_at = datetime.utcnow()
+    b.updated_at = datetime.utcnow()
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+
+    # Staff found out about cancellations by noticing a gap in the diary. Now
+    # they are told, on whatever channels they already have switched on.
+    V.notify_staff(db, club_id, b)
+    return {"ok": True, "booking": V.describe_booking(db, b)}
 
 
 @router.get("/bookings/mine")
@@ -435,6 +609,10 @@ def cancel_booking(
     booking.updated_at = datetime.utcnow()
     db.add(booking)
     db.commit()
+    db.refresh(booking)
+
+    # Same as the guest cancel path: staff used to find out by noticing a gap.
+    V.notify_staff(db, club_id, booking)
     return {"ok": True}
 
 
@@ -474,6 +652,9 @@ def get_venue_config(ctx=Depends(_require_venue_admin), db: Session = Depends(ge
     return {
         "enabled": cfg.enabled,
         "confirm_mode": cfg.confirm_mode,
+        "guest_bookings": cfg.guest_bookings,
+        "guest_confirm_mode": cfg.guest_confirm_mode,
+        "require_phone": cfg.require_phone,
         "slot_minutes": cfg.slot_minutes,
         "min_duration_minutes": cfg.min_duration_minutes,
         "max_duration_minutes": cfg.max_duration_minutes,
@@ -502,6 +683,9 @@ def _venue_webhook_set(db: Session, club_id: int) -> bool:
 class VenueConfigBody(BaseModel):
     enabled: Optional[bool] = None
     confirm_mode: Optional[str] = None
+    guest_bookings: Optional[bool] = None
+    guest_confirm_mode: Optional[str] = None
+    require_phone: Optional[bool] = None
     slot_minutes: Optional[int] = None
     min_duration_minutes: Optional[int] = None
     max_duration_minutes: Optional[int] = None
@@ -530,6 +714,16 @@ def save_venue_config(
         if body.confirm_mode not in ("instant", "request"):
             raise HTTPException(status_code=422, detail="confirm_mode must be instant or request.")
         cfg.confirm_mode = body.confirm_mode
+    if body.guest_confirm_mode is not None:
+        if body.guest_confirm_mode not in ("instant", "request"):
+            raise HTTPException(
+                status_code=422, detail="guest_confirm_mode must be instant or request."
+            )
+        cfg.guest_confirm_mode = body.guest_confirm_mode
+    if body.guest_bookings is not None:
+        cfg.guest_bookings = body.guest_bookings
+    if body.require_phone is not None:
+        cfg.require_phone = body.require_phone
 
     if body.slot_minutes is not None:
         if body.slot_minutes not in (15, 30, 60):
@@ -873,6 +1067,7 @@ def admin_patch_booking(
             raise HTTPException(status_code=409, detail=f"{target.name} is taken for that slot.")
         b.table_id = target.id
 
+    was = b.status
     if body.status is not None:
         if body.status not in ("requested", "confirmed", "cancelled", "no_show"):
             raise HTTPException(status_code=422, detail="Unknown status.")
@@ -888,7 +1083,16 @@ def admin_patch_booking(
     db.add(b)
     db.commit()
     db.refresh(b)
-    return {"ok": True, "booking": V.describe_booking(db, b)}
+
+    # Confirming a request is the moment the booker has been waiting for since
+    # they were told "the venue will confirm this shortly", and declining it is
+    # the one they most need to hear about. Only on a real change, so tidying a
+    # staff note doesn't email anyone. After the commit, and never raises.
+    emailed = None
+    if b.status != was:
+        emailed = V.notify_booker(db, club_id, b, b.status)
+
+    return {"ok": True, "booking": V.describe_booking(db, b), "emailed_booker": emailed}
 
 
 class StaffBookingBody(CreateBookingBody):
