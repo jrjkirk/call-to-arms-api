@@ -178,6 +178,14 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
             bool(club_system.league_enabled) if club_system is not None
             else (False if club_scoped else r.has_league)
         ),
+        # When this club's session starts, or None if they haven't set one.
+        # The signup form defaults a player's ETA to it, because "when will you
+        # arrive" for a night starting at seven is a different question to one
+        # starting at half six, and a single hardcoded default answered both
+        # wrongly. Club-scoped only: without a club there is no session.
+        "session_start_time": (
+            club_system.session_start_time if club_system is not None else None
+        ),
         # System *rules* — sourced from the hardcoded per-system modules in
         # systems/, keyed by legacy_system_name, NOT from the (dead)
         # SystemConfig.faction_list / icon_folder DB columns. None for any

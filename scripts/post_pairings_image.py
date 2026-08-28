@@ -16,7 +16,7 @@ import os
 import httpx
 from sqlmodel import Session, select
 
-from database import discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
+from database import posting_enabled, discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
 from models import Club, ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
 from render_pairings_image import render_pairings_image
@@ -77,6 +77,13 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         select(SystemConfig).where(SystemConfig.legacy_system_name == system)
     ).first()
     system_id = system_config.id if system_config else None
+    # Checked HERE, not only in the callers. The admin button and the
+    # auto-pairings job both check before getting this far, but this script is
+    # also a manual GitHub workflow_dispatch, and that path would otherwise
+    # post for a club that had switched pairings posts off.
+    if not posting_enabled(db, club_id, system, "pairings"):
+        print(f"Pairings posts are switched off for {system!r}, skipping.")
+        return False
     webhook_url = resolve_webhook_url(db, club_id, "pairings", system_id)
     if not webhook_url:
         print(f"No pairings webhook configured for {system!r}, skipping.")

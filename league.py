@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, or_, select
 
 from auth import require_user, current_user, active_club_id, admin_scopes
-from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, resolve_webhook_url, scoped
+from database import posting_enabled_for_system_id, active_player_id_for, get_session, in_league_filter, resolve_request_club_id, resolve_webhook_url, scoped
 from models import ClubSystem, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Player, SystemConfig, User
 from services import announce_new_achievements
 from signups import require_discord_member
@@ -247,6 +247,8 @@ def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: i
 
 
 def _post_league_webhook(db: Session, row: LeagueResult) -> None:
+    if not posting_enabled_for_system_id(db, row.club_id, row.system_id, "league"):
+        return
     url = resolve_webhook_url(db, row.club_id, "league_result", row.system_id)
     if not url:
         return

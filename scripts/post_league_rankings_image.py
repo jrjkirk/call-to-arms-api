@@ -18,7 +18,7 @@ import json
 import httpx
 from sqlmodel import Session, select
 
-from database import engine, resolve_webhook_url
+from database import posting_enabled, engine, resolve_webhook_url
 from league import _current_season_id
 from main import _compute_league_rankings
 from models import Club, ClubSystem, SystemConfig
@@ -49,6 +49,9 @@ def main() -> None:
             # league_rankings is a per-system webhook type (see admin.py's
             # WEBHOOK_TYPES_LEAGUE) — a club running two leagues can route
             # each one's rankings post to its own Discord channel.
+            if not posting_enabled(db, club.id, system_config.legacy_system_name, "league"):
+                print(f"[{club.slug}/{system_config.slug}] League posts switched off, skipping.")
+                continue
             webhook_url = resolve_webhook_url(db, club.id, "league_rankings", system_config.id)
             if not webhook_url:
                 # Skip loudly-but-cleanly, before computing rankings for a

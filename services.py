@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 import httpx
 from sqlmodel import Session, select, or_
 
-from database import resolve_webhook_url
+from database import posting_enabled_for_system_id, resolve_webhook_url
 from models import LeagueResult, Signup, Player
 
 
@@ -303,6 +303,8 @@ def post_discord_achievement(player_name: str, achievement: str, club_id: int, s
     system whose league result triggered the achievement check (the only
     context this function has, including for cross-system achievements like
     "Veteran" — see announce_new_achievements)."""
+    if not posting_enabled_for_system_id(db, club_id, system_id, "league"):
+        return
     url = resolve_webhook_url(db, club_id, "achievement", system_id)
     if not url:
         return

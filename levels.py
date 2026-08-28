@@ -28,7 +28,7 @@ from typing import Optional
 import httpx
 from sqlmodel import Session, select
 
-from database import name_with_mention, resolve_webhook_url
+from database import posting_enabled, name_with_mention, resolve_webhook_url
 from experience import counts_for_players, games_played
 from models import Pairing, PlayerLevelAnnouncement, Player, Signup, SystemConfig
 from observability import capture
@@ -187,6 +187,8 @@ def announce_level_ups(db: Session, club_id: int, system: str) -> int:
     config = db.exec(
         select(SystemConfig).where(SystemConfig.legacy_system_name == system)
     ).first()
+    if not posting_enabled(db, club_id, system, "level_up"):
+        return 0
     url = resolve_webhook_url(db, club_id, "level_up", config.id if config else None)
 
     players = db.exec(

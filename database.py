@@ -575,7 +575,10 @@ def system_setting_slug(system: str) -> str:
 # Deliberately NOT the same thing as having a webhook: the webhook is where a
 # post goes, this is whether it goes at all. Turning posts off keeps the
 # webhook so nobody has to find it again.
-POSTING_KINDS: tuple[str, ...] = ("signup", "pairings")
+# "league" covers results, standings and achievements together: they are one
+# feature to a club, and three switches for one decision is three chances to
+# leave one on by accident.
+POSTING_KINDS: tuple[str, ...] = ("signup", "pairings", "level_up", "league")
 
 
 def posting_key(kind: str, system: str) -> str:
@@ -586,6 +589,23 @@ def posting_enabled(db: Session, club_id: int, system: str, kind: str) -> bool:
     """Whether this club posts `kind` to Discord for `system`. Defaults True."""
     raw = get_setting(db, club_id, posting_key(kind, system), "true")
     return (raw or "true").strip().lower() != "false"
+
+
+def posting_enabled_for_system_id(db: Session, club_id: int, system_id, kind: str) -> bool:
+    """Same, for the call sites that hold a system id rather than its name.
+
+    The settings key is built from the legacy name, so this resolves it. An
+    unknown or missing id posts, matching the default everywhere else: a
+    switch nobody set should never be the reason something goes quiet.
+    """
+    if system_id is None:
+        return True
+    from models import SystemConfig
+
+    row = db.get(SystemConfig, system_id)
+    if row is None:
+        return True
+    return posting_enabled(db, club_id, row.legacy_system_name, kind)
 
 
 def get_setting(db: Session, club_id: int, key: str, default: Optional[str] = None) -> Optional[str]:
