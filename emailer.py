@@ -24,6 +24,18 @@ def _config() -> tuple[str, str]:
     return api_key, from_addr
 
 
+class UndeliverableRecipient(RuntimeError):
+    """The recipient address was rejected, so this send will never work.
+
+    Split out from a plain RuntimeError because the two failures want opposite
+    handling. A bad API key or a Resend outage is an operator problem and
+    should raise an alert. Someone mistyping their email address on a public
+    booking form is ordinary user input, happens on any form open to the
+    public, and must not page anybody -- the booking still stands, and the
+    confirmation screen already tells them we couldn't reach them.
+    """
+
+
 def send_email(
     to: str | list[str],
     subject: str,
@@ -32,8 +44,9 @@ def send_email(
 ) -> str:
     """Send an email via Resend. Returns the Resend message id.
 
-    Raises RuntimeError on a non-2xx Resend response so the caller can
-    surface/log the failure cleanly."""
+    Raises UndeliverableRecipient when Resend rejects the recipient address,
+    and RuntimeError on any other non-2xx response, so callers can tell
+    "this person's address is wrong" from "our email is broken"."""
     api_key, from_addr = _config()
 
     payload = {
@@ -55,8 +68,17 @@ def send_email(
         timeout=15,
     )
     if resp.status_code >= 300:
+        body = resp.text[:300]
+        # Resend names the offending field in the message. Only a complaint
+        # about `to` means the address is at fault -- the same 422 about `from`
+        # is a misconfigured sender, which very much is an operator problem, so
+        # anything we can't attribute to the recipient stays a loud failure.
+        if resp.status_code == 422 and "to field" in body.lower():
+            raise UndeliverableRecipient(
+                f"Resend rejected the recipient ({resp.status_code}): {body}"
+            )
         raise RuntimeError(
-            f"Resend send failed ({resp.status_code}): {resp.text[:300]}"
+            f"Resend send failed ({resp.status_code}): {body}"
         )
 
     return resp.json().get("id", "")

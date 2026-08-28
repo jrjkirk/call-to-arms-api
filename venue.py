@@ -1132,7 +1132,7 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
             result["email"] = "no_recipients"
         else:
             try:
-                from emailer import send_email
+                from emailer import UndeliverableRecipient, send_email
                 verb = {"requested": "requested", "cancelled": "cancelled"}.get(status, "booked")
                 send_email(
                     to=recipients,
@@ -1140,6 +1140,12 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
                     html=_staff_email_html(club, d, status),
                 )
                 result["email"] = "sent"
+            except UndeliverableRecipient as e:
+                # A venue typo in Settings rather than a broken integration.
+                # The settings screen shows effective_emails so they can see
+                # what they typed; alerting the platform owner wouldn't help.
+                print(f"[venue] staff email undeliverable (club={club_id}): {e}")
+                result["email"] = "bad_address"
             except Exception as e:
                 capture(e, kind="venue_booking_email", club_id=club_id)
                 result["email"] = "failed"
@@ -1266,13 +1272,20 @@ def notify_booker(db: Session, club_id: int, booking: VenueBooking, event: str) 
     subject_verb, _ = BOOKER_EVENTS[event]
     d = describe_booking(db, booking)
     try:
-        from emailer import send_email
+        from emailer import UndeliverableRecipient, send_email
         send_email(
             to=booking.contact_email,
             subject=f"{subject_verb}: {d['date']}, {d['time']} at {club.name}",
             html=_booker_email_html(club, d, event, manage_url(club, booking)),
         )
         return "sent"
+    except UndeliverableRecipient as e:
+        # Someone mistyped their address on a public form. Not an incident:
+        # the booking stands, staff were told separately, and the confirmation
+        # screen already says we couldn't reach them. Logged, not alerted --
+        # otherwise every typo pages whoever is on the other end of the alerts.
+        print(f"[venue] booker email undeliverable (club={club_id}, booking={booking.id}): {e}")
+        return "bad_address"
     except Exception as e:
         capture(e, kind="venue_booker_email", club_id=club_id)
         return "failed"
