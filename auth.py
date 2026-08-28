@@ -44,7 +44,10 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from database import active_player_id_for, get_session, resolve_active_club_id, scoped
+from database import (
+    active_player_id_for, get_session, resolve_active_club_id,
+    resolve_request_club_id, scoped,
+)
 from models import Club, ClubSystem, SystemConfig, User, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
@@ -176,6 +179,40 @@ def active_club_id(
     for club-scoped reads/writes so a user can play at any club they visit —
     admin authorization stays separate (admin_roles for the resolved club)."""
     return resolve_active_club_id(db, user, request.headers.get("origin"))
+
+
+def public_club_id(
+    request: Request,
+    club: Optional[str] = None,
+    user: Optional[User] = Depends(current_user),
+    db: Session = Depends(get_session),
+) -> int:
+    """Dependency: the club a request is scoped to, whether or not anyone is
+    signed in. The optional-auth twin of active_club_id, for pages a stranger
+    is meant to be able to read — the club's own landing page, and the
+    booking form's availability reads.
+
+    A signed-in caller lands in resolve_active_club_id exactly as
+    active_club_id does, so a real browser request resolves to the same club
+    as before and swapping an endpoint over adds an anonymous path where
+    there used to be a 401. The one difference: an explicit `?club=` param is
+    forwarded here and was ignored by active_club_id, so a signed-in caller
+    can now aim these endpoints at another club. That is deliberate and safe
+    only because every endpoint using this dependency is public by design —
+    an anonymous caller could pass the same param and read the same data, so
+    there is nothing to escalate to. Do NOT reach for this on an endpoint
+    that returns anything member-only; that is what active_club_id is for.
+
+    Anonymous callers resolve by subdomain (Origin), with `?club=` taking
+    precedence for SSR loaders and tooling that can't carry a real browser
+    Origin. See resolve_request_club_id for the full order.
+    """
+    try:
+        return resolve_request_club_id(db, user, club, request.headers.get("origin"))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/discord/login")

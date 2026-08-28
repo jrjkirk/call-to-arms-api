@@ -25,7 +25,9 @@ from services import (
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
-from auth import router as auth_router, require_user, current_user, active_club_id
+from auth import (
+    router as auth_router, require_user, current_user, active_club_id, public_club_id,
+)
 from signups import (router as signups_router, CANONICAL_VIBES, _get_system_config,
                      signup_cap, normalise_vibe, normalise_vibes)
 from league import router as league_router, _resolve_system_id, _current_season_id
@@ -275,8 +277,7 @@ DEFAULT_ACCENT_COLOR = "#c9a14a"  # platform gold, used when a system admin hasn
 @app.get("/club")
 def get_club(
     month: Optional[str] = None,
-    user: User = Depends(require_user),
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     session: Session = Depends(get_session),
 ):
     """Club landing page: profile, the systems carousel (this club's enabled
@@ -285,7 +286,14 @@ def get_club(
     schedule) merged with one-off ClubEvent rows, both colour-coded by
     system via accent_color.
 
-    ?month=YYYY-MM selects the calendar month (default: current month)."""
+    ?month=YYYY-MM selects the calendar month (default: current month).
+
+    Optional-auth: this is a club's public shop window (name, blurb, hours,
+    address, what they run and when), so a stranger following a link to
+    yorkshire.calltoarms.app is meant to read it without signing in. Nothing
+    in the response is member-only, and the body never looked at the user
+    even when one was required. A signed-in caller resolves to exactly the
+    same club as before — see public_club_id."""
     club = session.get(Club, club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="Club not found")

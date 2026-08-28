@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 import venue as V
-from auth import active_club_id, current_user, require_user
+from auth import active_club_id, current_user, public_club_id, require_user
 from database import get_session
 from models import (
     Club, SystemConfig, ClubSystem, User, VenueBooking, VenueClubNight,
@@ -84,7 +84,7 @@ def _require_enabled(db: Session, club_id: int) -> VenueConfig:
 
 @router.get("/info")
 def venue_info(
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
     """What the booking page needs to render itself: policy, the systems this
@@ -128,7 +128,7 @@ def get_availability(
     duration: Optional[int] = None,
     party_size: Optional[int] = None,
     system_id: Optional[int] = None,
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
     _require_enabled(db, club_id)
@@ -146,7 +146,7 @@ def tables_for_slot(
     duration: int = Query(...),
     party_size: int = Query(2),
     system_id: Optional[int] = None,
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
     """The actual tables free for one slot, best first, flagged for whether they
@@ -212,7 +212,7 @@ def tables_for_slot(
 
 @router.get("/plan")
 def public_plan(
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
     """The room, drawn to scale, for the booking form's table picker.
@@ -229,7 +229,7 @@ def public_plan(
 def get_busy(
     start: str = Query(...),
     days: int = Query(14, ge=1, le=62),
-    club_id: int = Depends(active_club_id),
+    club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
     """How busy each of the next N days is — the "see how busy a night is"
