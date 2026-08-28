@@ -752,9 +752,18 @@ class ClubWebhook(SQLModel, table=True):
     before the club_settings split). Uniqueness is enforced purely by the
     seed/write logic's check-then-upsert, same as ClubSystem.
 
-    webhook_type is one of: signup, pairings, call_to_arms (system_id
-    meaningful for these three) or league_result, league_rankings,
-    achievement (system_id always None — club-level, not per-system).
+    webhook_type scoping, kept in sync with admin.py's three tuples (which are
+    the authority — read them, not this):
+
+      signup, pairings, call_to_arms, level_up   per system, always offered
+      league_result, league_rankings, achievement
+                                                 per system, offered once that
+          system's league is on. These WERE club-level (system_id NULL) until
+          leagues became per-system, because a club running two leagues could
+          not route their posts to different channels. Existing rows were
+          migrated in migrations/split_league_webhooks_per_system.py.
+      venue_booking                              club-level, system_id NULL.
+          The bar has one staff channel, not one per game night.
     """
     __tablename__ = "club_webhooks"
     __table_args__ = {"extend_existing": True}
