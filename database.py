@@ -312,6 +312,19 @@ _PRIMARY_DOMAIN = "calltoarms.app"
 _DEFAULT_CLUB_SLUG = "egnwgc"
 
 
+def club_app_url(club, path: str = "") -> str:
+    """A club's own address on the app, e.g. the link its Discord posts share.
+
+    Built from the slug rather than a single APP_PUBLIC_URL env var: that var
+    is one fixed host for the whole network, so every club's Call to Arms post
+    sent players to the same place regardless of whose game night it was
+    announcing. Falls back to the bare domain for a club with no slug.
+    """
+    if club is None or not getattr(club, "slug", None):
+        return f"https://www.{_PRIMARY_DOMAIN}{path}"
+    return f"https://{club.slug}.{_PRIMARY_DOMAIN}{path}"
+
+
 def resolve_club_slug_from_origin(origin_header: str | None) -> str | None:
     """Derive a club slug from a browser request's Origin header
     (e.g. "https://yorkshire.calltoarms.app" -> "yorkshire"). This is what

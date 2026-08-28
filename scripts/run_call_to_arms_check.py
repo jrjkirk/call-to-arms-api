@@ -15,14 +15,15 @@ club-aware, still resolved via club_webhooks, so it can't post to the
 wrong club's channel.
 """
 import os
+from urllib.parse import quote
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlmodel import Session, select
 
 import call_to_arms_content as cta_content
-from database import engine, record_job_run, resolve_webhook_url, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
-from models import ClubSystem, Mission, SystemConfig
+from database import engine, record_job_run, resolve_webhook_url, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, club_app_url
+from models import Club, ClubSystem, Mission, SystemConfig
 from week_logic import _is_call_to_arms_due, is_session_week, next_session_date
 
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
@@ -126,8 +127,16 @@ def main() -> None:
                                     .where(Mission.active == True)
                                 ).all()
                             ]
+                        # The club's OWN subdomain, and the signup tab for THIS
+                        # system. A flat APP_PUBLIC_URL sent every club's players
+                        # to the same front door, where a signed-out one landed
+                        # on the marketing page with no idea what they'd clicked.
+                        club = db.get(Club, club_id)
+                        signup_url = club_app_url(
+                            club, f"/signup?system={quote(system)}"
+                        ) if club else APP_PUBLIC_URL
                         cta_content.post(
-                            webhook_url, template, system, next_session, APP_PUBLIC_URL,
+                            webhook_url, template, system, next_session, signup_url,
                             image_mode=image_mode, image_url=image_url, missions=missions,
                         )
                         _upsert_setting(db, club_id, f"call_to_arms_{slug}_last_week", target_week)

@@ -215,14 +215,35 @@ def public_club_id(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _safe_next_path(raw: str | None) -> str:
+    """A caller-supplied path to land on after login, or "" if it isn't one.
+
+    Only ever a path on the origin we already resolved — never a full URL. The
+    checks below exist so this can't be turned into an open redirect: a value
+    like "//evil.com" or "https://evil.com" is a perfectly good relative-looking
+    string to a careless join, and would send someone who clicked a link in a
+    club's Discord straight off the app.
+    """
+    if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return ""
+    if "\\" in raw or "\n" in raw or "\r" in raw:
+        return ""
+    return raw[:300]
+
+
 @router.get("/discord/login")
-def discord_login(request: Request):
-    """Step 1: send the browser to Discord's authorize page."""
+def discord_login(request: Request, next: Optional[str] = None):
+    """Step 1: send the browser to Discord's authorize page.
+
+    `next` carries the path to land on afterwards, so someone who followed a
+    "sign up for Wednesday" link out of Discord comes back to that signup page
+    rather than to the club's front door with no idea why they signed in.
+    """
     if not DISCORD_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
 
     state = secrets.token_urlsafe(24)
-    return_to = _safe_return_to(request)
+    return_to = _safe_return_to(request) + _safe_next_path(next)
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
     params = {
         "client_id": DISCORD_CLIENT_ID,
