@@ -7,7 +7,7 @@ For every OPEN call-out (see models.CallOut / call_outs.py):
     the club+system's Discord channel and stamp last_reminder_at.
 
 Per-club/per-system isolation is inherent: each call-out carries its own
-club_id + system, and the webhook is resolved from that (call_outs._post_webhook
+club_id + system, and the webhook is resolved from that (call_outs._post_call_out
 → resolve_webhook_url), so a club only ever hears about its own call-outs.
 
 Safe to re-run hourly: expiry is idempotent (already-expired rows aren't
@@ -19,8 +19,7 @@ from sqlmodel import Session, select
 
 from database import engine, name_with_mention, record_job_run
 from models import CallOut
-from call_outs import now_uk_naive, _webhook_content
-from signups import _post_webhook
+from call_outs import now_uk_naive, _webhook_content, _post_call_out, _call_out_link
 
 JOB_NAME = "call_outs_check"
 REMINDER_INTERVAL = timedelta(hours=24)
@@ -51,12 +50,13 @@ def main() -> None:
                     continue
 
                 if c.last_reminder_at is None or (now - c.last_reminder_at) >= REMINDER_INTERVAL:
-                    _post_webhook(
+                    _post_call_out(
                         db, c.club_id, c.system,
                         _webhook_content(
                             c,
                             f"⏳ **Still looking for a game** — "
                             f"{name_with_mention(db, c.creator_name, c.creator_player_id)} has an open Call Out",
+                            _call_out_link(db, c.club_id, c),
                         ),
                     )
                     c.last_reminder_at = now

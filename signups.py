@@ -496,17 +496,35 @@ def _signup_count(db: Session, system: str, week: str, club_id: int) -> int:
 _WEBHOOK_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
-def _post_webhook(db: Session, club_id: int, system: str, content: str) -> None:
-    """Fire-and-forget Discord post. Never breaks the request on failure."""
+def _post_webhook(
+    db: Session,
+    club_id: int,
+    system: str,
+    content: str,
+    webhook_type: str = "signup",
+    fallback_type: str | None = None,
+) -> None:
+    """Fire-and-forget Discord post. Never breaks the request on failure.
+
+    `fallback_type` covers a channel a club has not split out yet: call-outs
+    rode the signup webhook for their whole life, so asking for "call_outs"
+    and falling back to "signup" moves anyone who configures the new channel
+    without silencing everyone who hasn't.
+
+    The posting switch is always read against the FALLBACK kind, because that
+    is the switch a club has already been using to control these posts.
+    """
     system_config = _get_system_config(db, system)
     system_id = system_config.id if system_config else None
-    url = resolve_webhook_url(db, club_id, "signup", system_id)
+    url = resolve_webhook_url(db, club_id, webhook_type, system_id)
+    if url is None and fallback_type:
+        url = resolve_webhook_url(db, club_id, fallback_type, system_id)
     if not url:
         return
     # A club still setting up can silence its channel without unpicking the
     # webhook it just pasted in. Defaults on, so nothing changes for anyone
     # who has not deliberately turned it off.
-    if not posting_enabled(db, club_id, system, "signup"):
+    if not posting_enabled(db, club_id, system, fallback_type or webhook_type):
         return
     try:
         resp = httpx.post(

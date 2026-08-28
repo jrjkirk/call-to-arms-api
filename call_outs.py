@@ -13,6 +13,7 @@ its helpers rather than re-deriving them.
 """
 import os
 from datetime import datetime
+from urllib.parse import quote
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, SQLModel, select
 
 from database import active_player_id_for, get_session, name_with_mention, scoped
-from models import CallOut, User
+from models import CallOut, Club, User
 from auth import active_club_id, require_user
 from signups import (
     _get_system_config,
@@ -90,7 +91,39 @@ def _serialize(c: CallOut, my_player_id: Optional[int]) -> dict:
     }
 
 
-def _webhook_content(c: CallOut, header: str) -> str:
+def _post_call_out(db: Session, club_id: int, system: str, content: str) -> None:
+    """Post to the club's call-outs channel, or its signup channel if it hasn't
+    split them out. Call-outs shared the signup webhook for their whole life,
+    so the fallback is what stops every existing club going quiet the moment
+    a separate channel becomes possible."""
+    _post_webhook(
+        db, club_id, system, content,
+        webhook_type="call_outs", fallback_type="signup",
+    )
+
+
+def _call_out_link(db: Session, club_id: int, c: CallOut) -> str:
+    """Deep link to this one call-out, on the club's own subdomain.
+
+    The anchor is what makes it an "accept the game" link rather than a link to
+    a page: the signup page gives every call-out card an id, so the browser
+    lands on the row with the Take it up button rather than at the top of a
+    page the reader then has to search.
+    """
+    from database import club_app_url
+    club = db.get(Club, club_id)
+    path = f"/signup?system={quote(system_label(c))}#call-out-{c.id}"
+    if club is None:
+        return f"{APP_PUBLIC_URL}{path}" if APP_PUBLIC_URL else ""
+    return club_app_url(club, path)
+
+
+def system_label(c: CallOut) -> str:
+    """The system name the signup page expects in its ?system= param."""
+    return c.system
+
+
+def _webhook_content(c: CallOut, header: str, link: str = "") -> str:
     detail_parts = []
     if c.faction:
         detail_parts.append(f"⚔️ {c.faction}")
@@ -106,7 +139,9 @@ def _webhook_content(c: CallOut, header: str) -> str:
         lines.append(" • ".join(detail_parts))
     if c.notes:
         lines.append(f"📝 {c.notes}")
-    if APP_PUBLIC_URL:
+    if link:
+        lines.append(f"➡️ Take it up in the app: {link}")
+    elif APP_PUBLIC_URL:
         lines.append(f"➡️ Take it up in the app: {APP_PUBLIC_URL}")
     return "\n".join(lines)
 
@@ -180,9 +215,10 @@ def create_call_out(
     db.refresh(call_out)
 
     try:
-        _post_webhook(db, club_id, body.system, _webhook_content(
+        _post_call_out(db, club_id, body.system, _webhook_content(
             call_out,
             f"📣 **Call Out!** {name_with_mention(db, call_out.creator_name, call_out.creator_player_id)} is looking for a game",
+            _call_out_link(db, club_id, call_out),
         ))
     except Exception:
         pass
@@ -237,7 +273,7 @@ def take_call_out(
             f"✅ **Call Out taken!** {name_with_mention(db, taker.name, taker.id)} "
             f"is playing {name_with_mention(db, c.creator_name, c.creator_player_id)}"
         )
-        _post_webhook(db, club_id, c.system, _webhook_content(c, header))
+        _post_call_out(db, club_id, c.system, _webhook_content(c, header))
     except Exception:
         pass
 
@@ -263,4 +299,18 @@ def cancel_call_out(
     db.add(c)
     db.commit()
     db.refresh(c)
+
+    # The channel was told the game was going, so it should be told it isn't.
+    # Without this a call-out just stopped being mentioned, and anyone who had
+    # been meaning to take it up found out by turning up to the app.
+    try:
+        header = (
+            f"🚫 **Call Out withdrawn** — "
+            f"{name_with_mention(db, c.creator_name, c.creator_player_id)} "
+            f"is no longer looking for this game"
+        )
+        _post_call_out(db, club_id, c.system, _webhook_content(c, header))
+    except Exception:
+        pass
+
     return _serialize(c, my_player_id)

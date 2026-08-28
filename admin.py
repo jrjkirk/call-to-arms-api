@@ -2616,7 +2616,9 @@ def create_league_season(
 # ---------------------------------------------------------------------------
 
 # Shown (and creatable) for every system the club has enabled.
-WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = ("signup", "pairings", "call_to_arms", "level_up")
+WEBHOOK_TYPES_PER_SYSTEM: tuple[str, ...] = (
+    "signup", "pairings", "call_to_arms", "level_up", "call_outs",
+)
 # Shown (and creatable) only for systems that ALSO have their league enabled
 # (ClubSystem.league_enabled) — these were club-wide (system_id always NULL)
 # before leagues themselves became per-system; a club running two leagues
