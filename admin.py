@@ -7,6 +7,7 @@ Permission model:
 """
 import os
 import re
+from urllib.parse import quote
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
@@ -32,7 +33,7 @@ from auth import (
     valid_scopes,
 )
 import discord_guild
-from database import scoped, posting_enabled, posting_key, POSTING_KINDS, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url
+from database import scoped, posting_enabled, posting_key, POSTING_KINDS, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url, club_app_url
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -1087,9 +1088,16 @@ def call_to_arms_post_now(
             ).all()
         ]
 
+    # Same link the scheduled post builds — the club's own subdomain and this
+    # system's signup tab. It used to pass APP_PUBLIC_URL, which is only ever
+    # set on the GitHub Actions runner, so in the API process it was the empty
+    # string and every manual post rendered {signup_url} as nothing at all.
+    club = db.get(Club, user.club_id)
+    signup_url = club_app_url(club, f"/signup?system={quote(body.system)}")
+
     try:
         cta_content.post(
-            webhook_url, template, body.system, next_session, APP_PUBLIC_URL,
+            webhook_url, template, body.system, next_session, signup_url,
             image_mode=image_mode, image_url=image_url, missions=missions,
         )
     except Exception as e:

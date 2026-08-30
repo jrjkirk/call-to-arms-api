@@ -205,11 +205,21 @@ def _is_call_to_arms_due(
 ) -> bool:
     """Return True if the call-to-arms post should fire right now.
 
-    Same shape as _is_auto_pairings_due (enabled gate, last-week dedup, a
-    90-minute fire window at the configured time), but scheduled relative to
-    the club's session day: `post_date` is the session date minus
-    `days_before`, so the caller decides *which* date to fire on and this
-    just gates on today matching it plus the time window.
+    Fires on `post_date` (the session date minus `days_before`) at or after the
+    club's configured time, once per target week — the last_week dedup is what
+    makes "at or after" safe to repeat on every hourly tick.
+
+    This used to close 90 minutes after the configured time, which gave an
+    hourly cron exactly two chances to land. GitHub Actions does not promise
+    punctual scheduled runs — it delays them under load and drops them
+    outright — so two missed ticks silently cost a club its whole week's post,
+    with no catch-up and nothing in the logs to say a post had been due. That
+    is what happened to The Old World at EGNWGC for the 02/09/2026 session.
+
+    It still never posts on a day other than the one configured: a run that is
+    late by hours now catches up, a run that is late by a day does not, because
+    a "sign up for Wednesday" message arriving on Tuesday night is worse than
+    one that never arrives.
 
     settings keys: enabled (bool), time ("HH:MM"), last_week (str|None).
     now_uk must be a timezone-aware datetime in Europe/London.
@@ -223,5 +233,4 @@ def _is_call_to_arms_due(
         return False
     h, m = map(int, settings["time"].split(":"))
     fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
-    fire_end = fire_start + timedelta(minutes=90)
-    return fire_start <= now_uk < fire_end
+    return now_uk >= fire_start
