@@ -2,7 +2,11 @@ name: Auto-Pairings Check
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Deliberately not on the hour: ':00' is the most contended slot on
+    # GitHub's scheduler and these runs were being throttled to about five
+    # a day. Staggered across the four hourly jobs so they don't queue
+    # behind each other either.
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 jobs:

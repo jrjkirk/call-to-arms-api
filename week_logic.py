@@ -172,8 +172,11 @@ def _is_auto_pairings_due(
         return False
     h, m = map(int, settings["time"].split(":"))
     fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
-    fire_end = fire_start + timedelta(minutes=90)
-    return fire_start <= now_uk < fire_end
+    # Open-ended to the end of the configured day, for the reason set out in
+    # _is_call_to_arms_due: the "hourly" cron is nothing of the sort, and a
+    # 90-minute window silently cost a club a week's post. Repeats are
+    # harmless because last_week above already deduped this target week.
+    return now_uk >= fire_start
 
 
 def _is_table_booking_cutoff_due(cutoff_day: str, cutoff_time: str, now_uk: datetime) -> bool:
@@ -183,8 +186,10 @@ def _is_table_booking_cutoff_due(cutoff_day: str, cutoff_time: str, now_uk: date
     table_booking.py's send_table_booking_notification() already guards
     against a duplicate send for the same (club, system, week) by checking
     TableBookingNotification, so this only needs the day/time fire window.
-    Same 90-minute window convention as the other due-checks, matching the
-    hourly GitHub Actions cron cadence.
+    Fires from the cutoff time to the end of the cutoff day, for the reason
+    set out in _is_call_to_arms_due — the cron this rides on is far less
+    punctual than "hourly" suggests. Safe to re-evaluate on every tick because
+    of the TableBookingNotification guard described above.
 
     now_uk must be a timezone-aware datetime in Europe/London.
     """
@@ -193,8 +198,7 @@ def _is_table_booking_cutoff_due(cutoff_day: str, cutoff_time: str, now_uk: date
         return False
     h, m = map(int, cutoff_time.split(":"))
     fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
-    fire_end = fire_start + timedelta(minutes=90)
-    return fire_start <= now_uk < fire_end
+    return now_uk >= fire_start
 
 
 def _is_call_to_arms_due(
