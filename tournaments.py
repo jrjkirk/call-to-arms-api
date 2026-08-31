@@ -8,7 +8,7 @@ means holding that system's admin scope at the active club, so the person who
 already runs Kill Team nights is the person who can run a Kill Team event.
 """
 import random
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 import tournament_pairing as tp
+import tournament_schedule as sched
 import tournament_scoring as scoring
 from auth import active_club_id, admin_scopes, current_user, public_club_id, require_user
 from database import active_player_id_for, get_session
@@ -135,6 +136,13 @@ def _summary(db: Session, t: Tournament, entries=None) -> dict:
         "win_points": t.win_points, "draw_points": t.draw_points,
         "loss_points": t.loss_points, "bye_points": t.bye_points,
         "seeding": t.seeding, "brackets": t.brackets or [],
+        "end_date": t.end_date.isoformat() if t.end_date else None,
+        "days": t.days, "round_minutes": t.round_minutes,
+        "day_dates": sched.day_dates(t),
+        # Never empty: a first-time TO gets a workable running order rather
+        # than a blank grid, and can then change any of it.
+        "schedule": t.schedule or sched.generate(t),
+        "schedule_is_default": not t.schedule,
         "scoring": scoring.config(t),
         # The formula in plain sentences, for printing next to the standings.
         # An unpublished sort key is itself a problem — players can't check a
@@ -227,6 +235,7 @@ def get_tournament(
         "rounds_total": t.rounds,
         "rounds": [{
             "id": r.id, "round_no": r.round_no, "status": r.status,
+            "slot": sched.round_slot(t, r.round_no),
             "games": [_game_dict(db, g, names) for g in games if g.round_id == r.id],
         } for r in visible],
         "standings": _standings(db, t),
@@ -244,6 +253,8 @@ class TournamentBody(BaseModel):
     start_time: Optional[str] = None
     blurb: Optional[str] = None
     rounds: int = 3
+    days: int = 1
+    round_minutes: int = 150
     points_limit: Optional[int] = None
     capacity: Optional[int] = None
 
@@ -269,7 +280,10 @@ def create_tournament(
         club_id=club_id, system_id=body.system_id, name=body.name.strip(),
         blurb=(body.blurb or "").strip() or None,
         event_date=when, start_time=body.start_time,
-        rounds=body.rounds, points_limit=body.points_limit,
+        rounds=body.rounds, days=max(1, body.days),
+        round_minutes=max(30, body.round_minutes),
+        end_date=(when + timedelta(days=body.days - 1)) if body.days > 1 else None,
+        points_limit=body.points_limit,
         capacity=body.capacity, created_by_user_id=user.id,
     )
     _require_to(db, user, club_id, t)
@@ -290,6 +304,10 @@ class TournamentPatch(BaseModel):
     status: Optional[str] = None
     seeding: Optional[str] = None
     brackets: Optional[list] = None
+    days: Optional[int] = None
+    round_minutes: Optional[int] = None
+    schedule: Optional[list] = None
+    regenerate_schedule: Optional[bool] = None
     scoring: Optional[dict] = None
     win_points: Optional[int] = None
     draw_points: Optional[int] = None
@@ -319,6 +337,16 @@ def patch_tournament(
             t.event_date = date.fromisoformat(body.event_date)
         except ValueError:
             raise HTTPException(status_code=422, detail="Date must be YYYY-MM-DD.")
+    if body.days is not None:
+        if not (1 <= body.days <= 7):
+            raise HTTPException(status_code=422, detail="An event can run over 1 to 7 days.")
+        t.days = body.days
+    if body.round_minutes is not None:
+        if not (30 <= body.round_minutes <= 480):
+            raise HTTPException(status_code=422, detail="A round is 30 to 480 minutes long.")
+        t.round_minutes = body.round_minutes
+    if body.schedule is not None:
+        t.schedule = sched.normalise(body.schedule, t)
     if body.scoring is not None:
         errs = scoring.validate(body.scoring)
         if errs:
@@ -347,6 +375,19 @@ def patch_tournament(
         v = getattr(body, f)
         if v is not None:
             setattr(t, f, v.strip() if isinstance(v, str) else v)
+
+    # end_date is derived, never typed — two fields that must agree are two
+    # fields that eventually won't.
+    t.end_date = (t.event_date + timedelta(days=t.days - 1)) if t.days > 1 else None
+
+    # Changing the shape of the event invalidates a schedule built for the old
+    # shape, so a stored one is regenerated rather than left describing rounds
+    # that no longer exist.
+    if body.regenerate_schedule or (
+        t.schedule and (body.days is not None or body.rounds is not None
+                        or body.round_minutes is not None)
+    ):
+        t.schedule = sched.generate(t)
 
     t.updated_at = datetime.utcnow()
     db.add(t)

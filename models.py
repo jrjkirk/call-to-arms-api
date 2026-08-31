@@ -850,6 +850,20 @@ class Tournament(SQLModel, table=True):
     points_limit: Optional[int] = None          # army size, e.g. 2000
     capacity: Optional[int] = None              # None = uncapped
 
+    # Multi-day events. event_date is always day one; end_date is NULL for a
+    # one-day event, so nothing existing has to change to keep working.
+    end_date: Optional[date] = None
+    days: int = 1
+    # How long a round is allowed, used to lay out a default schedule.
+    round_minutes: int = 150
+
+    # The running order: rounds and everything between them, as a list of
+    # {kind, day, start, end, round?, label?}. Kept as JSON rather than its own
+    # table because it is read and written whole, never queried across, and a
+    # TO wants to drag a lunch break around without a migration. Generated from
+    # rounds/days/round_minutes on demand, then edited freely.
+    schedule: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
     # draft   — being set up, invisible to players
     # open    — taking entries
     # closed  — entries shut, not yet started
