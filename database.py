@@ -102,6 +102,10 @@ WRITE_ALLOWED_TABLES: set[str] = {
                            # scripts on every invocation
     "scheduled_job_claims", # scheduler mutual exclusion: one row per (job,
                            # tick) actually worked — see scheduler.py
+    "tournaments",        # events feature: the event itself
+    "tournament_entries", # who is in it (members and visiting guests)
+    "tournament_rounds",  # one row per Swiss round
+    "tournament_games",   # the games in each round, incl. byes
     "audit_log_entries",  # platform-wide "who changed X" log, appended by
                            # admin.py's mutation endpoints
     "club_requests",      # "please add my club" submissions from the

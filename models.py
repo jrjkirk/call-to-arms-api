@@ -819,6 +819,154 @@ class ScheduledJobRun(SQLModel, table=True):
     detail: Optional[str] = None
 
 
+class Tournament(SQLModel, table=True):
+    """One competitive event: a day, a system, a number of Swiss rounds.
+
+    Deliberately its own tree rather than a mode on Signup/Pairing. `Pairing` is
+    keyed on `week` and a tournament has rounds one to five on a single day;
+    `Signup` carries vibe and ETA, which mean nothing to a competitive event.
+    Bending either would have put tournament-only nullable columns on the two
+    hottest tables in the app.
+
+    What it does NOT own: tables and the calendar. venue_event_id points at the
+    VenueEvent that holds the room for the day (its own docstring names a
+    tournament as the case it was built for), and club_event_id puts it on the
+    club page's calendar. Both optional, because a club with no venue can still
+    run an event.
+    """
+    __tablename__ = "tournaments"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system_id: int = Field(foreign_key="systems.id", index=True)
+
+    name: str
+    blurb: Optional[str] = None
+    event_date: date = Field(index=True)
+    start_time: Optional[str] = None            # "HH:MM" local
+
+    rounds: int = 3
+    points_limit: Optional[int] = None          # army size, e.g. 2000
+    capacity: Optional[int] = None              # None = uncapped
+
+    # draft   — being set up, invisible to players
+    # open    — taking entries
+    # closed  — entries shut, not yet started
+    # running — at least one round generated
+    # finished— final standings stand
+    status: str = Field(default="draft", index=True)
+
+    # Tournament points per outcome. Defaults are the common 3/1/0, but systems
+    # and TOs disagree often enough that hardcoding it would be wrong.
+    win_points: int = 3
+    draw_points: int = 1
+    loss_points: int = 0
+    # What a bye is worth. Usually a win, occasionally less so it can't be the
+    # best route to the top table.
+    bye_points: int = 3
+
+    # Ordered tiebreaker keys applied after tournament points. See
+    # tournament_scoring.TIEBREAKERS for what each one means.
+    tiebreakers: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
+    venue_event_id: Optional[int] = Field(default=None, foreign_key="venue_events.id", index=True)
+    club_event_id: Optional[int] = Field(default=None, foreign_key="club_events.id", index=True)
+
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TournamentEntry(SQLModel, table=True):
+    """One person in one tournament.
+
+    player_id is nullable for the same reason VenueBooking.user_id is: an open
+    event is the whole point of the multi-club network, and someone travelling
+    from another club may have no Player row here at all. A guest is identified
+    by name and email, exactly as a guest booking is.
+
+    Waitlisting is a status rather than a second table — a waitlisted entry
+    becomes a real one by changing one word when somebody drops.
+    """
+    __tablename__ = "tournament_entries"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tournament_id: int = Field(foreign_key="tournaments.id", index=True)
+
+    player_id: Optional[int] = Field(default=None, foreign_key="players.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    display_name: str                            # always set, guest or member
+    contact_email: Optional[str] = None
+
+    faction: Optional[str] = None
+    army_list: Optional[str] = None              # free text; validation is out of scope
+    notes: Optional[str] = None
+
+    # registered | waitlisted | checked_in | dropped
+    # Only checked_in entries are paired. A drop keeps its played games.
+    status: str = Field(default="registered", index=True)
+    # Optional manual seeding for round one; None means random.
+    seed: Optional[int] = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TournamentRound(SQLModel, table=True):
+    """One round. Published separately from being paired, so a TO can generate,
+    look at it, fix a table, and only then let players see it — the same
+    two-step the weekly pairings already use."""
+    __tablename__ = "tournament_rounds"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tournament_id: int = Field(foreign_key="tournaments.id", index=True)
+    round_no: int
+
+    # paired | published | scored
+    status: str = Field(default="paired", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TournamentGame(SQLModel, table=True):
+    """One game in one round. b_entry_id NULL is a bye, matching how Pairing
+    already represents one.
+
+    Scores are the system's own battle points / VPs and are only used for
+    tiebreaks; `result` is what tournament points are computed from, so a TO
+    can record an outcome without scores when a table runs out of time.
+    """
+    __tablename__ = "tournament_games"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    round_id: int = Field(foreign_key="tournament_rounds.id", index=True)
+    tournament_id: int = Field(foreign_key="tournaments.id", index=True)
+
+    a_entry_id: int = Field(foreign_key="tournament_entries.id", index=True)
+    b_entry_id: Optional[int] = Field(default=None, foreign_key="tournament_entries.id", index=True)
+
+    # The real table this is seated on, when the club has a venue.
+    table_id: Optional[int] = Field(default=None, foreign_key="venue_tables.id", index=True)
+    table_label: Optional[str] = None            # fallback when there's no venue
+
+    a_score: Optional[int] = None
+    b_score: Optional[int] = None
+    # None = not played yet. "a" | "b" | "draw" | "bye"
+    result: Optional[str] = Field(default=None, index=True)
+
+    # Who said so. A player-reported result waits for confirmation; a
+    # TO-entered one is authoritative immediately.
+    reported_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    confirmed: bool = False
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ScheduledJobClaim(SQLModel, table=True):
     """One row per (job, tick) actually worked, so exactly one runner does it.
 
