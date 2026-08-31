@@ -13,7 +13,12 @@ from sqlmodel import Session, select
 from database import engine, record_job_run, scoped, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting
 from models import ClubSystem, Pairing, PublishState, Signup, SystemConfig
 from pairings_engine import generate
-from post_pairings_image import post_pairings_image_for
+# Qualified with the package name, not a bare sibling import: these modules
+# are imported BOTH as scripts (python scripts/x.py, where scripts/ lands on
+# sys.path) and as a package (scheduler.py, where it does not). Only the
+# qualified form works in both, and PYTHONPATH=. — which CLAUDE.md requires
+# and every workflow sets — is what makes it resolve for the script case.
+from scripts.post_pairings_image import post_pairings_image_for
 from table_booking import maybe_send_table_booking
 from week_logic import _is_auto_pairings_due, is_session_week, next_session_date
 

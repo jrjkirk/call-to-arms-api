@@ -19,7 +19,12 @@ from sqlmodel import Session, select
 from database import posting_enabled, discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
 from models import Club, ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
-from render_pairings_image import render_pairings_image
+# Qualified with the package name, not a bare sibling import: these modules
+# are imported BOTH as scripts (python scripts/x.py, where scripts/ lands on
+# sys.path) and as a package (scheduler.py, where it does not). Only the
+# qualified form works in both, and PYTHONPATH=. — which CLAUDE.md requires
+# and every workflow sets — is what makes it resolve for the script case.
+from scripts.render_pairings_image import render_pairings_image
 from levels import levels_for_players
 
 

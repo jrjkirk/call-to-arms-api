@@ -3,6 +3,10 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException, Response
+import asyncio
+from contextlib import asynccontextmanager
+
+import scheduler
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select, or_
@@ -36,7 +40,31 @@ from analytics import router as analytics_router
 from call_outs import router as call_outs_router
 from venue_api import router as venue_router
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the in-process scheduler, if this machine is the one that runs it.
+
+    Off unless SCHEDULER_ENABLED is set — local .env points at a real database
+    holding real Discord webhooks, so a loop that started by default would make
+    `uvicorn main:app --reload` post to a live club channel. See scheduler.py.
+    """
+    task = None
+    if scheduler.enabled():
+        task = asyncio.create_task(scheduler.tick_loop())
+    else:
+        print("[scheduler] disabled (SCHEDULER_ENABLED unset)")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")

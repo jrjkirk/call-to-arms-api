@@ -17,7 +17,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.image as mpimg
 
-from render_pairings_image import _icon_png_path
+# Qualified with the package name, not a bare sibling import: these modules
+# are imported BOTH as scripts (python scripts/x.py, where scripts/ lands on
+# sys.path) and as a package (scheduler.py, where it does not). Only the
+# qualified form works in both, and PYTHONPATH=. — which CLAUDE.md requires
+# and every workflow sets — is what makes it resolve for the script case.
+from scripts.render_pairings_image import _icon_png_path
 
 
 def _to_rankings_render_rows(rankings: list[dict]) -> list[dict]:
