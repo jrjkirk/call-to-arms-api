@@ -857,6 +857,20 @@ class Tournament(SQLModel, table=True):
     # How long a round is allowed, used to lay out a default schedule.
     round_minutes: int = 150
 
+    # Poster image for the events diary. NULL falls back to the game system's
+    # logo, so an event always has a picture without a TO having to find one.
+    image_url: Optional[str] = None
+
+    # Ticketing. Placeholders for now: nothing here takes payment, it records
+    # what a TO already knows so check-in can cross-reference it. ticket_url
+    # points at whatever they sell through today.
+    ticket_price_pence: Optional[int] = None
+    ticket_url: Optional[str] = None
+
+    # Army lists. Collected as free text; validation is somebody else's tool.
+    list_required: bool = False
+    list_deadline: Optional[date] = None
+
     # The running order: rounds and everything between them, as a list of
     # {kind, day, start, end, round?, label?}. Kept as JSON rather than its own
     # table because it is read and written whole, never queried across, and a
@@ -944,6 +958,12 @@ class TournamentEntry(SQLModel, table=True):
     # Judged once for the whole event, not per game. Optional, and whether it
     # touches the standings at all is a per-event scoring decision.
     painting_score: Optional[int] = None
+
+    # none | paid | comp | refunded. A placeholder for real ticketing: no money
+    # moves through here, a TO marks it, and check-in reads it so nobody gets
+    # waved in who hasn't paid.
+    ticket_status: str = Field(default="none", index=True)
+    list_submitted_at: Optional[datetime] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

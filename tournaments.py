@@ -99,6 +99,8 @@ def _entry_dict(e: TournamentEntry) -> dict:
         "id": e.id, "name": e.display_name, "player_id": e.player_id,
         "faction": e.faction, "status": e.status, "seed": e.seed,
         "bracket": e.bracket, "painting": e.painting_score,
+        "ticket_status": e.ticket_status,
+        "list_submitted": e.list_submitted_at is not None,
         "army_list": e.army_list, "notes": e.notes,
     }
 
@@ -128,6 +130,14 @@ def _summary(db: Session, t: Tournament, entries=None) -> dict:
         "date": t.event_date.isoformat(), "start_time": t.start_time,
         "system": system.name if system else None,
         "system_id": t.system_id,
+        "system_slug": system.slug if system else None,
+        # NULL means "use the game system's logo", resolved client-side from
+        # /logos/<slug>.png — so every event has a picture with no work.
+        "image_url": t.image_url,
+        "ticket_price_pence": t.ticket_price_pence,
+        "ticket_url": t.ticket_url,
+        "list_required": t.list_required,
+        "list_deadline": t.list_deadline.isoformat() if t.list_deadline else None,
         "rounds": t.rounds, "points_limit": t.points_limit,
         "capacity": t.capacity, "status": t.status,
         "entries": len(counted),
@@ -159,7 +169,15 @@ def _summary(db: Session, t: Tournament, entries=None) -> dict:
     }
 
 
-def _standings(db: Session, t: Tournament) -> list[dict]:
+def _standings(db: Session, t: Tournament, for_admin: bool = False) -> list[dict]:
+    """Standings. Sportsmanship and painting are TO-only.
+
+    Both are judgements about a person rather than a record of what happened at
+    the table, and showing a player the sportsmanship number their opponents
+    gave them mid-event is a good way to sour an afternoon. They still COUNT
+    where the event is configured to use them; they are simply not itemised
+    back to the field.
+    """
     entries = _entries(db, t.id)
     rows = scoring.compute(t, entries, _games(db, t.id))
     return [{
@@ -169,7 +187,7 @@ def _standings(db: Session, t: Tournament) -> list[dict]:
         "wins": s.wins, "draws": s.draws, "losses": s.losses, "byes": s.byes,
         "vp_for": round(s.vp_for, 2), "raw_vp": s.raw_vp,
         "diff": round(s.diff, 2), "sos": s.sos,
-        "sports": s.sports_avg, "painting": s.painting,
+        **({"sports": s.sports_avg, "painting": s.painting} if for_admin else {}),
         "dropped": s.dropped,
     } for i, s in enumerate(rows)]
 
@@ -238,7 +256,53 @@ def get_tournament(
             "slot": sched.round_slot(t, r.round_no),
             "games": [_game_dict(db, g, names) for g in games if g.round_id == r.id],
         } for r in visible],
-        "standings": _standings(db, t),
+        "standings": _standings(db, t, for_admin=is_admin),
+        # Everything the player view needs to render itself, so it doesn't have
+        # to reason about entries it isn't allowed to see.
+        "me": _me(db, t, entries, games, my_entry_id),
+    }
+
+
+def _me(db: Session, t: Tournament, entries, games, my_entry_id) -> Optional[dict]:
+    """This player's own slice of the event: their entry, and their games."""
+    if not my_entry_id:
+        return None
+    entry = next((e for e in entries if e.id == my_entry_id), None)
+    if entry is None:
+        return None
+    names = {e.id: e.display_name for e in entries}
+    rounds = {r.id: r for r in _rounds(db, t.id)}
+    mine = []
+    for g in games:
+        if my_entry_id not in (g.a_entry_id, g.b_entry_id):
+            continue
+        r = rounds.get(g.round_id)
+        # A player must not see a round the TO hasn't published, the same rule
+        # the weekly pairings follow.
+        if r is None or r.status == "paired":
+            continue
+        i_am_a = g.a_entry_id == my_entry_id
+        opp_id = g.b_entry_id if i_am_a else g.a_entry_id
+        mine.append({
+            "game_id": g.id, "round_no": r.round_no,
+            "opponent": names.get(opp_id) if opp_id else None,
+            "table": g.table_label,
+            "my_score": g.a_score if i_am_a else g.b_score,
+            "their_score": g.b_score if i_am_a else g.a_score,
+            "result": ("bye" if g.result == "bye" else
+                       None if not g.result else
+                       "win" if (g.result == "a") == i_am_a else
+                       "draw" if g.result == "draw" else "loss"),
+            "confirmed": g.confirmed,
+            "i_am_a": i_am_a,
+        })
+    return {
+        "entry_id": entry.id, "name": entry.display_name,
+        "status": entry.status, "faction": entry.faction,
+        "ticket_status": entry.ticket_status,
+        "army_list": entry.army_list,
+        "list_submitted": entry.list_submitted_at is not None,
+        "games": mine,
     }
 
 
@@ -306,6 +370,10 @@ class TournamentPatch(BaseModel):
     brackets: Optional[list] = None
     days: Optional[int] = None
     round_minutes: Optional[int] = None
+    image_url: Optional[str] = None
+    ticket_price_pence: Optional[int] = None
+    ticket_url: Optional[str] = None
+    list_required: Optional[bool] = None
     schedule: Optional[list] = None
     regenerate_schedule: Optional[bool] = None
     scoring: Optional[dict] = None
@@ -371,6 +439,7 @@ def patch_tournament(
         t.tiebreakers = body.tiebreakers
 
     for f in ("name", "blurb", "start_time", "rounds", "points_limit", "capacity",
+              "image_url", "ticket_price_pence", "ticket_url", "list_required",
               "win_points", "draw_points", "loss_points", "bye_points"):
         v = getattr(body, f)
         if v is not None:
@@ -431,12 +500,20 @@ def add_entry(
         raise HTTPException(status_code=404, detail="Tournament not found.")
 
     entries = _entries(db, t.id)
-    player_id = body.player_id if is_admin else None
-    if user and player_id is None:
-        player_id = active_player_id_for(db, user, club_id)
 
-    if user and not is_admin:
-        already = next((e for e in entries if e.user_id == user.id), None)
+    # An admin who supplies a name is adding SOMEBODY ELSE — a walk-in, or a
+    # visitor from another club. Their own identity must not be stamped onto
+    # that entry, which is what happened before: every player a TO added at the
+    # door came out owned by the TO's player record, so the TO then matched as
+    # "entered" and could report those games as their own.
+    adding_someone_else = is_admin and bool((body.display_name or "").strip())
+    player_id = body.player_id if is_admin else None
+    if user and player_id is None and not adding_someone_else:
+        player_id = active_player_id_for(db, user, club_id)
+    owner_user_id = user.id if (user and not adding_someone_else) else None
+
+    if owner_user_id:
+        already = next((e for e in entries if e.user_id == owner_user_id), None)
         if already:
             raise HTTPException(status_code=409, detail="You're already entered.")
 
@@ -458,7 +535,7 @@ def add_entry(
 
     e = TournamentEntry(
         tournament_id=t.id, player_id=player_id,
-        user_id=user.id if (user and not is_admin) else None,
+        user_id=owner_user_id,
         display_name=name,
         contact_email=(body.contact_email or "").strip() or None,
         faction=(body.faction or "").strip() or None,
@@ -474,6 +551,7 @@ def add_entry(
 
 class EntryPatch(BaseModel):
     status: Optional[str] = None
+    ticket_status: Optional[str] = None
     faction: Optional[str] = None
     display_name: Optional[str] = None
     seed: Optional[int] = None
@@ -502,7 +580,14 @@ def patch_entry(
     if body.status is not None:
         if body.status not in ("registered", "waitlisted", "checked_in", "dropped"):
             raise HTTPException(status_code=422, detail="Unknown entry status.")
+        # Checking someone in who hasn't paid is allowed but not silent — the
+        # TO is told, and decides. Blocking it outright would be wrong: people
+        # pay at the door, and a hard stop at 9am is the last thing a TO needs.
         e.status = body.status
+    if body.ticket_status is not None:
+        if body.ticket_status not in ("none", "paid", "comp", "refunded"):
+            raise HTTPException(status_code=422, detail="Unknown ticket status.")
+        e.ticket_status = body.ticket_status
     for f in ("faction", "display_name", "seed", "bracket", "painting_score",
               "army_list", "notes"):
         v = getattr(body, f)
@@ -756,6 +841,117 @@ def set_result(
 
     names = {e.id: e.display_name for e in _entries(db, t.id)}
     return {"ok": True, "game": _game_dict(db, g, names), "standings": _standings(db, t)}
+
+
+# ---------------------------------------------------------------------------
+# Player self-service
+# ---------------------------------------------------------------------------
+
+def _my_entry(db: Session, t: Tournament, user: User, club_id: int) -> TournamentEntry:
+    pid = active_player_id_for(db, user, club_id)
+    e = next((e for e in _entries(db, t.id)
+              if e.user_id == user.id or (pid and e.player_id == pid)), None)
+    if e is None:
+        raise HTTPException(status_code=403, detail="You're not entered in this event.")
+    return e
+
+
+class ReportBody(BaseModel):
+    my_score: Optional[int] = None
+    their_score: Optional[int] = None
+    result: Optional[str] = None          # "win" | "loss" | "draw"
+    sportsmanship: Optional[int] = None   # what I'm giving my opponent
+
+
+@router.post("/{tournament_id}/games/{game_id}/report")
+def report_result(
+    tournament_id: int,
+    game_id: int,
+    body: ReportBody,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """A player reporting their OWN game.
+
+    Everything is expressed from the reporter's side — "my score", "I won" —
+    and mapped onto the game's a/b slots here, so a player never has to work out
+    whether they are player A. Refuses any game they aren't in, which is the
+    whole point of this existing separately from the TO's endpoint.
+
+    A player report is not `confirmed`. The TO's console shows it as reported
+    and can override it, so a disputed score never stalls a round.
+    """
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    mine = _my_entry(db, t, user, club_id)
+
+    g = db.get(TournamentGame, game_id)
+    if g is None or g.tournament_id != t.id:
+        raise HTTPException(status_code=404, detail="Game not found.")
+    if mine.id not in (g.a_entry_id, g.b_entry_id):
+        raise HTTPException(status_code=403, detail="That isn't your game.")
+    if g.result == "bye":
+        raise HTTPException(status_code=409, detail="A bye has no result to report.")
+    if g.confirmed and g.result:
+        raise HTTPException(
+            status_code=409,
+            detail="The organiser has already confirmed this result. Speak to them to change it.",
+        )
+
+    i_am_a = g.a_entry_id == mine.id
+    if body.result is not None:
+        if body.result not in ("win", "loss", "draw"):
+            raise HTTPException(status_code=422, detail="Result must be win, loss or draw.")
+        g.result = ("draw" if body.result == "draw"
+                    else ("a" if (body.result == "win") == i_am_a else "b"))
+    if body.my_score is not None:
+        setattr(g, "a_score" if i_am_a else "b_score", body.my_score)
+    if body.their_score is not None:
+        setattr(g, "b_score" if i_am_a else "a_score", body.their_score)
+    if body.sportsmanship is not None:
+        cap = scoring.config(t)["sports_scale_max"]
+        if not (0 <= body.sportsmanship <= cap):
+            raise HTTPException(status_code=422, detail=f"Sportsmanship is 0 to {cap}.")
+        # I rate my OPPONENT, so it lands on their side of the row.
+        setattr(g, "b_sports" if i_am_a else "a_sports", body.sportsmanship)
+
+    g.reported_by_user_id = user.id
+    g.confirmed = False
+    g.updated_at = datetime.utcnow()
+    db.add(g)
+    db.commit()
+    return {"ok": True}
+
+
+class MyListBody(BaseModel):
+    army_list: Optional[str] = None
+    faction: Optional[str] = None
+
+
+@router.post("/{tournament_id}/my-list")
+def submit_my_list(
+    tournament_id: int,
+    body: MyListBody,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Submit or update your own army list. Free text on purpose — validating a
+    list is system-specific, genuinely large, and every TO already uses a
+    dedicated tool for it."""
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    e = _my_entry(db, t, user, club_id)
+    if body.army_list is not None:
+        e.army_list = body.army_list.strip() or None
+        e.list_submitted_at = datetime.utcnow() if e.army_list else None
+    if body.faction is not None:
+        e.faction = body.faction.strip() or None
+    e.updated_at = datetime.utcnow()
+    db.add(e)
+    db.commit()
+    return {"ok": True, "list_submitted": e.list_submitted_at is not None}
 
 
 @router.get("/{tournament_id}/standings")
