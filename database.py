@@ -9,6 +9,7 @@ WRITE_ALLOWED_TABLES is the explicit allow-list. As we build out write features
 table-by-table, we add the table name here.
 """
 import os
+from datetime import datetime, timedelta
 from typing import Optional, Type, TypeVar
 from urllib.parse import urlparse
 
@@ -99,6 +100,8 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "platform_banner",    # site-wide announcement banner, platform-admin only
     "scheduled_job_runs", # cron heartbeat, written by the two scheduler
                            # scripts on every invocation
+    "scheduled_job_claims", # scheduler mutual exclusion: one row per (job,
+                           # tick) actually worked — see scheduler.py
     "audit_log_entries",  # platform-wide "who changed X" log, appended by
                            # admin.py's mutation endpoints
     "club_requests",      # "please add my club" submissions from the
@@ -647,6 +650,46 @@ def record_job_run(db: Session, job_name: str, status: str, detail: Optional[str
     convention of leaving the commit to the caller (both scheduler scripts
     already commit once per club/system inside their loop)."""
     db.add(ScheduledJobRun(job_name=job_name, status=status, detail=detail))
+
+
+def claim_job_period(db: Session, job_name: str, period_key: str) -> bool:
+    """Try to claim one (job, tick) for this process. True means do the work.
+
+    The unique constraint on scheduled_job_claims is the lock — whoever's
+    INSERT lands first wins, and everyone else gets an IntegrityError and does
+    nothing. Caught by constraint violation rather than a dialect-specific
+    ON CONFLICT so the same path works on SQLite locally and Postgres in prod.
+
+    Commits, unlike record_job_run/upsert_setting: a claim is worthless unless
+    it is visible to the other runner immediately, so it cannot wait for the
+    caller. Pass a session used for nothing else — the rollback on a lost race
+    would discard anything else pending on it.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from models import ScheduledJobClaim
+
+    db.add(ScheduledJobClaim(job_name=job_name, period_key=period_key))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False
+    return True
+
+
+def prune_job_claims(db: Session, keep_days: int = 2) -> int:
+    """Drop claims older than `keep_days`. Four jobs on a five-minute tick is
+    about 1,150 rows a day, which is worth nothing kept and a lot of table
+    scanned after a year. Callers commit."""
+    from models import ScheduledJobClaim
+
+    cutoff = datetime.utcnow() - timedelta(days=keep_days)
+    stale = db.exec(
+        select(ScheduledJobClaim).where(ScheduledJobClaim.claimed_at < cutoff)
+    ).all()
+    for row in stale:
+        db.delete(row)
+    return len(stale)
 
 
 def log_audit(

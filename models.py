@@ -6,7 +6,7 @@ strictly reading from these tables until later in the migration.
 """
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, UniqueConstraint
 from sqlmodel import SQLModel, Field
 
 
@@ -817,6 +817,40 @@ class ScheduledJobRun(SQLModel, table=True):
     # can still mean "completed, but N clubs had errors".
     status: str = "ok"
     detail: Optional[str] = None
+
+
+class ScheduledJobClaim(SQLModel, table=True):
+    """One row per (job, tick) actually worked, so exactly one runner does it.
+
+    The scheduler moved into the API process (see scheduler.py), which makes
+    "how many of me are there?" a real question. One machine runs today, but
+    `fly deploy` briefly overlaps the outgoing and incoming processes, and the
+    day a second machine exists every post would go out twice.
+
+    The unique constraint IS the lock: a tick inserts its claim and only does
+    the work if the insert took. Postgres advisory locks were the alternative
+    and are wrong here — the session-scoped ones are unreliable through a
+    transaction pooler, and the transaction-scoped ones would be released by
+    the first db.commit() inside each job's own per-club loop.
+
+    A crashed winner leaves its period claimed and nothing runs until the next
+    tick. That is survivable only because the fire windows in week_logic.py run
+    to the end of the configured day; the two mechanisms cover each other, so
+    don't narrow those windows again without revisiting this.
+    """
+    __tablename__ = "scheduled_job_claims"
+    __table_args__ = (
+        UniqueConstraint("job_name", "period_key", name="uq_job_claim_period"),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    job_name: str = Field(index=True)
+    # The tick bucket in UTC, e.g. "2026-08-31T12:05". A string rather than a
+    # timestamp so the uniqueness is exactly the bucket, with no chance of two
+    # runners rounding a datetime a microsecond apart and both winning.
+    period_key: str
+    claimed_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class AuditLogEntry(SQLModel, table=True):
