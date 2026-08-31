@@ -46,22 +46,44 @@ def enabled() -> bool:
     return (os.environ.get("SCHEDULER_ENABLED", "") or "").strip().lower() not in ("", "0", "false")
 
 
+# The jobs this scheduler owns.
+#
+# auto_pairings_check is deliberately NOT here and stays on its GitHub workflow.
+# It renders the pairings image, so it pulls in matplotlib, which the API image
+# does not carry — the workflow installs it separately
+# (`pip install -r requirements.txt matplotlib`). Adding it here would put
+# matplotlib and numpy in a 256 MB container and hold them resident during a
+# render, and an OOM there takes the whole API down rather than just delaying a
+# post. A late pairings post is much the cheaper failure, and its fire window
+# now runs to the end of the day anyway.
+OWNED_JOBS: tuple[tuple[str, str], ...] = (
+    ("call_to_arms_check", "scripts.run_call_to_arms_check"),
+    ("call_outs_check", "scripts.run_call_outs_check"),
+    ("table_booking_cutoff_check", "scripts.run_table_booking_cutoff_check"),
+)
+
+
 def _jobs() -> dict:
-    """Imported lazily so this module stays importable (and the app bootable)
-    even if a job script has a problem — and so a machine with the scheduler
-    switched off never pays for importing four scripts it will not run."""
-    from scripts import (
-        run_auto_pairings_check,
-        run_call_outs_check,
-        run_call_to_arms_check,
-        run_table_booking_cutoff_check,
-    )
-    return {
-        "call_to_arms_check": run_call_to_arms_check.main,
-        "auto_pairings_check": run_auto_pairings_check.main,
-        "call_outs_check": run_call_outs_check.main,
-        "table_booking_cutoff_check": run_table_booking_cutoff_check.main,
-    }
+    """Resolve each job independently, skipping any that won't import.
+
+    Per-job rather than one bulk import: a single unimportable script used to
+    raise out of tick_loop, and because that runs as an asyncio task the
+    exception surfaced only at shutdown — so the scheduler looked switched on,
+    logged nothing, and did nothing. One missing dependency must cost one job,
+    not all of them.
+
+    Imported lazily so a machine with the scheduler off never loads them.
+    """
+    import importlib
+
+    jobs = {}
+    for name, module_path in OWNED_JOBS:
+        try:
+            jobs[name] = importlib.import_module(module_path).main
+        except Exception as e:
+            print(f"[scheduler] {name} unavailable, skipping: {type(e).__name__}: {e}")
+            capture(e, kind="scheduler_job_import", system=name)
+    return jobs
 
 
 def period_key(now: datetime | None = None) -> str:
@@ -93,7 +115,10 @@ def _run_one(name: str, fn) -> None:
 
 async def tick_loop() -> None:
     jobs = _jobs()
-    print(f"[scheduler] started — {len(jobs)} jobs every {TICK_SECONDS}s")
+    if not jobs:
+        print("[scheduler] no jobs could be loaded — not starting")
+        return
+    print(f"[scheduler] started — {len(jobs)} jobs every {TICK_SECONDS}s: {', '.join(jobs)}")
     while True:
         for name, fn in jobs.items():
             try:
