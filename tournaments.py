@@ -26,6 +26,19 @@ from models import (
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
+# Tournaments are still being built out. Until that finishes, every route here
+# is platform-admin only — hiding the nav tab alone would leave the endpoints
+# open to anyone who guessed the URL, which is not the same thing at all.
+# Removing this is the switch that makes the feature live.
+PLATFORM_ADMIN_ONLY = True
+
+
+def _gate(user: Optional[User]) -> None:
+    if not PLATFORM_ADMIN_ONLY:
+        return
+    if user is None or not user.is_platform_admin:
+        raise HTTPException(status_code=404, detail="Not found.")
+
 # Statuses a player-visible tournament can be in. `draft` is the TO's private
 # workspace and never appears on a public list.
 PUBLIC_STATUSES = ("open", "closed", "running", "finished")
@@ -84,7 +97,8 @@ def _entry_dict(e: TournamentEntry) -> dict:
     return {
         "id": e.id, "name": e.display_name, "player_id": e.player_id,
         "faction": e.faction, "status": e.status, "seed": e.seed,
-        "email": e.contact_email, "army_list": e.army_list, "notes": e.notes,
+        "bracket": e.bracket, "painting": e.painting_score,
+        "army_list": e.army_list, "notes": e.notes,
     }
 
 
@@ -92,8 +106,10 @@ def _game_dict(db: Session, g: TournamentGame, names: dict) -> dict:
     table = db.get(VenueTable, g.table_id) if g.table_id else None
     return {
         "id": g.id, "round_id": g.round_id,
-        "a": {"entry_id": g.a_entry_id, "name": names.get(g.a_entry_id, "?"), "score": g.a_score},
-        "b": ({"entry_id": g.b_entry_id, "name": names.get(g.b_entry_id, "?"), "score": g.b_score}
+        "a": {"entry_id": g.a_entry_id, "name": names.get(g.a_entry_id, "?"),
+              "score": g.a_score, "sports": g.a_sports},
+        "b": ({"entry_id": g.b_entry_id, "name": names.get(g.b_entry_id, "?"),
+               "score": g.b_score, "sports": g.b_sports}
               if g.b_entry_id else None),
         "table": table.name if table else g.table_label,
         "table_id": g.table_id,
@@ -118,7 +134,20 @@ def _summary(db: Session, t: Tournament, entries=None) -> dict:
         "waitlisted": len([e for e in entries if e.status == "waitlisted"]),
         "win_points": t.win_points, "draw_points": t.draw_points,
         "loss_points": t.loss_points, "bye_points": t.bye_points,
-        "tiebreakers": t.tiebreakers or list(scoring.DEFAULT_TIEBREAKERS),
+        "seeding": t.seeding, "brackets": t.brackets or [],
+        "scoring": scoring.config(t),
+        # The formula in plain sentences, for printing next to the standings.
+        # An unpublished sort key is itself a problem — players can't check a
+        # result against a rule they were never shown.
+        "scoring_explained": scoring.describe(t),
+        "scoring_options": {
+            "primary": list(scoring.PRIMARY),
+            "tiebreakers": list(scoring.TIEBREAKERS),
+            "vp_mode": ["raw", "capped", "normalised"],
+            "bye_vp_mode": ["fixed", "field_average", "own_average"],
+            "sports_mode": ["tiebreak", "multiplier", "bonus"],
+            "painting_mode": ["tiebreak", "bonus"],
+        },
     }
 
 
@@ -127,10 +156,13 @@ def _standings(db: Session, t: Tournament) -> list[dict]:
     rows = scoring.compute(t, entries, _games(db, t.id))
     return [{
         "rank": i + 1, "entry_id": s.entry_id, "name": s.name,
-        "points": s.points, "played": s.played,
+        "bracket": s.bracket,
+        "points": s.points, "win_points": s.win_points, "played": s.played,
         "wins": s.wins, "draws": s.draws, "losses": s.losses, "byes": s.byes,
-        "vp_for": s.vp_for, "vp_against": s.vp_against, "diff": s.diff,
-        "sos": getattr(s, "sos", 0.0), "dropped": s.dropped,
+        "vp_for": round(s.vp_for, 2), "raw_vp": s.raw_vp,
+        "diff": round(s.diff, 2), "sos": s.sos,
+        "sports": s.sports_avg, "painting": s.painting,
+        "dropped": s.dropped,
     } for i, s in enumerate(rows)]
 
 
@@ -146,6 +178,7 @@ def list_tournaments(
     db: Session = Depends(get_session),
 ):
     """This club's events. Drafts are TO-only and need an admin asking."""
+    _gate(user)
     q = select(Tournament).where(Tournament.club_id == club_id)
     if not (include_drafts and user and admin_scopes(user, db, club_id)):
         q = q.where(Tournament.status.in_(PUBLIC_STATUSES))
@@ -160,6 +193,7 @@ def get_tournament(
     club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     if t.status == "draft" and not (user and admin_scopes(user, db, club_id)):
         raise HTTPException(status_code=404, detail="Tournament not found.")
@@ -221,6 +255,7 @@ def create_tournament(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     try:
         when = date.fromisoformat(body.event_date)
     except ValueError:
@@ -253,6 +288,9 @@ class TournamentPatch(BaseModel):
     points_limit: Optional[int] = None
     capacity: Optional[int] = None
     status: Optional[str] = None
+    seeding: Optional[str] = None
+    brackets: Optional[list] = None
+    scoring: Optional[dict] = None
     win_points: Optional[int] = None
     draw_points: Optional[int] = None
     loss_points: Optional[int] = None
@@ -268,6 +306,7 @@ def patch_tournament(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
 
@@ -280,6 +319,19 @@ def patch_tournament(
             t.event_date = date.fromisoformat(body.event_date)
         except ValueError:
             raise HTTPException(status_code=422, detail="Date must be YYYY-MM-DD.")
+    if body.scoring is not None:
+        errs = scoring.validate(body.scoring)
+        if errs:
+            raise HTTPException(status_code=422, detail=" ".join(errs))
+        # Merged, not replaced, so a partial save can't silently reset knobs
+        # the caller didn't mention.
+        t.scoring = {**(t.scoring or {}), **body.scoring}
+    if body.seeding is not None:
+        if body.seeding not in ("random", "seeded"):
+            raise HTTPException(status_code=422, detail="Seeding must be random or seeded.")
+        t.seeding = body.seeding
+    if body.brackets is not None:
+        t.brackets = [b.strip() for b in body.brackets if str(b).strip()] or None
     if body.tiebreakers is not None:
         bad = [x for x in body.tiebreakers if x not in scoring.TIEBREAKERS]
         if bad:
@@ -328,6 +380,7 @@ def add_entry(
     someone at the door, which is why it is optional-auth: an open event is the
     whole point of the network, and a visitor from another club may have no
     Player row here at all."""
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     is_admin = bool(user and admin_scopes(user, db, club_id))
 
@@ -383,6 +436,8 @@ class EntryPatch(BaseModel):
     faction: Optional[str] = None
     display_name: Optional[str] = None
     seed: Optional[int] = None
+    bracket: Optional[str] = None
+    painting_score: Optional[int] = None
     army_list: Optional[str] = None
     notes: Optional[str] = None
 
@@ -396,6 +451,7 @@ def patch_entry(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     e = db.get(TournamentEntry, entry_id)
@@ -406,7 +462,8 @@ def patch_entry(
         if body.status not in ("registered", "waitlisted", "checked_in", "dropped"):
             raise HTTPException(status_code=422, detail="Unknown entry status.")
         e.status = body.status
-    for f in ("faction", "display_name", "seed", "army_list", "notes"):
+    for f in ("faction", "display_name", "seed", "bracket", "painting_score",
+              "army_list", "notes"):
         v = getattr(body, f)
         if v is not None:
             setattr(e, f, v.strip() if isinstance(v, str) else v)
@@ -426,6 +483,7 @@ def delete_entry(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     e = db.get(TournamentEntry, entry_id)
@@ -457,6 +515,7 @@ def check_in_all(
 ):
     """Check everyone registered in at once, for the TO who has a room in front
     of them and a round to start."""
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     n = 0
@@ -483,6 +542,7 @@ def generate_round(
     """Pair the next round. Refuses if the previous one still has open games —
     Swiss pairs on records, so pairing round three while round two is half
     unscored produces a table that is simply wrong."""
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
 
@@ -552,6 +612,7 @@ def publish_round(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     r = db.get(TournamentRound, round_id)
@@ -575,6 +636,7 @@ def delete_round(
     """Undo a round the TO isn't happy with. Only ever the LAST one, and only
     while nothing has been scored — deleting an earlier round would invalidate
     every pairing made after it."""
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     rounds = _rounds(db, t.id)
@@ -602,6 +664,8 @@ class ResultBody(BaseModel):
     result: Optional[str] = None          # "a" | "b" | "draw" | null to clear
     a_score: Optional[int] = None
     b_score: Optional[int] = None
+    a_sports: Optional[int] = None        # what A was given by B
+    b_sports: Optional[int] = None
     table_label: Optional[str] = None
 
 
@@ -614,6 +678,7 @@ def set_result(
     club_id: int = Depends(active_club_id),
     db: Session = Depends(get_session),
 ):
+    _gate(user)
     t = _get(db, club_id, tournament_id)
     _require_to(db, user, club_id, t)
     g = db.get(TournamentGame, game_id)
@@ -632,6 +697,15 @@ def set_result(
         g.a_score = body.a_score
     if body.b_score is not None:
         g.b_score = body.b_score
+    for f in ("a_sports", "b_sports"):
+        v = getattr(body, f)
+        if v is not None:
+            cap = scoring.config(t)["sports_scale_max"]
+            if not (0 <= v <= cap):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Sportsmanship must be between 0 and {cap}.")
+            setattr(g, f, v)
     if body.table_label is not None:
         g.table_label = body.table_label.strip() or None
 
@@ -646,7 +720,15 @@ def set_result(
 @router.get("/{tournament_id}/standings")
 def get_standings(
     tournament_id: int,
+    user: Optional[User] = Depends(current_user),
     club_id: int = Depends(public_club_id),
     db: Session = Depends(get_session),
 ):
-    return {"standings": _standings(db, _get(db, club_id, tournament_id))}
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    return {
+        "standings": _standings(db, t),
+        # Shipped alongside the numbers on purpose: the sort key belongs next to
+        # the table it sorted.
+        "scoring_explained": scoring.describe(t),
+    }

@@ -32,8 +32,9 @@ import tournament_scoring as scoring
 @dataclass
 class Pair:
     a_entry_id: int
-    b_entry_id: Optional[int]      # None = bye
-    bracket: Optional[int] = None  # tournament points the pair came from
+    b_entry_id: Optional[int]        # None = bye
+    score_bracket: Optional[int] = None   # tournament points the pair came from
+    bracket: Optional[str] = None         # named field, when the event has several
 
 
 def _played_pairs(games) -> set:
@@ -57,7 +58,32 @@ def pair_round(
     *,
     rng: Optional[random.Random] = None,
 ) -> list[Pair]:
-    """Pair one round. Returns the pairs; persisting them is the caller's job.
+    """Pair a round across every bracket. Players only ever meet inside their
+    own bracket, which is how one event runs a championship and a narrative
+    field on the same day."""
+    rng = rng or random.Random()
+    active = [e for e in entries if e.status == "checked_in"]
+    brackets = sorted({(e.bracket or None) for e in active}, key=lambda b: (b is None, b or ""))
+    if len(brackets) <= 1:
+        return _pair_one_bracket(tournament, entries, games, round_no, rng=rng)
+
+    out = []
+    for b in brackets:
+        subset = [e for e in entries if (e.bracket or None) == b]
+        out += _pair_one_bracket(tournament, subset, games, round_no, rng=rng, bracket=b)
+    return out
+
+
+def _pair_one_bracket(
+    tournament,
+    entries,
+    games,
+    round_no: int,
+    *,
+    rng: Optional[random.Random] = None,
+    bracket: Optional[str] = None,
+) -> list[Pair]:
+    """Pair one bracket. Returns the pairs; persisting them is the caller's job.
 
     Round one has no records to sort on, so it uses the TO's seeds where set and
     random order otherwise. Later rounds sort by the same standings players see,
@@ -72,11 +98,23 @@ def pair_round(
         return []
 
     if round_no <= 1:
+        # Seeded events pair top-half against bottom-half, the usual convention:
+        # the first seed plays the middle seed, not the player next to them.
         seeded = [e for e in active if e.seed is not None]
         unseeded = [e for e in active if e.seed is None]
         seeded.sort(key=lambda e: e.seed)
         rng.shuffle(unseeded)
-        ordered = [e.id for e in seeded + unseeded]
+        order = seeded + unseeded
+        if getattr(tournament, "seeding", "random") == "seeded" and len(order) > 3:
+            half = (len(order) + 1) // 2
+            top, bottom = order[:half], order[half:]
+            interleaved = []
+            for i in range(half):
+                interleaved.append(top[i])
+                if i < len(bottom):
+                    interleaved.append(bottom[i])
+            order = interleaved
+        ordered = [e.id for e in order]
         brackets = {None: ordered}
     else:
         # ALL entries, not just active ones: the games include those played by
@@ -111,11 +149,11 @@ def pair_round(
             for extra in leftover[:-1]:
                 matched.append((extra, None))
         for a, b in matched:
-            pairs.append(Pair(a, b, bracket_points))
+            pairs.append(Pair(a, b, bracket_points, bracket))
 
     # Anything still unpaired at the bottom: retry allowing rematches, then bye.
     if floater is not None:
-        pairs.append(Pair(floater, None, None))
+        pairs.append(Pair(floater, None, None, bracket))
 
     pairs = _resolve_byes(pairs, had_bye, tournament)
     return pairs

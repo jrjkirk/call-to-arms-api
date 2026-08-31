@@ -19,6 +19,8 @@ class E:      # stands in for TournamentEntry
     display_name: str
     status: str = "checked_in"
     seed: Optional[int] = None
+    bracket: Optional[str] = None
+    painting_score: Optional[int] = None
 
 
 @dataclass
@@ -28,6 +30,9 @@ class G:      # stands in for TournamentGame
     result: Optional[str] = None
     a_score: int = 0
     b_score: int = 0
+    round_id: int = 1
+    a_sports: Optional[int] = None
+    b_sports: Optional[int] = None
 
 
 @dataclass
@@ -37,6 +42,9 @@ class T:      # stands in for Tournament
     loss_points: int = 0
     bye_points: int = 3
     tiebreakers: Optional[list] = None
+    scoring: Optional[dict] = None
+    seeding: str = "random"
+    brackets: Optional[list] = None
 
 
 FAILURES = []
@@ -138,14 +146,14 @@ t, es = T(), players(4)
 games = [G(1, 2, "a", 20, 5), G(3, 4, "draw", 10, 10)]
 st = ts.compute(t, es, games)
 check("winner tops the table", st[0].entry_id == 1, str([s.entry_id for s in st]))
-check("win scores 3", st[0].points == 3, str(st[0].points))
-check("draws score 1 each", all(s.points == 1 for s in st if s.entry_id in (3, 4)))
-check("loser scores 0", next(s for s in st if s.entry_id == 2).points == 0)
+check("win scores 3", st[0].win_points == 3, str(st[0].win_points))
+check("draws score 1 each", all(s.win_points == 1 for s in st if s.entry_id in (3, 4)))
+check("loser scores 0", next(s for s in st if s.entry_id == 2).win_points == 0)
 check("differential is tracked", st[0].diff == 15, str(st[0].diff))
 
 # a bye is worth its configured points, not a win over nobody
 st = ts.compute(T(bye_points=2), es, [G(1, None, "bye")])
-check("bye uses bye_points", next(s for s in st if s.entry_id == 1).points == 2)
+check("bye uses bye_points", next(s for s in st if s.entry_id == 1).win_points == 2)
 
 # strength of schedule separates equal records
 t = T()
@@ -156,12 +164,12 @@ st = ts.compute(t, es5, games)
 one = next(s for s in st if s.entry_id == 1)
 three = next(s for s in st if s.entry_id == 3)
 check("equal records are split by strength of schedule",
-      one.points == three.points and one.sos != three.sos,
-      f"1: {one.points}/{one.sos}  3: {three.points}/{three.sos}")
+      one.win_points == three.win_points and one.sos != three.sos,
+      f"1: {one.win_points}/{one.sos}  3: {three.win_points}/{three.sos}")
 
 # unplayed games contribute nothing, so standings are safe mid-round
 st = ts.compute(t, players(2), [G(1, 2, None)])
-check("an unplayed game scores nothing", all(s.points == 0 for s in st))
+check("an unplayed game scores nothing", all(s.win_points == 0 for s in st))
 
 # ---------------------------------------------------------------------------
 print("\nA whole 5-round, 17-player event")

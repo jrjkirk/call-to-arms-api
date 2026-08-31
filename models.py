@@ -866,9 +866,23 @@ class Tournament(SQLModel, table=True):
     # best route to the top table.
     bye_points: int = 3
 
-    # Ordered tiebreaker keys applied after tournament points. See
+    # Ordered tiebreaker keys applied after the primary sort. See
     # tournament_scoring.TIEBREAKERS for what each one means.
     tiebreakers: Optional[list] = Field(default=None, sa_column=Column(JSON))
+
+    # The whole scoring policy, as one JSON blob rather than fifteen columns.
+    # Deliberate: TOs want to tune this per event and no two agree, so every
+    # knob added as a column would be another migration. Shape, defaults and
+    # validation live in tournament_scoring.DEFAULT_SCORING. NULL means "use
+    # the defaults", so an event created before a new knob existed still works.
+    scoring: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
+    # How round one is paired: random, or by the seed on each entry.
+    # Seeding matters for events that pool by skill or split into brackets.
+    seeding: str = "random"           # random | seeded
+    # Optional named brackets ("Championship", "Narrative"). Players only ever
+    # meet inside their own bracket, which is how one event runs two fields.
+    brackets: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
     venue_event_id: Optional[int] = Field(default=None, foreign_key="venue_events.id", index=True)
     club_event_id: Optional[int] = Field(default=None, foreign_key="club_events.id", index=True)
@@ -909,6 +923,13 @@ class TournamentEntry(SQLModel, table=True):
     status: str = Field(default="registered", index=True)
     # Optional manual seeding for round one; None means random.
     seed: Optional[int] = None
+    # Which bracket this entry plays in, matching a name in Tournament.brackets.
+    # NULL means the single default field.
+    bracket: Optional[str] = Field(default=None, index=True)
+
+    # Judged once for the whole event, not per game. Optional, and whether it
+    # touches the standings at all is a per-event scoring decision.
+    painting_score: Optional[int] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -955,6 +976,12 @@ class TournamentGame(SQLModel, table=True):
 
     a_score: Optional[int] = None
     b_score: Optional[int] = None
+
+    # Sportsmanship each player RECEIVED for this game — a_sports is what A was
+    # given by B. Stored per game rather than per entry so a single bad-faith
+    # rating can be identified, and so "drop the lowest" is possible at all.
+    a_sports: Optional[int] = None
+    b_sports: Optional[int] = None
     # None = not played yet. "a" | "b" | "draw" | "bye"
     result: Optional[str] = Field(default=None, index=True)
 
