@@ -433,6 +433,16 @@ class Club(SQLModel, table=True):
     # [{"day": "Monday", "open": "18:00", "close": "22:00", "note": None}, ...]
     opening_hours: Optional[list] = Field(default=None, sa_column=Column(JSON))
 
+    # Stripe Connect (Standard). The CLUB is the merchant of record: players
+    # pay the club directly and Call to Arms never holds the money. That is a
+    # deliberate legal position, not just a simpler integration — collecting on
+    # a club's behalf would make this a marketplace, with KYC, float, and
+    # chargeback liability for events we don't run.
+    stripe_account_id: Optional[str] = None
+    # Mirrored from Stripe so the UI can say "finish your Stripe setup" without
+    # an API call on every page load. Refreshed when we talk to Stripe anyway.
+    stripe_charges_enabled: bool = False
+
     # Location (2026-07-20 follow-up). address is freeform display text;
     # latitude/longitude are entered manually by the super-admin (no free
     # geocoding API available) and drive the OpenStreetMap/Leaflet pin on
@@ -867,6 +877,11 @@ class Tournament(SQLModel, table=True):
     ticket_price_pence: Optional[int] = None
     ticket_url: Optional[str] = None
 
+    # How long an unpaid entry holds its place, in hours. 0 means forever.
+    # Unpaid holds are what kill a waitlist: somebody registers, never pays, and
+    # occupies a place while people who would pay sit behind them.
+    ticket_hold_hours: int = 72
+
     # Army lists. Collected as free text; validation is somebody else's tool.
     list_required: bool = False
     list_deadline: Optional[date] = None
@@ -964,6 +979,21 @@ class TournamentEntry(SQLModel, table=True):
     # waved in who hasn't paid.
     ticket_status: str = Field(default="none", index=True)
     list_submitted_at: Optional[datetime] = None
+
+    # The payment trail. Nullable throughout because the manual path — a TO
+    # marking a bank transfer paid — has to keep working exactly as it does
+    # now, with or without Stripe ever being connected.
+    stripe_session_id: Optional[str] = Field(default=None, index=True)
+    stripe_payment_intent: Optional[str] = Field(default=None, index=True)
+    amount_paid_pence: Optional[int] = None
+    paid_at: Optional[datetime] = None
+    # When an unpaid hold lapses. Set on registration from ticket_hold_hours.
+    hold_expires_at: Optional[datetime] = Field(default=None, index=True)
+    # When this entry joined the waiting list, so promotion is genuinely first
+    # come first served. Without it the waitlist was ordered by entry id, and
+    # somebody demoted for not paying was re-promoted into the place they had
+    # just lost — ahead of people who had been waiting since registration.
+    waitlisted_at: Optional[datetime] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

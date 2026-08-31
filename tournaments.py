@@ -15,13 +15,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+import stripe_client
+import tickets
+from observability import capture
 import tournament_pairing as tp
 import tournament_schedule as sched
 import tournament_scoring as scoring
 from auth import active_club_id, admin_scopes, current_user, public_club_id, require_user
-from database import active_player_id_for, get_session
+from database import active_player_id_for, club_app_url, get_session
 from models import (
-    Player, SystemConfig, Tournament, TournamentEntry, TournamentGame,
+    Club, Player, SystemConfig, Tournament, TournamentEntry, TournamentGame,
     TournamentRound, User, VenueTable,
 )
 
@@ -100,6 +103,9 @@ def _entry_dict(e: TournamentEntry) -> dict:
         "faction": e.faction, "status": e.status, "seed": e.seed,
         "bracket": e.bracket, "painting": e.painting_score,
         "ticket_status": e.ticket_status,
+        "paid_at": e.paid_at.isoformat() if e.paid_at else None,
+        "amount_paid_pence": e.amount_paid_pence,
+        "hold_expires_at": e.hold_expires_at.isoformat() if e.hold_expires_at else None,
         "list_submitted": e.list_submitted_at is not None,
         "army_list": e.army_list, "notes": e.notes,
     }
@@ -138,6 +144,8 @@ def _summary(db: Session, t: Tournament, entries=None) -> dict:
         "ticket_url": t.ticket_url,
         "list_required": t.list_required,
         "list_deadline": t.list_deadline.isoformat() if t.list_deadline else None,
+        "ticket_hold_hours": t.ticket_hold_hours,
+        "charges": tickets.needs_payment(t),
         "rounds": t.rounds, "points_limit": t.points_limit,
         "capacity": t.capacity, "status": t.status,
         "entries": len(counted),
@@ -260,6 +268,7 @@ def get_tournament(
         # Everything the player view needs to render itself, so it doesn't have
         # to reason about entries it isn't allowed to see.
         "me": _me(db, t, entries, games, my_entry_id),
+        "can_pay_by_card": tickets.club_can_take_cards(db, club_id),
     }
 
 
@@ -300,6 +309,7 @@ def _me(db: Session, t: Tournament, entries, games, my_entry_id) -> Optional[dic
         "entry_id": entry.id, "name": entry.display_name,
         "status": entry.status, "faction": entry.faction,
         "ticket_status": entry.ticket_status,
+        "hold_expires_at": entry.hold_expires_at.isoformat() if entry.hold_expires_at else None,
         "army_list": entry.army_list,
         "list_submitted": entry.list_submitted_at is not None,
         "games": mine,
@@ -373,6 +383,7 @@ class TournamentPatch(BaseModel):
     image_url: Optional[str] = None
     ticket_price_pence: Optional[int] = None
     ticket_url: Optional[str] = None
+    ticket_hold_hours: Optional[int] = None
     list_required: Optional[bool] = None
     schedule: Optional[list] = None
     regenerate_schedule: Optional[bool] = None
@@ -439,7 +450,8 @@ def patch_tournament(
         t.tiebreakers = body.tiebreakers
 
     for f in ("name", "blurb", "start_time", "rounds", "points_limit", "capacity",
-              "image_url", "ticket_price_pence", "ticket_url", "list_required",
+              "image_url", "ticket_price_pence", "ticket_url", "ticket_hold_hours",
+              "list_required",
               "win_points", "draw_points", "loss_points", "bye_points"):
         v = getattr(body, f)
         if v is not None:
@@ -542,11 +554,20 @@ def add_entry(
         army_list=(body.army_list or "").strip() or None,
         notes=(body.notes or "").strip() or None,
         status=status,
+        # An unpaid place only holds for so long, or a no-show blocks somebody
+        # who would have paid. Waitlisted entries aren't holding anything yet.
+        hold_expires_at=tickets.hold_expiry(t) if status == "registered" else None,
+        waitlisted_at=datetime.utcnow() if status == "waitlisted" else None,
     )
     db.add(e)
     db.commit()
     db.refresh(e)
-    return {"ok": True, "entry": _entry_dict(e), "waitlisted": status == "waitlisted"}
+    return {
+        "ok": True, "entry": _entry_dict(e),
+        "waitlisted": status == "waitlisted",
+        "needs_payment": tickets.needs_payment(t) and status != "waitlisted",
+        "can_pay_by_card": tickets.club_can_take_cards(db, club_id),
+    }
 
 
 class EntryPatch(BaseModel):
@@ -587,7 +608,13 @@ def patch_entry(
     if body.ticket_status is not None:
         if body.ticket_status not in ("none", "paid", "comp", "refunded"):
             raise HTTPException(status_code=422, detail="Unknown ticket status.")
-        e.ticket_status = body.ticket_status
+        if body.ticket_status in ("paid", "comp"):
+            tickets.mark_paid(e, amount_pence=t.ticket_price_pence,
+                              comp=body.ticket_status == "comp")
+        else:
+            e.ticket_status = body.ticket_status
+            if body.ticket_status == "none":
+                e.hold_expires_at = tickets.hold_expiry(t)
     for f in ("faction", "display_name", "seed", "bracket", "painting_score",
               "army_list", "notes"):
         v = getattr(body, f)
@@ -597,6 +624,12 @@ def patch_entry(
     e.updated_at = datetime.utcnow()
     db.add(e)
     db.commit()
+
+    # Dropping somebody frees their place, so the waiting list moves up. Doing
+    # this here rather than on a timer is what makes a waitlist feel real.
+    if body.status in ("dropped", "waitlisted"):
+        tickets.promote_waitlist(db, t)
+        db.commit()
     db.refresh(e)
     return {"ok": True, "entry": _entry_dict(e)}
 
@@ -841,6 +874,174 @@ def set_result(
 
     names = {e.id: e.display_name for e in _entries(db, t.id)}
     return {"ok": True, "game": _game_dict(db, g, names), "standings": _standings(db, t)}
+
+
+# ---------------------------------------------------------------------------
+# Ticketing
+# ---------------------------------------------------------------------------
+
+@router.get("/{tournament_id}/payments")
+def payment_summary(
+    tournament_id: int,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """What a TO needs to reconcile an event: paid, unpaid, taken, and whose
+    unpaid hold is about to lapse."""
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    _require_to(db, user, club_id, t)
+    return {
+        **tickets.summary(db, t),
+        "card_payments": tickets.club_can_take_cards(db, club_id),
+        "stripe_configured": stripe_client.configured(),
+    }
+
+
+class BulkTicketBody(BaseModel):
+    entry_ids: list[int]
+    ticket_status: str
+
+
+@router.post("/{tournament_id}/tickets/bulk")
+def bulk_ticket(
+    tournament_id: int,
+    body: BulkTicketBody,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Mark several tickets at once — a TO reconciling twenty bank transfers is
+    doing it in one sitting, not twenty."""
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    _require_to(db, user, club_id, t)
+    if body.ticket_status not in ("none", "paid", "comp", "refunded"):
+        raise HTTPException(status_code=422, detail="Unknown ticket status.")
+
+    n = 0
+    for e in _entries(db, t.id):
+        if e.id not in body.entry_ids:
+            continue
+        if body.ticket_status in ("paid", "comp"):
+            tickets.mark_paid(e, amount_pence=t.ticket_price_pence,
+                              comp=body.ticket_status == "comp")
+        else:
+            e.ticket_status = body.ticket_status
+            e.hold_expires_at = tickets.hold_expiry(t) if body.ticket_status == "none" else None
+        db.add(e)
+        n += 1
+    db.commit()
+    return {"ok": True, "updated": n}
+
+
+@router.post("/{tournament_id}/entries/{entry_id}/checkout")
+def start_checkout(
+    tournament_id: int,
+    entry_id: int,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Start a card payment for your own entry.
+
+    Returns a Stripe Checkout URL on the CLUB's account. The redirect back is
+    never what marks the ticket paid — only the webhook does that, because a
+    success_url is just a URL a browser can be told to visit.
+    """
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    e = db.get(TournamentEntry, entry_id)
+    if e is None or e.tournament_id != t.id:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+
+    is_admin = bool(admin_scopes(user, db, club_id))
+    mine = e.user_id == user.id or e.player_id == active_player_id_for(db, user, club_id)
+    if not (mine or is_admin):
+        raise HTTPException(status_code=403, detail="That isn't your entry.")
+    if not tickets.needs_payment(t):
+        raise HTTPException(status_code=409, detail="This event is free.")
+    if e.ticket_status in tickets.PAID_STATUSES:
+        raise HTTPException(status_code=409, detail="That ticket is already paid.")
+
+    club = db.get(Club, club_id)
+    if not tickets.club_can_take_cards(db, club_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This club isn't set up to take card payments yet. "
+                   "Pay the organiser directly and they'll mark your ticket.",
+        )
+
+    base = club_app_url(club)
+    try:
+        session = stripe_client.create_checkout_session(
+            account_id=club.stripe_account_id,
+            amount_pence=t.ticket_price_pence,
+            product_name=f"{t.name} — entry",
+            success_url=f"{base}/tournaments/{t.id}?paid=1",
+            cancel_url=f"{base}/tournaments/{t.id}",
+            entry_id=e.id,
+            tournament_id=t.id,
+            customer_email=e.contact_email,
+        )
+    except stripe_client.StripeNotConfigured as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except stripe_client.StripeError as exc:
+        capture(exc, kind="stripe_checkout", club_id=club_id)
+        raise HTTPException(status_code=502, detail="Stripe wouldn't start that payment.")
+
+    e.stripe_session_id = session["id"]
+    e.updated_at = datetime.utcnow()
+    db.add(e)
+    db.commit()
+    return {"ok": True, "checkout_url": session["url"]}
+
+
+@router.post("/{tournament_id}/entries/{entry_id}/refund")
+def refund_entry(
+    tournament_id: int,
+    entry_id: int,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Refund a card payment and free the place.
+
+    A ticket paid any other way is marked refunded without calling Stripe — the
+    money went back the way it came, and this is the record of it.
+    """
+    _gate(user)
+    t = _get(db, club_id, tournament_id)
+    _require_to(db, user, club_id, t)
+    e = db.get(TournamentEntry, entry_id)
+    if e is None or e.tournament_id != t.id:
+        raise HTTPException(status_code=404, detail="Entry not found.")
+    if e.ticket_status not in tickets.PAID_STATUSES:
+        raise HTTPException(status_code=409, detail="That ticket isn't paid.")
+
+    club = db.get(Club, club_id)
+    if e.stripe_payment_intent and club and club.stripe_account_id:
+        try:
+            stripe_client.refund(e.stripe_payment_intent, club.stripe_account_id)
+        except stripe_client.StripeNotConfigured:
+            pass          # marked refunded below; the money moved elsewhere
+        except stripe_client.StripeError as exc:
+            capture(exc, kind="stripe_refund", club_id=club_id)
+            raise HTTPException(
+                status_code=502,
+                detail="Stripe wouldn't process that refund. Check the Stripe dashboard.",
+            )
+
+    e.ticket_status = "refunded"
+    e.status = "dropped"
+    e.hold_expires_at = None
+    e.updated_at = datetime.utcnow()
+    db.add(e)
+    db.commit()
+    promoted = tickets.promote_waitlist(db, t)
+    db.commit()
+    return {"ok": True, "promoted": [p.display_name for p in promoted]}
 
 
 # ---------------------------------------------------------------------------

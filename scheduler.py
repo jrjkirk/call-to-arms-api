@@ -60,6 +60,7 @@ OWNED_JOBS: tuple[tuple[str, str], ...] = (
     ("call_to_arms_check", "scripts.run_call_to_arms_check"),
     ("call_outs_check", "scripts.run_call_outs_check"),
     ("table_booking_cutoff_check", "scripts.run_table_booking_cutoff_check"),
+    ("ticket_holds_check", "scripts.run_ticket_holds_check"),
 )
 
 
