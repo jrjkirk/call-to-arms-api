@@ -160,6 +160,14 @@ fly status                  # machine health
 - Use `db.flush()` before linking foreign keys in the same transaction (to populate auto-generated IDs).
 - All new write endpoints need the table in `WRITE_ALLOWED_TABLES` first.
 - Request bodies use Pydantic `BaseModel` (not SQLModel) — keep input schemas separate from table models.
+- **Any value that came from a person must go through `emailer.esc()` before it
+  is interpolated into HTML.** Every HTML body here is built with f-strings, and
+  none of it was escaped: a booker's name, phone and notes arrive from a public
+  form with no account, and a player's name is whatever they typed at signup.
+  `admin/table-booking/preview` also returns that HTML to the admin page, which
+  renders it with `{@html}`, so an unescaped name ran in a club admin's browser.
+  Do NOT escape email *subjects* — they are plain text, and `&amp;` showing up in
+  a subject line is its own bug. Covered by `tests/test_email_escaping.py`.
 
 ## Pairing engine (pairings_engine.py)
 
