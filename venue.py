@@ -21,6 +21,11 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+# Module level, unlike send_email below, which stays function-local so this
+# module still imports where email isn't configured. esc() has no such
+# dependency — it is pure string handling.
+from emailer import esc
+
 from sqlmodel import Session, select
 
 from models import (
@@ -1071,9 +1076,12 @@ def _staff_email_html(club: Club, d: dict, status: str) -> str:
     if d["notes"]:
         rows.append(("Notes", d["notes"]))
 
+    # Escaped: name, phone and notes come off a public booking form that needs
+    # no account, so they are attacker-controlled text going into HTML aimed at
+    # venue staff. See emailer.esc.
     cells = "".join(
-        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{k}</td>'
-        f'<td style="padding:4px 0"><strong>{v}</strong></td></tr>'
+        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{esc(k)}</td>'
+        f'<td style="padding:4px 0"><strong>{esc(v)}</strong></td></tr>'
         for k, v in rows
     )
     lead = {
@@ -1084,7 +1092,7 @@ def _staff_email_html(club: Club, d: dict, status: str) -> str:
         f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
         f"<p>{lead}</p>"
         f'<table style="border-collapse:collapse">{cells}</table>'
-        f'<p style="color:#666;font-size:13px">{club.name} — sent by Call to Arms.</p>'
+        f'<p style="color:#666;font-size:13px">{esc(club.name)} — sent by Call to Arms.</p>'
         f"</div>"
     )
 
@@ -1224,25 +1232,30 @@ def _booker_email_html(club: Club, d: dict, event: str, link: Optional[str]) -> 
         ("Playing", d["game"]),
         ("Party", f"{d['party_size']} player{'s' if d['party_size'] != 1 else ''}"),
     ]
+    # Escaped for the same reason as the staff email above: the table name and
+    # the game come from club/booker input, and the club's own name is admin
+    # text. See emailer.esc.
     cells = "".join(
-        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{k}</td>'
-        f'<td style="padding:4px 0"><strong>{v}</strong></td></tr>'
+        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{esc(k)}</td>'
+        f'<td style="padding:4px 0"><strong>{esc(v)}</strong></td></tr>'
         for k, v in rows
     )
     # No cancel link on a booking that is already over as far as the venue is
     # concerned -- offering to cancel a cancellation is just confusing.
     tail = ""
     if link and event in ("requested", "confirmed"):
+        # esc() on an href quotes the quote characters too, so a link can't
+        # break out of the attribute even though we build this one ourselves.
         tail = (
             f'<p style="font-size:13px">Need to change or cancel it? '
-            f'<a href="{link}">Manage this booking</a>.</p>'
+            f'<a href="{esc(link)}">Manage this booking</a>.</p>'
         )
     return (
         f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
-        f"<p>{lead.format(club=club.name)}</p>"
+        f"<p>{lead.format(club=esc(club.name))}</p>"
         f'<table style="border-collapse:collapse">{cells}</table>'
         f"{tail}"
-        f'<p style="color:#666;font-size:13px">{club.name} — sent by Call to Arms.</p>'
+        f'<p style="color:#666;font-size:13px">{esc(club.name)} — sent by Call to Arms.</p>'
         f"</div>"
     )
 

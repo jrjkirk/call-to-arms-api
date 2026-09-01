@@ -150,6 +150,36 @@ check("painting can add points when the TO wants it to",
       next(s for s in bonus if s.entry_id == 2).points)
 
 
+print("\n7b. A bracket must not turn a real game into a bye")
+# Brackets filter the standings, not the games. An opponent in another bracket
+# used to come back as "no such entry" and drop into the bye branch, handing
+# the player bye points for a game they actually played.
+_cross = [E(1, "Ann", bracket="A"), E(2, "Bob", bracket="A"), E(3, "Cat", bracket="B")]
+_t = T(win_points=3, draw_points=1, loss_points=0, bye_points=3)
+_games = [
+    G(1, 2, "a", 20, 10, round_id=1),   # inside bracket A
+    G(1, 3, "b", 5, 30, round_id=2),    # Ann lost to Cat, who is in bracket B
+]
+_st = ts.compute(_t, _cross, _games, bracket="A")
+_ann = next(x for x in _st if x.entry_id == 1)
+check("the cross-bracket game is not counted as a bye", _ann.byes == 0, f"byes={_ann.byes}")
+check("no bye points were awarded for it", _ann.win_points == _t.win_points,
+      f"win_points={_ann.win_points}")
+check("only the in-bracket game counts as played", _ann.played == 1, f"played={_ann.played}")
+
+# A genuinely missing opponent (entry removed from the event) is still a bye.
+_gone = [E(1, "Ann", bracket="A"), E(2, "Bob", bracket="A")]
+_st2 = ts.compute(_t, _gone, [G(1, 99, "a", 20, 0, round_id=1)], bracket="A")
+_ann2 = next(x for x in _st2 if x.entry_id == 1)
+check("an opponent that no longer exists is still a bye", _ann2.byes == 1, f"byes={_ann2.byes}")
+
+# Unbracketed scoring must be untouched by the change.
+_st3 = ts.compute(_t, _cross, _games)
+_ann3 = next(x for x in _st3 if x.entry_id == 1)
+check("without a bracket, both games still count", _ann3.played == 2 and _ann3.byes == 0,
+      f"played={_ann3.played} byes={_ann3.byes}")
+
+
 print("\n8. Config validation")
 check("a bad primary sort is rejected", ts.validate({"primary": "vibes"}))
 check("capped VP without a cap is rejected", ts.validate({"vp_mode": "capped"}))

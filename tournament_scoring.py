@@ -230,9 +230,12 @@ def compute(tournament, entries, games, bracket: Optional[str] = None) -> list[S
     """Standings, best first. Unplayed games contribute nothing, so this is safe
     to call mid-round while half the tables are still going."""
     c = config(tournament)
+    # Captured BEFORE the bracket filter, so the loop below can tell "this
+    # opponent is in another bracket" apart from "this opponent isn't in the
+    # event at all". Those need opposite handling and used to get the same one.
+    all_entry_ids = {e.id for e in entries}
     if bracket is not None:
         entries = [e for e in entries if (e.bracket or None) == bracket]
-    ids = {e.id for e in entries}
 
     table = {
         e.id: Standing(entry_id=e.id, name=e.display_name, bracket=e.bracket,
@@ -258,7 +261,17 @@ def compute(tournament, entries, games, bracket: Optional[str] = None) -> list[S
         if a is None:
             continue
 
-        if g.result == "bye" or (g.b_entry_id and b is None) or b is None:
+        # An opponent who exists but was filtered out by `bracket` played a
+        # real game — it just isn't part of THIS bracket's standings. Skipping
+        # it is the only honest option: counting it would score an opponent
+        # who isn't ranked here, and the previous behaviour (falling through to
+        # the bye branch) handed the player bye points for a game they played.
+        if b is None and g.b_entry_id in all_entry_ids:
+            continue
+
+        # A genuine bye: recorded as one, no opponent at all, or an opponent
+        # whose entry has since been removed from the event.
+        if g.result == "bye" or b is None:
             a.byes += 1
             a.win_points += tournament.bye_points
             byes.append((a, g.round_id))

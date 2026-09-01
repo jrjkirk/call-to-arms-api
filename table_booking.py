@@ -17,6 +17,7 @@ import math
 from sqlmodel import Session, select
 
 import emailer
+from emailer import esc
 from database import scoped
 from models import ClubSystem, Pairing, Signup, TableBookingConfig, TableBookingNotification
 from signups import _get_system_config
@@ -64,20 +65,26 @@ def render_table_booking_email(
     cfg: TableBookingConfig, system: str, week: str, tables: int, headcount: int, player_names: list[str],
 ) -> tuple[str, str]:
     venue_label = cfg.venue_name or "there"
+    # The subject is NOT escaped: it is a plain-text header, and escaping it
+    # would put &amp; in front of the venue rather than an ampersand.
     subject = cfg.subject_template or f"{system} — {week}: {tables} table{'s' if tables != 1 else ''} needed"
 
+    # Everything interpolated below is escaped. `player_names` in particular is
+    # whatever players typed at signup, and this same HTML is handed back by
+    # admin/table-booking/preview and rendered with {@html} in the admin page —
+    # so an unescaped name executed in a club admin's browser. See emailer.esc.
     parts = [
-        f"<p>Hi {venue_label},</p>",
-        f"<p>For {system} on {week}, we're expecting <strong>{headcount} player"
+        f"<p>Hi {esc(venue_label)},</p>",
+        f"<p>For {esc(system)} on {esc(week)}, we're expecting <strong>{headcount} player"
         f"{'s' if headcount != 1 else ''}</strong>, needing approximately "
         f"<strong>{tables} table{'s' if tables != 1 else ''}</strong> "
         f"(based on {cfg.players_per_table} players per table).</p>",
     ]
     if cfg.include_player_names and player_names:
-        items = "".join(f"<li>{n}</li>" for n in player_names)
+        items = "".join(f"<li>{esc(n)}</li>" for n in player_names)
         parts.append(f"<p>Players:</p><ul>{items}</ul>")
     if cfg.notes:
-        parts.append(f"<p>{cfg.notes}</p>")
+        parts.append(f"<p>{esc(cfg.notes)}</p>")
     parts.append("<p>Thanks!<br>Call to Arms</p>")
     return subject, "".join(parts)
 

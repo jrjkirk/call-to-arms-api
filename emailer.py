@@ -9,9 +9,32 @@ Read at call time (not import time), so the module imports fine in
 environments where email isn't configured yet — it only raises when a send
 is actually attempted.
 """
+import html as _html
 import os
 
 import httpx
+
+
+def esc(value) -> str:
+    """Escape a value for interpolation into HTML we build ourselves.
+
+    Every HTML body in this codebase is assembled with f-strings, and the
+    values going into them are not ours: a booker's name, phone and notes come
+    straight off a public form that needs no account, and a player's name is
+    whatever they typed at signup. None of it was escaped.
+
+    That mattered most for the table-booking email, because
+    `admin/table-booking/preview` hands the same HTML back to the admin page,
+    which renders it with `{@html}` — so a player could put markup in their
+    name and have it execute in a club admin's browser. In the emails
+    themselves the risk is milder (clients strip scripts) but a name closing a
+    tag early still wrecks the layout, and a crafted link is a phishing vector
+    pointed at venue staff.
+
+    `None` renders as an empty string rather than the word "None", which is
+    what a caller interpolating an optional field wants anyway.
+    """
+    return "" if value is None else _html.escape(str(value), quote=True)
 
 
 def _config() -> tuple[str, str]:
