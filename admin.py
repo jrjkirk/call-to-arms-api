@@ -12,7 +12,6 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
-import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -66,11 +65,12 @@ from signups import (
     _validate_week,
     signup_cap,
 )
+from github_dispatch import PAIRINGS_IMAGE_WORKFLOW, dispatch_workflow
 from week_logic import _DAY_NAME_TO_INT, next_session_date
 
-GH_DISPATCH_TOKEN = os.environ.get("GH_DISPATCH_TOKEN", "")
-GH_REPO = os.environ.get("GH_REPO", "jrjkirk/call-to-arms-api")
-GH_PAIRINGS_SCREENSHOT_WORKFLOW = "post-pairings-image.yml"
+# Workflow dispatch lives in github_dispatch.py — shared with the auto-pairings
+# job, which needs the same call when it has pairings to render and no
+# matplotlib to render them with.
 
 
 # Where the sign-up link in a call-to-arms post points. Same env var the
@@ -1468,13 +1468,12 @@ def pairings_post_discord(
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """Trigger the GitHub Actions workflow that screenshots the public
-    /pairings page for this system/week and posts it to that system's
-    Discord channel.
+    """Trigger the GitHub Actions workflow that renders this system/week's
+    pairings as an image and posts it to that system's Discord channel.
 
-    Fire-and-forget: a successful response means the workflow was queued,
-    not that the Discord post has happened yet — Playwright + Chromium
-    install takes roughly 30-60 seconds to run in CI.
+    Fire-and-forget: a successful response means the workflow was queued, not
+    that the Discord post has happened yet — installing matplotlib and
+    rendering takes roughly 30-60 seconds in CI.
     """
     _require_system_scope(body.system, user, db)
 
@@ -1483,38 +1482,21 @@ def pairings_post_discord(
                 "reason": "Pairings posts are switched off for this system. "
                           "Turn them back on above the pairings grid."}
 
-    if not GH_DISPATCH_TOKEN:
-        return {"posted": False, "reason": "no dispatch token configured"}
+    # The club slug is REQUIRED, not optional. Without it the workflow falls
+    # back to resolving the single club running the system, which raises as
+    # soon as two clubs share one — and Kill Team runs at both EGNWGC and The
+    # Outpost, so this button queued a run that then failed in CI with nothing
+    # to show for it. The caller always knows which club it is; say so.
+    club = db.get(Club, user.club_id)
+    if club is None:
+        return {"posted": False, "reason": "club not found"}
 
-    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{GH_PAIRINGS_SCREENSHOT_WORKFLOW}/dispatches"
-    try:
-        resp = httpx.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {GH_DISPATCH_TOKEN}",
-                "Accept": "application/vnd.github+json",
-            },
-            json={"ref": "main", "inputs": {"system": body.system, "week": body.week}},
-            timeout=10.0,
-        )
-    except Exception:
-        return {"posted": False, "reason": "GitHub API request failed"}
-
-    if resp.status_code != 204:
-        # GitHub puts the actual reason in the body — "Provided value ... is not
-        # a valid option", "Required input not provided", "No ref found". The
-        # bare status code sent an admin to the logs to find out that a system
-        # name wasn't in a dropdown, so pass the message through.
-        detail = ""
-        try:
-            detail = (resp.json() or {}).get("message", "")
-        except Exception:
-            pass
-        return {
-            "posted": False,
-            "reason": f"GitHub API returned {resp.status_code}"
-                      + (f": {detail}" if detail else ""),
-        }
+    ok, reason = dispatch_workflow(
+        PAIRINGS_IMAGE_WORKFLOW,
+        {"system": body.system, "week": body.week, "club": club.slug},
+    )
+    if not ok:
+        return {"posted": False, "reason": reason}
 
     return {"posted": True, "queued": True}
 
@@ -4188,7 +4170,18 @@ def set_community_discord(
 # Every scheduled job that calls record_job_run() — kept as one list so the
 # health-check UI can show "never run" for a job with zero rows, not just
 # silently omit it.
-KNOWN_SCHEDULED_JOBS = ["auto_pairings_check", "call_to_arms_check"]
+#
+# Must stay in step with scripts/run_*_check.py's JOB_NAME constants. It fell
+# behind three of them (call-outs, table-booking, ticket holds), which meant
+# the one screen you would open to ask "is a scheduled job broken?" quietly
+# answered for two jobs out of five.
+KNOWN_SCHEDULED_JOBS = [
+    "auto_pairings_check",
+    "call_to_arms_check",
+    "call_outs_check",
+    "table_booking_cutoff_check",
+    "ticket_holds_check",
+]
 
 
 def _job_run_dict(r: ScheduledJobRun) -> dict:
@@ -4200,10 +4193,15 @@ def list_job_runs(
     _: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
-    """Health-check view of the two scheduled GitHub Actions jobs — the
-    most recent run of each (so a silently-broken cron is visible instead
-    of only surfacing when a club complains their pairings never posted),
-    plus a short recent history across both for spotting flakiness."""
+    """Health-check view of every scheduled job — the most recent run of
+    each (so a silently-broken job is visible instead of only surfacing when
+    a club complains their pairings never posted), plus a short recent
+    history across all of them for spotting flakiness.
+
+    All five run on the in-process scheduler (scheduler.py) every five
+    minutes, so a `ran_at` older than that means the scheduler itself is
+    stopped, not that a cron was slow. Several also still have a GitHub
+    Actions cron as a backstop; those fire about five times a day."""
     jobs = []
     for job_name in KNOWN_SCHEDULED_JOBS:
         latest = db.exec(

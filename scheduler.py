@@ -1,4 +1,4 @@
-"""In-process scheduler for the four periodic jobs.
+"""In-process scheduler for the periodic jobs.
 
 Why this exists
 ---------------
@@ -48,19 +48,29 @@ def enabled() -> bool:
 
 # The jobs this scheduler owns.
 #
-# auto_pairings_check is deliberately NOT here and stays on its GitHub workflow.
-# It renders the pairings image, so it pulls in matplotlib, which the API image
-# does not carry — the workflow installs it separately
-# (`pip install -r requirements.txt matplotlib`). Adding it here would put
-# matplotlib and numpy in a 256 MB container and hold them resident during a
-# render, and an OOM there takes the whole API down rather than just delaying a
-# post. A late pairings post is much the cheaper failure, and its fire window
-# now runs to the end of the day anyway.
+# auto_pairings_check used to be excluded because it renders the pairings image
+# and so pulls in matplotlib, which the API image does not carry — putting
+# matplotlib and numpy in a 256 MB container risks an OOM that takes the whole
+# API down rather than just delaying a post. The reasoning for leaving it out
+# was that "a late pairings post is much the cheaper failure, and its fire
+# window now runs to the end of the day anyway".
+#
+# That was wrong, and it cost The Old World at EGNWGC its 02/09/2026 pairings.
+# An end-of-day window only helps a job that gets ticks; on GitHub's schedule
+# the job got five random visits that day, the club's 21:00 fire time was
+# missed by a run at 20:57, and nothing came back before midnight. A late post
+# was never the failure mode — losing the week silently was.
+#
+# So the job is here now, but only half of it runs here: it generates and
+# publishes pairings (pure SQLAlchemy, no rendering) and then hands the image
+# off to a GitHub runner via workflow_dispatch. matplotlib never enters this
+# container. See scripts/run_auto_pairings_check.py.
 OWNED_JOBS: tuple[tuple[str, str], ...] = (
     ("call_to_arms_check", "scripts.run_call_to_arms_check"),
     ("call_outs_check", "scripts.run_call_outs_check"),
     ("table_booking_cutoff_check", "scripts.run_table_booking_cutoff_check"),
     ("ticket_holds_check", "scripts.run_ticket_holds_check"),
+    ("auto_pairings_check", "scripts.run_auto_pairings_check"),
 )
 
 
@@ -140,7 +150,7 @@ async def tick_loop() -> None:
 
 
 def _prune() -> None:
-    """Hourly, not every tick — four jobs on a five-minute tick is about 1,150
+    """Hourly, not every tick — five jobs on a five-minute tick is about 1,440
     claim rows a day, worth clearing but not worth a DELETE every five minutes."""
     if datetime.now(timezone.utc).minute >= TICK_SECONDS // 60:
         return
