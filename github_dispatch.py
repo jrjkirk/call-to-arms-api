@@ -31,6 +31,7 @@ GH_DISPATCH_REF = os.environ.get("GH_DISPATCH_REF", "main")
 
 PAIRINGS_IMAGE_WORKFLOW = "post-pairings-image.yml"
 AUTO_PAIRINGS_WORKFLOW = "auto-pairings-check.yml"
+LEAGUE_RANKINGS_WORKFLOW = "league-rankings-check.yml"
 
 
 def dispatch_enabled() -> bool:

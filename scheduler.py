@@ -71,6 +71,11 @@ OWNED_JOBS: tuple[tuple[str, str], ...] = (
     ("table_booking_cutoff_check", "scripts.run_table_booking_cutoff_check"),
     ("ticket_holds_check", "scripts.run_ticket_holds_check"),
     ("auto_pairings_check", "scripts.run_auto_pairings_check"),
+    # Same split, same reason: it renders the standings image, so only its
+    # decision runs here and the drawing goes to a runner. It was the last job
+    # still on a bare cron, and the worst placed for it — `0 19 * * 4` gives
+    # one slot a week, and GitHub missed every one of them.
+    ("league_rankings_check", "scripts.run_league_rankings_check"),
 )
 
 
@@ -150,7 +155,7 @@ async def tick_loop() -> None:
 
 
 def _prune() -> None:
-    """Hourly, not every tick — five jobs on a five-minute tick is about 1,440
+    """Hourly, not every tick — six jobs on a five-minute tick is about 1,730
     claim rows a day, worth clearing but not worth a DELETE every five minutes."""
     if datetime.now(timezone.utc).minute >= TICK_SECONDS // 60:
         return

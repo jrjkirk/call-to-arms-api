@@ -73,6 +73,12 @@ from week_logic import _DAY_NAME_TO_INT, next_session_date
 # matplotlib to render them with.
 
 
+# Defaults for the league standings post, matching what the retired
+# `0 19 * * 4` cron did in British Summer Time — a club that never opens the
+# panel keeps the schedule it already had.
+LR_DEFAULT_DAY = "Thursday"
+LR_DEFAULT_TIME = "20:00"
+
 # Where the sign-up link in a call-to-arms post points. Same env var the
 # scheduled job reads, so a manual post carries the same URL.
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "")
@@ -820,6 +826,65 @@ def post_auto_pairings_settings(
     _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_enabled", "true" if body.enabled else "false")
     _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_day", body.day)
     _upsert_setting(db, user.club_id, f"auto_pairings_{slug}_time", body.time)
+    db.commit()
+    return {"ok": True}
+
+
+class LeagueRankingsSettingsBody(BaseModel):
+    system: str
+    day: str
+    time: str
+
+
+@router.get("/league-rankings-settings")
+def get_league_rankings_settings(
+    system: str,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """When this club-system's league standings image gets posted.
+
+    There is no `enabled` here on purpose. Whether standings post at all is the
+    `league` posting switch on the Discord tab, which also covers results and
+    achievements — one decision, one switch. This returns its current value so
+    the League panel can say what is going to happen without offering a second
+    control that could disagree with the first.
+    """
+    _require_system_scope(system, user, db)
+    slug = _slug(system)
+    config = _get_system_config(db, system)
+    return {
+        "day": _get_setting(db, user.club_id, f"league_rankings_{slug}_day", LR_DEFAULT_DAY) or LR_DEFAULT_DAY,
+        "time": _get_setting(db, user.club_id, f"league_rankings_{slug}_time", LR_DEFAULT_TIME) or LR_DEFAULT_TIME,
+        "last_posted": _get_setting(db, user.club_id, f"league_rankings_{slug}_last_posted"),
+        # Read-only context, so the panel can explain itself rather than
+        # silently doing nothing when one of these is missing.
+        "posting_enabled": posting_enabled(db, user.club_id, system, "league"),
+        "has_webhook": bool(
+            resolve_webhook_url(db, user.club_id, "league_rankings", config.id if config else None)
+        ),
+    }
+
+
+@router.post("/league-rankings-settings")
+def post_league_rankings_settings(
+    body: LeagueRankingsSettingsBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    _require_system_scope(body.system, user, db)
+    if body.day not in _VALID_DAYS:
+        raise HTTPException(status_code=422, detail=f"day must be one of {_VALID_DAYS}")
+    if not _TIME_RE.match(body.time):
+        raise HTTPException(status_code=422, detail="time must match HH:MM (00-23 / 00-59)")
+    slug = _slug(body.system)
+    _upsert_setting(db, user.club_id, f"league_rankings_{slug}_day", body.day)
+    _upsert_setting(db, user.club_id, f"league_rankings_{slug}_time", body.time)
+    # Unlike the auto-pairings settings, this one is audited. Being unable to
+    # answer "who changed this, and when" is what made an earlier scheduling
+    # incident take far longer to diagnose than it should have.
+    log_audit(db, user, "league_rankings_schedule.update", "club_system", None,
+              f"system={body.system} day={body.day} time={body.time}")
     db.commit()
     return {"ok": True}
 
@@ -4181,6 +4246,7 @@ KNOWN_SCHEDULED_JOBS = [
     "call_outs_check",
     "table_booking_cutoff_check",
     "ticket_holds_check",
+    "league_rankings_check",
 ]
 
 

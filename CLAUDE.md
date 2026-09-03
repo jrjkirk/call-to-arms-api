@@ -29,7 +29,7 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `league.py` | Rankings, results endpoints |
 | `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |
 | `pairings_engine.py` | Pairing generation engine — faithful port of the original Streamlit matcher |
-| `scheduler.py` | In-process tick loop for the five periodic jobs. **Off unless `SCHEDULER_ENABLED` is set** — local `.env` points at a real DB with real webhooks |
+| `scheduler.py` | In-process tick loop for the six periodic jobs. **Off unless `SCHEDULER_ENABLED` is set** — local `.env` points at a real DB with real webhooks |
 
 ## Directory layout
 
@@ -41,7 +41,7 @@ at repo root: `main.py`, `admin.py`, `auth.py`, `league.py`, `signups.py`,
 
 **`scripts/` is no longer inert.** It used to be true that the live app
 imported nothing from the subdirectories below; since the scheduler moved
-in-process (2026-08-31), `scheduler.py` imports the five `run_*_check`
+in-process (2026-08-31), `scheduler.py` imports the six `run_*_check`
 entry points. Two consequences worth knowing:
 
 - `scripts/` is a real package (`__init__.py`), not an implicit namespace
@@ -60,11 +60,15 @@ imported by the live app; `scripts/` now is — see above):
   live migration tool — see `models.py`'s docstring.
 - `seed/` — one-off/idempotent data-seeding scripts (`seed_clubs.py`,
   `seed_club_webhooks.py`, `seed_systems_config.py`).
-- `scripts/` — the five periodic job entry points and the render helpers
+- `scripts/` — the six periodic job entry points and the render helpers
   they use (`run_auto_pairings_check.py`, `run_call_to_arms_check.py`,
   `run_call_outs_check.py`, `run_table_booking_cutoff_check.py`,
+  `run_ticket_holds_check.py`, `run_league_rankings_check.py`,
   `post_pairings_image.py`, `post_league_rankings_image.py`,
-  `render_pairings_image.py`, `render_league_rankings_image.py`). Each
+  `render_pairings_image.py`, `render_league_rankings_image.py`). The two
+  `post_*_image.py` modules are the manual overrides and pull in matplotlib;
+  the `run_*_check.py` jobs must stay importable without it, which is why they
+  load the renderer lazily. Each
   `main()` runs three ways and must keep working in all of them: by hand,
   from a GitHub workflow, and from `scheduler.py`. The workflows set
   `PYTHONPATH: ${{ github.workspace }}` so the scripts' `from database

@@ -1,7 +1,14 @@
-name: Weekly League Rankings Image
+name: Post League Rankings Image to Discord
+
+# MANUAL ONLY. The schedule moved to league-rankings-check.yml and the
+# in-process scheduler, where the club sets its own day and time and the post
+# is deduped. The weekly `0 19 * * 4` cron that used to live here is gone:
+# leaving it would post the standings a second time every Thursday.
+#
+# This is the override — it posts every league-enabled club-system's standings
+# immediately and records nothing, so using it never makes the scheduled post
+# think it has already gone out.
 on:
-  schedule:
-    - cron: '0 19 * * 4'  # Thursdays at 19:00 UTC
   workflow_dispatch:
 
 jobs:

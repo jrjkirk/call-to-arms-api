@@ -1,0 +1,38 @@
+name: League Rankings Check
+
+# The rendering half of the league standings post. Deciding whether a post is
+# due happens on the in-process scheduler (scheduler.py) every five minutes,
+# because the club now picks its own day and time and a `0 19 * * 4` cron
+# honoured none of them — observed slips of one to three hours, and twice past
+# midnight into Friday.
+#
+# Two things reach this workflow:
+#
+#   workflow_dispatch — fired by the app the moment a post falls due.
+#                       Dispatched runs are NOT throttled the way scheduled
+#                       ones are, so this is what makes the post land on time.
+#   schedule          — the backstop, for a day whose post never went out (a
+#                       failed dispatch, no token configured, a webhook that
+#                       was broken and has since been fixed). It re-runs the
+#                       same check, which is deduped per club-system per day,
+#                       so sweeping costs nothing when there is nothing to do.
+on:
+  schedule:
+    # Deliberately not on the hour: ':00' is the most contended slot on
+    # GitHub's scheduler. Staggered clear of the other jobs' :07/:17/:37/:47.
+    - cron: '27 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt matplotlib
+      - run: python scripts/run_league_rankings_check.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

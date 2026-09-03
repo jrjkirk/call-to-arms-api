@@ -179,6 +179,36 @@ def _is_auto_pairings_due(
     return now_uk >= fire_start
 
 
+def _is_league_rankings_due(settings: dict, now_uk: datetime, today_key: str) -> bool:
+    """Return True if this club-system's league standings post is due now.
+
+    settings keys: day (str), time ("HH:MM"), last_posted (ISO date str|None).
+    `today_key` is now_uk.date().isoformat() — the dedup is per calendar day
+    rather than per week id, because this post isn't tied to a session date.
+
+    There is deliberately no `enabled` key. Whether a club posts its standings
+    at all is already the `league` posting switch, which also governs results
+    and achievements; a second switch for the same decision is a second thing
+    to leave in the wrong position. This answers only "is it time?".
+
+    Same shape as the other due-checks: fires from the configured time to the
+    end of the configured day and never onto the next one. That window matters
+    more here than anywhere else — this used to be a `0 19 * * 4` GitHub cron,
+    which has exactly one slot a week, and the observed run times never once
+    landed on it: 21:00, 21:44, 22:22, and twice past midnight into Friday
+    (01:39 and 03:24), where nobody saw the post at all.
+    """
+    last_posted: Optional[str] = settings.get("last_posted")
+    if last_posted and last_posted == today_key:
+        return False
+    day_int = _DAY_NAME_TO_INT.get(settings["day"])
+    if day_int is None or now_uk.weekday() != day_int:
+        return False
+    h, m = map(int, settings["time"].split(":"))
+    fire_start = now_uk.replace(hour=h, minute=m, second=0, microsecond=0)
+    return now_uk >= fire_start
+
+
 def _is_table_booking_cutoff_due(cutoff_day: str, cutoff_time: str, now_uk: datetime) -> bool:
     """Return True if a cutoff-mode table-booking send should fire right now.
 
