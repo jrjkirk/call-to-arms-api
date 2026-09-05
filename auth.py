@@ -12,10 +12,20 @@ Flow:
 Sessions are stateless: the cookie value is `{user_id}.{hmac-signature}`.
 We trust the cookie iff the signature verifies with our SESSION_SECRET.
 
-COOKIE NOTE: cta_session, cta_oauth_state, cta_oauth_return_to, and
-cta_pending_signup all currently use samesite="lax" + secure=True.
-Chrome/Firefox treat http://localhost as trustworthy, so secure=True
-still works for local dev.
+COOKIE NOTE: cta_session, cta_oauth_state, cta_oauth_return_to,
+cta_oauth_next and cta_pending_signup all currently use samesite="lax" +
+secure=True. Lax is enough because the API is served from
+api.calltoarms.app, which is same-site with every club subdomain — the
+session cookie rides along on the frontend's credentialed fetches. Moving
+the API to a different registrable domain would silently log everyone out
+and require samesite="none". Chrome/Firefox treat http://localhost as
+trustworthy, so secure=True still works for local dev.
+
+RETURN NOTE: /discord/login stores WHERE (origin) and WHAT PAGE (next) in
+two separate cookies. They were one concatenated value until 09/09/2026,
+which made the brand-new-user branch below build
+".../signup?system=X/join" — a path appended to a query string. Keep them
+apart: the two branches join them differently.
 
 SUBDOMAIN NOTE: login can be initiated from any club subdomain
 (e.g. test1.calltoarms.app, manchester.calltoarms.app), not just the root
@@ -36,7 +46,7 @@ import re
 import secrets
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
@@ -243,7 +253,13 @@ def discord_login(request: Request, next: Optional[str] = None):
         raise HTTPException(status_code=500, detail="Discord OAuth is not configured")
 
     state = secrets.token_urlsafe(24)
-    return_to = _safe_return_to(request) + _safe_next_path(next)
+    # Origin and destination are kept APART, not concatenated. They used to be
+    # glued together here, which made the brand-new-user branch in the callback
+    # build "https://club.calltoarms.app/signup?system=X/join" — a path stuck on
+    # the end of a query string. Keeping them separate lets the callback join
+    # them correctly for each of its two very different destinations.
+    origin = _safe_return_to(request)
+    next_path = _safe_next_path(next)
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
     params = {
         "client_id": DISCORD_CLIENT_ID,
@@ -256,7 +272,8 @@ def discord_login(request: Request, next: Optional[str] = None):
 
     response = RedirectResponse(auth_url)
     response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax")
-    response.set_cookie("cta_oauth_return_to", return_to, max_age=300, httponly=True, samesite="lax")
+    response.set_cookie("cta_oauth_return_to", origin, max_age=300, httponly=True, samesite="lax")
+    response.set_cookie("cta_oauth_next", next_path, max_age=300, httponly=True, samesite="lax")
     return response
 
 
@@ -266,6 +283,7 @@ async def discord_callback(
     state: str,
     cta_oauth_state: Optional[str] = Cookie(default=None),
     cta_oauth_return_to: Optional[str] = Cookie(default=None),
+    cta_oauth_next: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_session),
 ):
     """Step 2: Discord redirected back with a ?code= — exchange it for a user."""
@@ -309,14 +327,29 @@ async def discord_callback(
     )
 
     existing = db.exec(select(User).where(User.discord_id == discord_id)).first()
-    return_to = cta_oauth_return_to or FRONTEND_URL
+    origin = cta_oauth_return_to or FRONTEND_URL
+    # Re-validated rather than trusted: the cookie is ours and HttpOnly, but a
+    # path that reaches a redirect deserves the same check on the way out as it
+    # got on the way in.
+    next_path = _safe_next_path(cta_oauth_next)
 
     if existing is None:
         # Brand-new Discord identity — defer creating the User row until
         # they pick a club (users.club_id is NOT NULL and never reopened;
         # see complete-signup). Carry the identity in a short-lived signed
         # cookie and send them to the frontend's club-picker.
-        response = RedirectResponse(f"{return_to}/join")
+        #
+        # `next` rides along as a query param so it survives the club-picker
+        # and the claim-profile step that follow. Without it a player who
+        # followed a "sign up for Thursday" link out of Discord finished
+        # onboarding on the club's front page with no idea why they were
+        # there — which is exactly what happened to the Age of Sigmar players
+        # on 09/09/2026. Built from `origin`, never from origin+next, or the
+        # path lands on the end of a query string.
+        join_url = f"{origin}/join"
+        if next_path:
+            join_url += f"?next={quote(next_path, safe='')}"
+        response = RedirectResponse(join_url)
         response.set_cookie(
             "cta_pending_signup",
             _make_pending_signup_cookie(discord_id, discord_name, avatar_url),
@@ -327,6 +360,7 @@ async def discord_callback(
         )
         response.delete_cookie("cta_oauth_state")
         response.delete_cookie("cta_oauth_return_to")
+        response.delete_cookie("cta_oauth_next")
         return response
 
     existing.discord_name = discord_name
@@ -337,7 +371,7 @@ async def discord_callback(
     db.refresh(existing)
 
     cookie_value = _make_session_cookie(existing.id)
-    response = RedirectResponse(return_to)
+    response = RedirectResponse(origin + next_path)
     response.set_cookie(
         "cta_session",
         cookie_value,
@@ -348,6 +382,7 @@ async def discord_callback(
     )
     response.delete_cookie("cta_oauth_state")
     response.delete_cookie("cta_oauth_return_to")
+    response.delete_cookie("cta_oauth_next")
     return response
 
 
