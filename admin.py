@@ -4737,6 +4737,10 @@ def provision_club_request(
     enabled_systems: list[str] = []
     if body.enable_systems and req.systems:
         day = req.club_night_day or "Wednesday"
+        # The club told us its start time on the form, and ClubSystem has a field
+        # for it, but provisioning was dropping it on the floor and leaving the
+        # club page saying nothing about when to turn up.
+        start = (req.club_night_time or "").strip() or None
         for name in req.systems:
             config = db.exec(
                 select(SystemConfig).where(SystemConfig.legacy_system_name == name)
@@ -4748,7 +4752,12 @@ def provision_club_request(
                 system_id=config.id,
                 enabled=True,
                 session_day=day,
+                # Weekly, and the same night for every system the club asked
+                # for. A club running two games on two nights, or anything
+                # fortnightly, corrects this in the admin; the form asks one
+                # question because five would put people off answering any.
                 session_cadence="weekly",
+                session_start_time=start,
             ))
             enabled_systems.append(name)
 

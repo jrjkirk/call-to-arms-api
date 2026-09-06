@@ -58,14 +58,13 @@ EMAIL_KINDS: dict[str, dict] = {
             "Hi {requester_name},\n"
             "\n"
             "Thanks for asking us to add {club_name} to Call to Arms. Your request is in "
-            "and we'll look at it shortly — usually the same day.\n"
+            "and we'll look at it shortly, usually the same day.\n"
             "\n"
             "When it's approved you'll get a second email with your club's own web "
-            "address. You won't need to set up an account: the Discord you signed in "
-            "with is already linked, and you'll land straight in your club's admin.\n"
+            "address. You won't need to set up an account. The Discord you signed in with "
+            "is already linked, so you'll land straight in your club's admin.\n"
             "\n"
-            "If you didn't make this request, you can ignore this — nothing has been "
-            "created."
+            "If you didn't make this request, you can ignore this. Nothing has been created."
         ),
     },
     CLUB_LIVE: {
@@ -77,7 +76,7 @@ EMAIL_KINDS: dict[str, dict] = {
         # using them reads correctly either way.
         "tokens": [
             "requester_name", "club_name", "club_url",
-            "systems", "club_night", "systems_line", "admin_line",
+            "systems", "club_night", "systems_line", "admin_line", "handbook_line",
         ],
         "subject": "{club_name} is live on Call to Arms",
         # The one email with somewhere to go, so it gets a button. The URL comes
@@ -87,11 +86,13 @@ EMAIL_KINDS: dict[str, dict] = {
         "body": (
             "Hi {requester_name},\n"
             "\n"
-            "{club_name} is live on Call to Arms — it's ready for your players.\n"
+            "{club_name} is live on Call to Arms, and ready for your players.\n"
             "\n"
             "{systems_line}\n"
             "\n"
-            "{admin_line}"
+            "{admin_line}\n"
+            "\n"
+            "{handbook_line}"
         ),
     },
     REQUEST_DECLINED: {
@@ -108,7 +109,7 @@ EMAIL_KINDS: dict[str, dict] = {
             "{reason}\n"
             "\n"
             "If something changes, you're welcome to ask again at "
-            "https://www.calltoarms.app/request-club — we're happy to take another look."
+            "https://www.calltoarms.app/request-club and we'll take another look."
         ),
     },
 }
@@ -123,13 +124,17 @@ SAMPLE_CONTEXT = {
     "club_night": "Thursday",
     "systems_line": (
         "We've switched on The Old World, Kill Team on Thursdays to save you a job. "
-        "Change any of it from your admin — it's a starting point, not a decision."
+        "It's a starting point, not a decision, so change any of it from your admin."
+    ),
+    "handbook_line": (
+        "Everything else is written up in the club handbook: "
+        "https://badmoon.calltoarms.app/admin?tab=clubguide"
     ),
     "admin_line": (
         "Sign in with the same Discord account and you'll arrive in your club's admin "
-        "as its owner. There's a short checklist on the first screen — the one step "
-        "worth doing before your next club night is connecting a Discord channel, so "
-        "sign-ups and pairings post themselves."
+        "as its owner. A short checklist on the first screen walks you through setting "
+        "up. The one step worth doing before your next club night is connecting a "
+        "Discord channel, so sign-ups and pairings post themselves."
     ),
     "reason": "We couldn't tell from the link that you run this club.",
 }
@@ -387,17 +392,25 @@ def send_club_live(
         "systems": systems_text,
         "club_night": club_night or "",
         "systems_line": (
-            f"We've switched on {systems_text}{night} to save you a job. Change any of "
-            "it from your admin — it's a starting point, not a decision."
+            f"We've switched on {systems_text}{night} to save you a job. It's a "
+            "starting point, not a decision, so change any of it from your admin."
             if systems_text else ""
         ),
         "admin_line": (
             "Sign in with the same Discord account and you'll arrive in your club's "
-            "admin as its owner. There's a short checklist on the first screen — the "
-            "one step worth doing before your next club night is connecting a Discord "
-            "channel, so sign-ups and pairings post themselves."
+            "admin as its owner. A short checklist on the first screen walks you "
+            "through setting up. The one step worth doing before your next club "
+            "night is connecting a Discord channel, so sign-ups and pairings post "
+            "themselves."
             if is_admin else
             "Sign in with Discord to get started."
+        ),
+        # Signposted rather than left to be discovered. The handbook answers the
+        # questions that were previously answered by a phone call, and ?tab=
+        # opens it directly instead of describing where to look.
+        "handbook_line": (
+            f"Everything else is written up in the club handbook: {club_url}/admin?tab=clubguide"
+            if is_admin else ""
         ),
     })
 
