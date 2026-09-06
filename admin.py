@@ -65,6 +65,7 @@ from signups import (
     _validate_week,
     signup_cap,
 )
+import club_emails
 from github_dispatch import PAIRINGS_IMAGE_WORKFLOW, dispatch_workflow
 from week_logic import _DAY_NAME_TO_INT, next_session_date
 
@@ -4442,20 +4443,51 @@ def approve_club_request(
     user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
-    """Marks the request reviewed/approved — does not create the Club row
-    itself. The real club is still created by hand via the existing
-    POST /admin/platform/clubs flow, since Joel emails the requester a
-    getting-started pack as part of onboarding them."""
+    """Marks the request reviewed/approved without creating the Club.
+
+    Kept for the case where a request is judged good but the club isn't being
+    set up yet. The normal path is /provision, which approves AND creates in one
+    step — and, unlike this, tells the requester. Approving here deliberately
+    sends nothing: there is no club yet, so there is nothing to tell them."""
     return _club_request_dict(_review_club_request(request_id, "approved", user, db))
+
+
+class DenyClubRequestBody(BaseModel):
+    # Optional and free text. Most declines are "not yet" or "we couldn't tell
+    # you run this club", both of which are worth saying and both of which are
+    # fixable — so the email offers a way back either way.
+    reason: Optional[str] = None
+    notify: bool = True
 
 
 @router.post("/platform/club-requests/{request_id}/deny")
 def deny_club_request(
     request_id: int,
+    body: Optional[DenyClubRequestBody] = None,
     user: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
-    return _club_request_dict(_review_club_request(request_id, "denied", user, db))
+    """Decline a request, and by default say so.
+
+    Declines used to be silent: the row changed colour in an admin screen and
+    the person who asked waited indefinitely for an answer that already existed.
+    `notify: false` is there for spam and obvious junk, which deserves no reply.
+    """
+    body = body or DenyClubRequestBody()
+    req = _review_club_request(request_id, "denied", user, db)
+
+    result = _club_request_dict(req)
+    if body.notify:
+        outcome = club_emails.send_request_declined(
+            to=req.requester_email,
+            requester_name=req.requester_name,
+            club_name=req.club_name,
+            reason=(body.reason or "").strip() or None,
+        )
+        if outcome != "sent":
+            print(f"[club-request {req.id}] decline email: {outcome}")
+        result["email"] = outcome
+    return result
 
 
 class ProvisionClubBody(BaseModel):
@@ -4584,11 +4616,28 @@ def provision_club_request(
     db.commit()
     db.refresh(club)
     db.refresh(req)
+
+    # After the commit, and never allowed to fail it: the club exists whether or
+    # not we manage to say so. Returned to the caller so the platform admin can
+    # see "we couldn't email them" and follow up by hand, rather than assuming.
+    email_outcome = club_emails.send_club_live(
+        to=req.requester_email,
+        requester_name=req.requester_name,
+        club_name=club.name,
+        club_url=club_app_url(club),
+        is_admin=appointed is not None,
+        systems=enabled_systems,
+        club_night=req.club_night_day,
+    )
+    if email_outcome != "sent":
+        print(f"[club-request {req.id}] welcome email: {email_outcome}")
+
     return {
         "club": club,
         "request": _club_request_dict(req),
         "appointed_super_admin": appointed,
         "enabled_systems": enabled_systems,
+        "email": email_outcome,
     }
 
 

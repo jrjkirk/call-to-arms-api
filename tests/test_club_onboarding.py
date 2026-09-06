@@ -54,6 +54,20 @@ with Session(database.engine) as db:
                 is_platform_admin=True))
     db.commit()
 
+# Capture instead of send. Nothing here should ever reach Resend, and the
+# assertions below care about *what would have been sent*, not the transport.
+SENT_EMAILS = []
+
+
+def _fake_send(to, subject, html, cc=None):
+    SENT_EMAILS.append({"to": to, "subject": subject, "html": html})
+    return "fake-message-id"
+
+
+import club_emails  # noqa: E402
+
+club_emails.send_email = _fake_send
+
 client = TestClient(main.app)
 
 REQUEST = {
@@ -167,6 +181,77 @@ with Session(database.engine) as db:
     check("no systems were enabled",
           db.exec(select(ClubSystem).where(ClubSystem.club_id == club.id)).first() is None)
     check("but the club still exists", club is not None)
+
+print("\n8. The requester actually hears back")
+# Silence was the single biggest source of onboarding back-and-forth: a request
+# went in and nothing happened until someone remembered to write by hand.
+ack = [e for e in SENT_EMAILS if "got your request" in e["subject"]]
+check("an acknowledgement went out on submit", len(ack) >= 1, str([e["subject"] for e in SENT_EMAILS]))
+check("addressed to the requester", ack and ack[0]["to"] == "nick@badmoon.test")
+check("naming their club", ack and "Badmoon Bunker" in ack[0]["html"])
+
+live = [e for e in SENT_EMAILS if "is live" in e["subject"]]
+check("a welcome email went out on provision", len(live) >= 1)
+check("with their own club address",
+      live and "https://badmoon.calltoarms.app" in live[0]["html"], live[0]["html"][:200] if live else "")
+check("telling them they're the owner", live and "as its owner" in live[0]["html"])
+check("and what we switched on for them",
+      live and "The Old World" in live[0]["html"] and "Thursday" in live[0]["html"])
+
+print("\n9. A decline closes the loop instead of going silent")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-declined", "Sam", None))
+client.cookies.delete("cta_session")
+client.post("/club-requests", json={**REQUEST, "club_name": "Nope Club"})
+with Session(database.engine) as db:
+    nope_id = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-declined")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+before = len(SENT_EMAILS)
+r = client.post(f"/admin/platform/club-requests/{nope_id}/deny",
+                json={"reason": "We couldn't tell that you run this club."})
+check("deny succeeded", r.status_code == 200, r.text[:120])
+declined = [e for e in SENT_EMAILS[before:] if "About your" in e["subject"]]
+check("a decline email went out", len(declined) == 1, str(len(declined)))
+check("carrying the reason given",
+      declined and "couldn&#x27;t tell that you run this club" in declined[0]["html"],
+      declined[0]["html"][:200] if declined else "")
+
+print("\n10. Spam can be declined silently")
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-spam", "Spam", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Spam Club"})
+with Session(database.engine) as db:
+    spam_id = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-spam")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+before = len(SENT_EMAILS)
+client.post(f"/admin/platform/club-requests/{spam_id}/deny", json={"notify": False})
+check("nothing was sent when notify is false", len(SENT_EMAILS) == before)
+
+print("\n11. A broken mailer must not lose a request or a club")
+# The submission and the club are the records. Email is a courtesy on top, and
+# an outage at Resend must never take either of them with it.
+def _boom(*a, **k):
+    raise RuntimeError("Resend is down")
+
+club_emails.send_email = _boom
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-outage", "Ada", None))
+r = client.post("/club-requests", json={**REQUEST, "club_name": "Outage Club", "preferred_slug": "outage"})
+check("the request is still accepted", r.status_code == 201, r.text[:120])
+with Session(database.engine) as db:
+    outage = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-outage")).first()
+    check("and recorded", outage is not None)
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{outage.id}/provision", json={"slug": "outage"})
+check("the club is still created", r.status_code == 200, r.text[:160])
+check("and the failure is reported back, not hidden",
+      r.json().get("email", "").startswith("failed"), str(r.json().get("email")))
+with Session(database.engine) as db:
+    check("the club really exists",
+          db.exec(select(Club).where(Club.slug == "outage")).first() is not None)
+club_emails.send_email = _fake_send
 
 print(f"\n{'ALL PASS' if not FAILURES else str(len(FAILURES)) + ' FAILURE(S): ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

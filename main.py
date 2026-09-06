@@ -13,6 +13,7 @@ from sqlmodel import Session, select, or_
 
 from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
+import club_emails
 from levels import levels_for_players
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
@@ -596,6 +597,14 @@ def create_club_request(
     session.commit()
     session.refresh(req)
     _post_club_request_webhook(req)
+    # After the commit, and never allowed to fail the request: the submission is
+    # the record, and a mistyped address or a Resend outage must not lose it.
+    # Same ordering and the same tolerance as the webhook above.
+    outcome = club_emails.send_request_received(
+        to=req.requester_email, requester_name=req.requester_name, club_name=req.club_name,
+    )
+    if outcome != "sent":
+        print(f"[club-request {req.id}] acknowledgement email: {outcome}")
     return {"ok": True}
 
 
