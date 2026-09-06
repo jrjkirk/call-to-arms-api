@@ -4754,9 +4754,43 @@ def provision_club_request(
             )
             db.add(target)
         else:
-            # An existing player who is starting a club: give them the grant,
-            # and point their home at it. Their club_id has to match for the
-            # club-scoped admin endpoints to accept them.
+            # An existing player who is starting a club. Their club_id has to
+            # move, because club-scoped admin authority is `is_super_admin AND
+            # club_id == this club` and there is no multi-club admin model: one
+            # person cannot own two clubs at once.
+            #
+            # Which means moving them can take an owner away from somewhere
+            # else. Harmless when that club has another super-admin; when it
+            # does not, it silently leaves a live club with nobody who can
+            # administer it, discovered weeks later by whoever needs to change
+            # something. So the trade gets refused rather than made quietly, and
+            # the reviewer decides.
+            previous_club_id = target.club_id
+            if (
+                target.is_super_admin
+                and previous_club_id is not None
+                and previous_club_id != club.id
+            ):
+                remaining = db.exec(
+                    select(User)
+                    .where(User.club_id == previous_club_id)
+                    .where(User.is_super_admin == True)
+                    .where(User.id != target.id)
+                ).all()
+                if not remaining:
+                    previous = db.get(Club, previous_club_id)
+                    previous_name = previous.name if previous else f"club {previous_club_id}"
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{target.discord_name} is the only super-admin of "
+                            f"{previous_name}. Making them super-admin here would move "
+                            f"them and leave {previous_name} with nobody who can "
+                            "administer it. Appoint someone else there first, or "
+                            "provision without appointing and sort the admin out "
+                            "afterwards."
+                        ),
+                    )
             target.club_id = club.id
             target.home_club_id = club.id
             target.is_super_admin = True

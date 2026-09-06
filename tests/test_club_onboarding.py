@@ -307,6 +307,80 @@ if dupes:
     names = [d["name"] for d in dupes[0]["possible_duplicates"]]
     check("naming the club it might already be", len(names) >= 1, str(names))
 
+print("\n11f. Provisioning must not leave another club without an owner")
+# Club-scoped admin authority is `is_super_admin AND club_id == this club`, and
+# there is no multi-club admin model, so appointing someone here MOVES them. If
+# they were the only super-admin somewhere else, that club silently loses its
+# owner and nobody notices until something needs changing.
+club_emails.send_email = _fake_send
+# Ids left to the database: provisioning creates clubs of its own between these
+# blocks, and any number picked by hand gets consumed by the next autoincrement.
+with Session(database.engine) as db:
+    solo_club = Club(name="Solo Club", slug="solo")
+    db.add(solo_club)
+    db.flush()
+    solo_club_id = solo_club.id
+    db.add(User(discord_id="discord-solo", discord_name="Robin",
+                club_id=solo_club_id, is_super_admin=True))
+    db.commit()
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-solo", "Robin", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Robin's Second Club",
+                                    "preferred_slug": "second"})
+with Session(database.engine) as db:
+    second_id = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-solo")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+
+r = client.post(f"/admin/platform/club-requests/{second_id}/provision", json={"slug": "second"})
+check("refused with a conflict", r.status_code == 409, f"got {r.status_code}: {r.text[:120]}")
+check("naming the club that would be left stranded",
+      "Solo Club" in r.json().get("detail", ""), r.json().get("detail", "")[:140])
+with Session(database.engine) as db:
+    check("no half-created club was left behind",
+          db.exec(select(Club).where(Club.slug == "second")).first() is None)
+    check("the request is still pending, not half-approved",
+          db.get(ClubRequest, second_id).status == "pending")
+    check("Robin still runs their original club",
+          db.exec(select(User).where(User.discord_id == "discord-solo")).first().club_id == solo_club_id)
+
+print("\n11g. ...but the reviewer can still go ahead without appointing")
+r = client.post(f"/admin/platform/club-requests/{second_id}/provision",
+                json={"slug": "second", "appoint_super_admin": False})
+check("provision succeeded", r.status_code == 200, r.text[:140])
+with Session(database.engine) as db:
+    check("the club exists", db.exec(select(Club).where(Club.slug == "second")).first() is not None)
+    check("and Robin is untouched",
+          db.exec(select(User).where(User.discord_id == "discord-solo")).first().club_id == solo_club_id)
+
+print("\n11h. Moving is fine when the old club keeps an owner")
+with Session(database.engine) as db:
+    shared = Club(name="Shared Club", slug="shared")
+    db.add(shared)
+    db.flush()
+    shared_id = shared.id
+    db.add(User(discord_id="discord-pair-a", discord_name="Alex",
+                club_id=shared_id, is_super_admin=True))
+    db.add(User(discord_id="discord-pair-b", discord_name="Blake",
+                club_id=shared_id, is_super_admin=True))
+    db.commit()
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-pair-a", "Alex", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Alex's Club", "preferred_slug": "alexs"})
+with Session(database.engine) as db:
+    alex_req = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-pair-a")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{alex_req}/provision", json={"slug": "alexs"})
+check("allowed, because Blake is still there", r.status_code == 200, r.text[:140])
+with Session(database.engine) as db:
+    new_club = db.exec(select(Club).where(Club.slug == "alexs")).first()
+    alex = db.exec(select(User).where(User.discord_id == "discord-pair-a")).first()
+    check("Alex now runs the new club", alex.club_id == new_club.id and alex.is_super_admin)
+    left = db.exec(select(User).where(User.club_id == shared_id, User.is_super_admin == True)).all()
+    check("Shared Club still has an owner", len(left) == 1 and left[0].discord_name == "Blake",
+          str([u.discord_name for u in left]))
+
 print("\n12. The copy is editable from platform admin")
 client.cookies.delete("cta_pending_signup")
 client.cookies.set("cta_session", _make_session_cookie(1))
