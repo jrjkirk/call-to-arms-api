@@ -42,6 +42,12 @@ REQUEST_RECEIVED = "request_received"
 CLUB_LIVE = "club_live"
 REQUEST_DECLINED = "request_declined"
 
+# NOTE ON REPLIES: none of these invite one, and that is deliberate.
+# calltoarms.app has no MX records — the domain accepts no mail — and Resend is
+# send-only, so a reply to notifications@calltoarms.app bounces. Copy that says
+# "just reply" is a promise the infrastructure cannot keep, and a bounce is a
+# poor first impression from someone we are trying to onboard. If a real inbox
+# or a forwarding address ever exists, set Reply-To and this can change.
 EMAIL_KINDS: dict[str, dict] = {
     REQUEST_RECEIVED: {
         "label": "Request received",
@@ -85,9 +91,7 @@ EMAIL_KINDS: dict[str, dict] = {
             "\n"
             "{systems_line}\n"
             "\n"
-            "{admin_line}\n"
-            "\n"
-            "Anything at all, just reply — a person reads these."
+            "{admin_line}"
         ),
     },
     REQUEST_DECLINED: {
@@ -103,8 +107,8 @@ EMAIL_KINDS: dict[str, dict] = {
             "\n"
             "{reason}\n"
             "\n"
-            "If you think we've got this wrong, or something's changed, just reply to "
-            "this email — we're happy to take another look."
+            "If something changes, you're welcome to ask again at "
+            "https://www.calltoarms.app/request-club — we're happy to take another look."
         ),
     },
 }
@@ -215,7 +219,7 @@ font-size:15px;line-height:1.6;color:{text}">
       {cta}
       <tr><td bgcolor="{card}" style="background:{card};padding:18px 28px 26px;border-top:1px solid {border};\
 font-family:{font};font-size:12px;line-height:1.5;color:{muted}">
-        Call to Arms — club night, organised.<br />
+        The Call to Arms Team<br />
         <a href="https://www.calltoarms.app" style="color:{muted};text-decoration:underline">calltoarms.app</a>
       </td></tr>
     </table>
@@ -393,8 +397,7 @@ def send_club_live(
             "one step worth doing before your next club night is connecting a Discord "
             "channel, so sign-ups and pairings post themselves."
             if is_admin else
-            "Sign in with Discord to get started. Reply to this email if you need admin "
-            "access and we'll sort it."
+            "Sign in with Discord to get started."
         ),
     })
 
