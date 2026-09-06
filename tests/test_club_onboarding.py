@@ -253,6 +253,60 @@ with Session(database.engine) as db:
           db.exec(select(Club).where(Club.slug == "outage")).first() is not None)
 club_emails.send_email = _fake_send
 
+print("\n11b. A request with no club night schedules nothing, rather than guessing")
+# Guessing "Wednesday" published a specific wrong night on a club's public page
+# and drove every schedule default from it. No systems reads as unfinished; a
+# plausible wrong answer does not.
+club_emails.send_email = _fake_send
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-nonight", "Pat", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "No Night Club",
+                                    "preferred_slug": "nonight", "club_night_day": None,
+                                    "club_night_time": None})
+with Session(database.engine) as db:
+    nn = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-nonight")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{nn}/provision", json={"slug": "nonight"})
+check("provision succeeded", r.status_code == 200, r.text[:140])
+check("no systems were enabled", r.json().get("enabled_systems") == [], str(r.json().get("enabled_systems")))
+check("and it says why", bool(r.json().get("skipped_systems_reason")), str(r.json().get("skipped_systems_reason")))
+with Session(database.engine) as db:
+    club = db.exec(select(Club).where(Club.slug == "nonight")).first()
+    check("no ClubSystem row invented a Wednesday",
+          db.exec(select(ClubSystem).where(ClubSystem.club_id == club.id)).first() is None)
+
+print("\n11c. The club night's start time reaches the club")
+with Session(database.engine) as db:
+    cs = db.exec(select(ClubSystem).where(ClubSystem.session_start_time == "18:00")).first()
+    check("session_start_time was set from the request", cs is not None)
+
+print("\n11d. A club can be provisioned without going public")
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-quiet2", "Sam", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Held Back", "preferred_slug": "heldback"})
+with Session(database.engine) as db:
+    hb = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-quiet2")).first().id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{hb}/provision", json={"slug": "heldback", "active": False})
+check("provision succeeded", r.status_code == 200, r.text[:140])
+with Session(database.engine) as db:
+    club = db.exec(select(Club).where(Club.slug == "heldback")).first()
+    check("the club exists but is not active", club is not None and club.active is False)
+    owner = db.exec(select(User).where(User.discord_id == "discord-quiet2")).first()
+    check("its owner can still administer it", owner is not None and owner.is_super_admin)
+
+print("\n11e. Likely duplicates are shown to the reviewer")
+r = client.get("/admin/platform/club-requests")
+rows = r.json() if r.status_code == 200 else []
+dupes = [x for x in rows if x.get("possible_duplicates")]
+check("at least one request flags an existing club", len(dupes) >= 1,
+      f"{len(rows)} rows, none flagged")
+if dupes:
+    names = [d["name"] for d in dupes[0]["possible_duplicates"]]
+    check("naming the club it might already be", len(names) >= 1, str(names))
+
 print("\n12. The copy is editable from platform admin")
 client.cookies.delete("cta_pending_signup")
 client.cookies.set("cta_session", _make_session_cookie(1))

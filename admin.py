@@ -15,7 +15,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlmodel import Session, or_, select
 
 from auth import (
     DISCORD_CLIENT_ID,
@@ -154,6 +154,11 @@ def onboarding_status(
     items = {
         "profile_blurb": bool((club.blurb or "").strip()),
         "logo": bool(club.logo_url),
+        # Coordinates, not the address text. Without them a club is a list entry
+        # on the finder with no marker on the map, and nothing anywhere told
+        # them so: provisioning cannot set coordinates from a town name, and the
+        # club-page editor has the fields but nobody was pointed at them.
+        "map_pin": club.latitude is not None and club.longitude is not None,
         # The public Discord invite shown front-and-centre on the club page —
         # distinct from discord_webhook (the app's posting webhook) below.
         "discord_link": bool(club.discord_url),
@@ -4517,7 +4522,34 @@ def _suggest_slug(name: str) -> str:
     return s or "club"
 
 
-def _club_request_dict(r: ClubRequest) -> dict:
+def _possible_duplicates(db: Session, r: ClubRequest) -> list[dict]:
+    """Existing clubs that might already be the one being requested.
+
+    Surfaced to the reviewer rather than blocking the requester: two clubs can
+    legitimately share a name in different towns, and the person who knows which
+    is which is the one reading the request. Without this, the way you find out
+    is provisioning a subdomain to the wrong committee member.
+    """
+    name = (r.club_name or "").strip()
+    town = (r.club_location or "").strip()
+    if not name and not town:
+        return []
+    clauses = []
+    if name:
+        clauses.append(Club.name.ilike(f"%{name}%"))
+        # A slug clash is the same club by another spelling more often than not.
+        clauses.append(Club.slug == _suggest_slug(name))
+    if town:
+        clauses.append(Club.address.ilike(f"%{town}%"))
+    rows = db.exec(select(Club).where(or_(*clauses)).limit(5)).all()
+    return [
+        {"id": c.id, "name": c.name, "slug": c.slug, "address": c.address, "active": c.active}
+        for c in rows
+        if c.id != r.provisioned_club_id
+    ]
+
+
+def _club_request_dict(r: ClubRequest, db: Optional[Session] = None) -> dict:
     return {
         "id": r.id,
         "created_at": r.created_at,
@@ -4544,6 +4576,8 @@ def _club_request_dict(r: ClubRequest) -> dict:
         "player_count": r.player_count,
         "requester_role": r.requester_role,
         "evidence_url": r.evidence_url,
+        # Only computed for the list view, where a reviewer is actually looking.
+        "possible_duplicates": _possible_duplicates(db, r) if db is not None else [],
     }
 
 
@@ -4553,16 +4587,19 @@ def list_club_requests(
     _: User = Depends(require_platform_admin),
     db: Session = Depends(get_session),
 ):
-    """"Please add my club" submissions from the logged-out hero page.
-    ?status=pending|approved|denied filters; omitted returns all, newest
-    first."""
+    """"Please add my club" submissions, newest first.
+
+    ?status=pending|approved|denied filters; omitted returns all. Each row
+    carries possible_duplicates, computed here rather than on submit: the
+    person who can tell two similarly-named clubs apart is the one reading
+    the request, not the one filling in the form."""
     query = select(ClubRequest)
     if status is not None:
         if status not in {"pending", "approved", "denied"}:
             raise HTTPException(status_code=422, detail="status must be one of: pending, approved, denied")
         query = query.where(ClubRequest.status == status)
     rows = db.exec(query.order_by(ClubRequest.created_at.desc())).all()
-    return [_club_request_dict(r) for r in rows]
+    return [_club_request_dict(r, db) for r in rows]
 
 
 def _review_club_request(request_id: int, new_status: str, user: User, db: Session) -> ClubRequest:
@@ -4734,9 +4771,17 @@ def provision_club_request(
     # asked the club when it meets. The form asks now, so the club arrives with
     # its systems on and its club night set — a starting point the admin can
     # correct, rather than an empty console and a phone call.
+    # A club night is required on the form now, so only a request predating that
+    # arrives without one. Skipped rather than guessed: session_day is NOT NULL,
+    # and inventing "Wednesday" published a specific wrong night on a club's
+    # public page and drove every schedule default from it. No systems is
+    # obviously unfinished; a plausible wrong answer is not.
     enabled_systems: list[str] = []
-    if body.enable_systems and req.systems:
-        day = req.club_night_day or "Wednesday"
+    skipped_systems_reason = None
+    if body.enable_systems and req.systems and not req.club_night_day:
+        skipped_systems_reason = "no club night on the request, so nothing was scheduled"
+    elif body.enable_systems and req.systems:
+        day = req.club_night_day
         # The club told us its start time on the form, and ClubSystem has a field
         # for it, but provisioning was dropping it on the floor and leaving the
         # club page saying nothing about when to turn up.
@@ -4794,6 +4839,7 @@ def provision_club_request(
         "request": _club_request_dict(req),
         "appointed_super_admin": appointed,
         "enabled_systems": enabled_systems,
+        "skipped_systems_reason": skipped_systems_reason,
         "email": email_outcome,
     }
 
