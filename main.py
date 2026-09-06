@@ -601,7 +601,8 @@ def create_club_request(
     # the record, and a mistyped address or a Resend outage must not lose it.
     # Same ordering and the same tolerance as the webhook above.
     outcome = club_emails.send_request_received(
-        to=req.requester_email, requester_name=req.requester_name, club_name=req.club_name,
+        session, to=req.requester_email, requester_name=req.requester_name,
+        club_name=req.club_name,
     )
     if outcome != "sent":
         print(f"[club-request {req.id}] acknowledgement email: {outcome}")

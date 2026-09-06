@@ -4233,6 +4233,148 @@ def set_community_discord(
     return {"url": url}
 
 
+# ---------------------------------------------------------------------------
+# Onboarding email templates (platform admin)
+# ---------------------------------------------------------------------------
+
+class ClubEmailTemplateBody(BaseModel):
+    kind: str
+    # Either may be null to fall back to the built-in default. That is how a
+    # template is reset: clear the field rather than hunting for the original
+    # wording to paste back.
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+class ClubEmailPreviewBody(BaseModel):
+    kind: str
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+class ClubEmailTestBody(BaseModel):
+    kind: str
+    to: str
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+@router.get("/platform/club-emails")
+def list_club_emails(
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """The three onboarding emails, as they'll actually go out.
+
+    Returns the default alongside the current wording so the editor can show
+    what "reset" would restore without keeping its own copy of the copy.
+    """
+    out = []
+    for kind, spec in club_emails.EMAIL_KINDS.items():
+        current = club_emails.get_template(db, kind)
+        out.append({
+            "kind": kind,
+            "label": spec["label"],
+            "when": spec["when"],
+            "tokens": spec["tokens"],
+            "subject": current["subject"],
+            "body": current["body"],
+            "default_subject": spec["subject"],
+            "default_body": spec["body"],
+            "customised": current["customised"],
+        })
+    return out
+
+
+@router.post("/platform/club-emails")
+def save_club_email(
+    body: ClubEmailTemplateBody,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    if body.kind not in club_emails.EMAIL_KINDS:
+        raise HTTPException(status_code=422, detail="Unknown email.")
+
+    for part, value in (("subject", body.subject), ("body", body.body)):
+        key = f"club_email_{body.kind}_{part}"
+        row = db.get(AppSetting, key)
+        cleaned = (value or "").strip() or None
+        if cleaned is None:
+            # Cleared: drop the row entirely so the built-in default takes over
+            # again, rather than storing an empty string that renders nothing.
+            if row is not None:
+                db.delete(row)
+            continue
+        if row is None:
+            row = AppSetting(key=key, value=cleaned)
+        else:
+            row.value = cleaned
+            row.updated_at = datetime.utcnow()
+        db.add(row)
+
+    log_audit(db, user, "club_email.update", "app_setting", None, f"kind={body.kind}")
+    db.commit()
+    return club_emails.get_template(db, body.kind) | {"kind": body.kind}
+
+
+@router.post("/platform/club-emails/preview")
+def preview_club_email(
+    body: ClubEmailPreviewBody,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Render unsaved edits against sample data.
+
+    Previewing the draft rather than the stored version is the point: the whole
+    reason this endpoint exists is to see a change before a club does.
+    """
+    if body.kind not in club_emails.EMAIL_KINDS:
+        raise HTTPException(status_code=422, detail="Unknown email.")
+    spec = club_emails.EMAIL_KINDS[body.kind]
+    stored = club_emails.get_template(db, body.kind)
+    subject = (body.subject or "").strip() or stored["subject"]
+    text = (body.body or "").strip() or stored["body"]
+    ctx = club_emails.SAMPLE_CONTEXT
+    return {
+        "subject": club_emails._subject_safe(club_emails.fill(subject, ctx)),
+        "html": club_emails.render_body(text, ctx),
+        "unknown_tokens": sorted(
+            set(re.findall(r"\{([a-z_]+)\}", f"{subject}\n{text}")) - set(spec["tokens"])
+        ),
+    }
+
+
+@router.post("/platform/club-emails/test")
+def test_send_club_email(
+    body: ClubEmailTestBody,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Send the draft to a real inbox.
+
+    A preview shows the markup; only a real send shows what the client does with
+    it. Platform-admin only, and the address is whatever they type — usually
+    their own.
+    """
+    if body.kind not in club_emails.EMAIL_KINDS:
+        raise HTTPException(status_code=422, detail="Unknown email.")
+    if "@" not in body.to or " " in body.to:
+        raise HTTPException(status_code=422, detail="That doesn't look like an email address.")
+    stored = club_emails.get_template(db, body.kind)
+    subject = (body.subject or "").strip() or stored["subject"]
+    text = (body.body or "").strip() or stored["body"]
+    ctx = club_emails.SAMPLE_CONTEXT
+    outcome = club_emails._send(
+        body.to,
+        club_emails._subject_safe(club_emails.fill(subject, ctx)),
+        club_emails._SHELL.format(body=club_emails.render_body(text, ctx)),
+    )
+    log_audit(db, user, "club_email.test_send", "app_setting", None,
+              f"kind={body.kind} to={body.to} -> {outcome}")
+    db.commit()
+    return {"outcome": outcome}
+
+
 # Every scheduled job that calls record_job_run() — kept as one list so the
 # health-check UI can show "never run" for a job with zero rows, not just
 # silently omit it.
@@ -4479,6 +4621,7 @@ def deny_club_request(
     result = _club_request_dict(req)
     if body.notify:
         outcome = club_emails.send_request_declined(
+            db,
             to=req.requester_email,
             requester_name=req.requester_name,
             club_name=req.club_name,
@@ -4621,6 +4764,7 @@ def provision_club_request(
     # not we manage to say so. Returned to the caller so the platform admin can
     # see "we couldn't email them" and follow up by hand, rather than assuming.
     email_outcome = club_emails.send_club_live(
+        db,
         to=req.requester_email,
         requester_name=req.requester_name,
         club_name=club.name,

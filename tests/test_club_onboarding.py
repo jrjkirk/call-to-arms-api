@@ -253,5 +253,72 @@ with Session(database.engine) as db:
           db.exec(select(Club).where(Club.slug == "outage")).first() is not None)
 club_emails.send_email = _fake_send
 
+print("\n12. The copy is editable from platform admin")
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.get("/admin/platform/club-emails")
+check("all three emails are listed", r.status_code == 200 and len(r.json()) == 3, r.text[:120])
+kinds = {e["kind"] for e in r.json()} if r.status_code == 200 else set()
+check("by their known kinds",
+      kinds == {"request_received", "club_live", "request_declined"}, str(kinds))
+check("none customised to begin with", all(not e["customised"] for e in r.json()))
+
+r = client.post("/admin/platform/club-emails", json={
+    "kind": "request_received",
+    "subject": "Cheers {requester_name}!",
+    "body": "Hi {requester_name},\n\nWe got it — {club_name}.",
+})
+check("an edit saves", r.status_code == 200, r.text[:120])
+check("and reads back", r.json().get("subject") == "Cheers {requester_name}!")
+
+SENT_EMAILS.clear()
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-edit", "Edi", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Edited Club", "preferred_slug": "edited"})
+# "Nick", not the Discord handle "Edi": the email greets people by the name they
+# typed on the form, which is the one they'd expect to be called.
+check("the edited copy is what actually goes out",
+      SENT_EMAILS and SENT_EMAILS[0]["subject"] == "Cheers Nick!",
+      str([e["subject"] for e in SENT_EMAILS]))
+check("and the edited body too",
+      SENT_EMAILS and "We got it — Edited Club." in SENT_EMAILS[0]["html"],
+      SENT_EMAILS[0]["html"][:160] if SENT_EMAILS else "")
+
+print("\n13. Clearing a template restores the built-in wording")
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+client.post("/admin/platform/club-emails", json={"kind": "request_received", "subject": "", "body": ""})
+r = client.get("/admin/platform/club-emails")
+row = next(e for e in r.json() if e["kind"] == "request_received")
+check("back to the default", row["subject"] == row["default_subject"], row["subject"])
+check("and marked as not customised", row["customised"] is False)
+
+print("\n14. Preview renders drafts, and flags typos in tokens")
+r = client.post("/admin/platform/club-emails/preview", json={
+    "kind": "club_live",
+    "subject": "{club_name} is ready",
+    "body": "Hi {requester_name},\n\n{club_url}\n\n{club_nmae} is a typo.",
+})
+check("preview succeeded", r.status_code == 200, r.text[:120])
+pv = r.json() if r.status_code == 200 else {}
+check("subject filled with sample data", pv.get("subject") == "Badmoon Bunker is ready", str(pv.get("subject")))
+check("the club address became a link", "<a href=" in pv.get("html", ""))
+check("a mistyped token is reported", pv.get("unknown_tokens") == ["club_nmae"], str(pv.get("unknown_tokens")))
+
+print("\n15. An editor cannot inject markup into an email we send")
+r = client.post("/admin/platform/club-emails/preview", json={
+    "kind": "request_declined",
+    "subject": "x",
+    "body": "Hi <script>alert(1)</script> and <b>bold</b>",
+})
+html = r.json().get("html", "")
+check("script and tags are inert", "<script" not in html and "<b>" not in html, html[:120])
+check("the text itself survives", "alert(1)" in html)
+
+print("\n16. Unknown kinds are refused everywhere")
+for path in ["/admin/platform/club-emails", "/admin/platform/club-emails/preview"]:
+    rr = client.post(path, json={"kind": "nonsense", "subject": "x", "body": "y"})
+    check(f"422 from {path}", rr.status_code == 422, f"got {rr.status_code}")
+
 print(f"\n{'ALL PASS' if not FAILURES else str(len(FAILURES)) + ' FAILURE(S): ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)
