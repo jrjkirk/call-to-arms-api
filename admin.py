@@ -4383,7 +4383,20 @@ def _club_request_dict(r: ClubRequest) -> dict:
         "reviewed_at": r.reviewed_at,
         "reviewed_by_name": r.reviewed_by_name,
         "provisioned_club_id": r.provisioned_club_id,
-        "suggested_slug": _suggest_slug(r.club_name),
+        # The requester's own preference wins over our slugified guess — they
+        # know what their players will type.
+        "suggested_slug": r.preferred_slug or _suggest_slug(r.club_name),
+        # Everything the reviewer used to have to ask for by email.
+        "discord_name": r.discord_name,
+        "discord_id": r.discord_id,
+        "region": r.region,
+        "preferred_slug": r.preferred_slug,
+        "systems": r.systems or [],
+        "club_night_day": r.club_night_day,
+        "club_night_time": r.club_night_time,
+        "player_count": r.player_count,
+        "requester_role": r.requester_role,
+        "evidence_url": r.evidence_url,
     }
 
 
@@ -4449,6 +4462,11 @@ class ProvisionClubBody(BaseModel):
     slug: str                       # confirmed/edited by the platform admin
     region: Optional[str] = None    # optional; must be a UK_REGIONS value
     active: bool = True
+    # Both default ON: the request now carries a verified Discord identity and
+    # the club's own answers, so the normal case is "yes, set it all up". A
+    # reviewer who wants to hold something back unticks it deliberately.
+    appoint_super_admin: bool = True
+    enable_systems: bool = True
 
 
 @router.post("/platform/club-requests/{request_id}/provision")
@@ -4499,6 +4517,62 @@ def provision_club_request(
     db.add(club)
     db.flush()
 
+    # --- Make the requester this club's super-admin -----------------------
+    # This used to be three separate steps with two emails in between: create
+    # the club, wait for the requester to sign in and say so, then find them and
+    # appoint them. The request now carries their Discord id, so the User row
+    # can be created here, already attached to the club that just came into
+    # existence. When they next log in, discord_callback finds an existing user
+    # and drops them straight into their own admin.
+    appointed = None
+    if body.appoint_super_admin and req.discord_id:
+        target = db.exec(select(User).where(User.discord_id == req.discord_id)).first()
+        if target is None:
+            target = User(
+                discord_id=req.discord_id,
+                discord_name=req.discord_name or req.requester_name,
+                player_id=None,
+                club_id=club.id,
+                home_club_id=club.id,
+                is_super_admin=True,
+            )
+            db.add(target)
+        else:
+            # An existing player who is starting a club: give them the grant,
+            # and point their home at it. Their club_id has to match for the
+            # club-scoped admin endpoints to accept them.
+            target.club_id = club.id
+            target.home_club_id = club.id
+            target.is_super_admin = True
+            db.add(target)
+        db.flush()
+        appointed = {"user_id": target.id, "discord_name": target.discord_name}
+        log_audit(db, user, "club.super_admin.grant", "user", target.id,
+                  f"{target.discord_name!r} on club {club.slug!r} (from request {req.id})")
+
+    # --- Turn on the systems they asked for --------------------------------
+    # Previously skipped, because schedules are club-specific and nobody had
+    # asked the club when it meets. The form asks now, so the club arrives with
+    # its systems on and its club night set — a starting point the admin can
+    # correct, rather than an empty console and a phone call.
+    enabled_systems: list[str] = []
+    if body.enable_systems and req.systems:
+        day = req.club_night_day or "Wednesday"
+        for name in req.systems:
+            config = db.exec(
+                select(SystemConfig).where(SystemConfig.legacy_system_name == name)
+            ).first()
+            if config is None:
+                continue
+            db.add(ClubSystem(
+                club_id=club.id,
+                system_id=config.id,
+                enabled=True,
+                session_day=day,
+                session_cadence="weekly",
+            ))
+            enabled_systems.append(name)
+
     req.status = "approved"
     req.reviewed_at = datetime.utcnow()
     req.reviewed_by_user_id = user.id
@@ -4510,7 +4584,12 @@ def provision_club_request(
     db.commit()
     db.refresh(club)
     db.refresh(req)
-    return {"club": club, "request": _club_request_dict(req)}
+    return {
+        "club": club,
+        "request": _club_request_dict(req),
+        "appointed_super_admin": appointed,
+        "enabled_systems": enabled_systems,
+    }
 
 
 @router.get("/platform/clubs-health")

@@ -31,6 +31,7 @@ from services import (
 )
 from auth import (
     router as auth_router, require_user, current_user, active_club_id, public_club_id,
+    requester_identity,
 )
 from signups import (router as signups_router, CANONICAL_VIBES, _get_system_config,
                      signup_cap, normalise_vibe, normalise_vibes)
@@ -462,8 +463,15 @@ def _post_club_request_webhook(req: ClubRequest) -> None:
         return
     content = (
         f"📬 **New club request:** {req.club_name}\n"
-        f"📍 {req.club_location}\n"
+        f"📍 {req.club_location}" + (f" · {req.region}" if req.region else "") + "\n"
         f"👤 {req.requester_name} — {req.requester_email}"
+        + (f"\n🎮 Discord: {req.discord_name}" if req.discord_name else "")
+        + (f"\n🧑‍⚖️ Role: {req.requester_role}" if req.requester_role else "")
+        + (f"\n⚔️ {', '.join(req.systems)}" if req.systems else "")
+        + (f"\n🗓️ {req.club_night_day}" + (f" {req.club_night_time}" if req.club_night_time else "")
+           if req.club_night_day else "")
+        + (f"\n👥 ~{req.player_count} players" if req.player_count else "")
+        + (f"\n🔗 {req.evidence_url}" if req.evidence_url else "")
         + (f"\n💬 {req.notes}" if req.notes else "")
         + "\nReview it in Platform Admin."
     )
@@ -479,17 +487,61 @@ class ClubRequestBody(BaseModel):
     club_name: str
     club_location: str
     notes: Optional[str] = None
+    # Added 2026-09-06. Each of these used to be an email exchange before a club
+    # could be provisioned; asking on the form makes approving one click.
+    region: Optional[str] = None
+    preferred_slug: Optional[str] = None
+    systems: Optional[list[str]] = None
+    club_night_day: Optional[str] = None
+    club_night_time: Optional[str] = None
+    player_count: Optional[int] = None
+    requester_role: Optional[str] = None
+    evidence_url: Optional[str] = None
+
+
+@app.get("/club-requests/identity")
+def club_request_identity(identity: Optional[dict] = Depends(requester_identity)):
+    """Who the club-request form is talking to, if anyone.
+
+    Its own endpoint rather than /auth/me because the form must also recognise a
+    HALF-finished sign-in: a new organiser has a verified Discord identity but
+    no User row, and /auth/me only knows about real sessions. Returns just the
+    handle — enough for the form to say "requesting as X" and to decide whether
+    to show the sign-in button instead.
+    """
+    if identity is None:
+        return {"signed_in": False, "discord_name": None}
+    return {"signed_in": True, "discord_name": identity["discord_name"]}
 
 
 @app.post("/club-requests", status_code=201)
-def create_club_request(body: ClubRequestBody, session: Session = Depends(get_session)):
-    """Public "please add my club" submission from the logged-out hero page.
-    No auth required — the whole point is a visitor who doesn't have an
-    account yet. Doesn't create a Club row itself; a platform admin
-    reviews it (GET/approve/deny under /admin/platform/club-requests) and
-    still creates the real club by hand via the existing club-creation
-    flow, since there's a manual "getting started pack" email step in
-    between."""
+def create_club_request(
+    body: ClubRequestBody,
+    identity: Optional[dict] = Depends(requester_identity),
+    session: Session = Depends(get_session),
+):
+    """"Please add my club" — now requires a Discord sign-in.
+
+    It used to accept anything from anyone: any club name, any location, and an
+    email nobody ever checked. Nothing stopped someone claiming a club they had
+    no connection to, or squatting its subdomain, and there was no way after the
+    fact to tell who had asked.
+
+    A sign-in does NOT prove someone runs the club — that is what `evidence_url`
+    and a human reading the request are for. What it does give is a real Discord
+    account behind every request, and the identity provisioning needs to make
+    that person the club's super-admin without a round of emails.
+
+    Accepts a half-finished sign-in as well as a full session (see
+    auth.requester_identity): a new organiser cannot hold an account yet,
+    because the club their account would belong to is the one being requested.
+    """
+    if identity is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in with Discord before requesting a club.",
+        )
+
     name = body.requester_name.strip()
     email = body.requester_email.strip()
     club_name = body.club_name.strip()
@@ -502,12 +554,43 @@ def create_club_request(body: ClubRequestBody, session: Session = Depends(get_se
     if "@" not in email or " " in email:
         raise HTTPException(status_code=422, detail="requester_email doesn't look like a valid email address.")
 
+    region = (body.region or "").strip() or None
+    if region is not None and region not in UK_REGIONS:
+        raise HTTPException(status_code=422, detail="region must be one of the known UK regions.")
+
+    systems = [s.strip() for s in (body.systems or []) if s and s.strip()]
+
+    # One pending request per Discord account. Someone clicking submit twice, or
+    # having second thoughts about the wording, shouldn't leave two rows for a
+    # reviewer to reconcile.
+    duplicate = session.exec(
+        select(ClubRequest)
+        .where(ClubRequest.discord_id == identity["discord_id"])
+        .where(ClubRequest.status == "pending")
+    ).first()
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="You already have a club request waiting to be reviewed. We'll be in touch shortly.",
+        )
+
     req = ClubRequest(
         requester_name=name,
         requester_email=email,
         club_name=club_name,
         club_location=location,
         notes=(body.notes or "").strip() or None,
+        discord_id=identity["discord_id"],
+        discord_name=identity["discord_name"],
+        requester_user_id=identity["user_id"],
+        region=region,
+        preferred_slug=(body.preferred_slug or "").strip().lower() or None,
+        systems=systems or None,
+        club_night_day=(body.club_night_day or "").strip() or None,
+        club_night_time=(body.club_night_time or "").strip() or None,
+        player_count=body.player_count,
+        requester_role=(body.requester_role or "").strip() or None,
+        evidence_url=(body.evidence_url or "").strip() or None,
     )
     session.add(req)
     session.commit()

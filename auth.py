@@ -64,6 +64,11 @@ DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+
+# The one frontend route a signed-in-but-account-less person is allowed to
+# reach directly. Kept as a constant because two places have to agree on it:
+# the callback below, and the frontend route that reads the pending cookie.
+CLUB_REQUEST_PATH = "/request-club"
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 DISCORD_API = "https://discord.com/api"
@@ -156,6 +161,45 @@ def _safe_return_to(request: Request) -> str:
     if not _ALLOWED_RETURN_HOST_RE.match(parsed.hostname):
         return FRONTEND_URL
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def requester_identity(
+    session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
+    cta_pending_signup: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_session),
+) -> Optional[dict]:
+    """The Discord identity behind a request, from EITHER a real session or a
+    half-finished sign-in. None if neither is present.
+
+    Two sources because of a bootstrap problem: a club organiser signing up to
+    ask for their own club cannot have a User row, since users.club_id is NOT
+    NULL and the club they are asking for is the one that does not exist yet.
+    Their sign-in legitimately stops at the signed, short-lived
+    cta_pending_signup cookie — the same one /join reads — and that is a real,
+    verified Discord identity even though no account exists behind it.
+
+    Returns {discord_id, discord_name, user_id|None}. Callers that need an
+    actual account should keep using require_user instead.
+    """
+    if session_cookie:
+        user_id = _verify_session_cookie(session_cookie)
+        if user_id is not None:
+            user = db.get(User, user_id)
+            if user is not None:
+                return {
+                    "discord_id": user.discord_id,
+                    "discord_name": user.discord_name,
+                    "user_id": user.id,
+                }
+
+    pending = _verify_pending_signup_cookie(cta_pending_signup)
+    if pending is not None:
+        return {
+            "discord_id": pending["discord_id"],
+            "discord_name": pending["discord_name"],
+            "user_id": None,
+        }
+    return None
 
 
 def current_user(
@@ -346,10 +390,19 @@ async def discord_callback(
         # there — which is exactly what happened to the Age of Sigmar players
         # on 09/09/2026. Built from `origin`, never from origin+next, or the
         # path lands on the end of a query string.
-        join_url = f"{origin}/join"
-        if next_path:
-            join_url += f"?next={quote(next_path, safe='')}"
-        response = RedirectResponse(join_url)
+        # The club-request page is the one destination a brand-new identity can
+        # use WITHOUT an account, so it skips the club picker entirely. That is
+        # the whole point: the organiser asking for a club cannot pick one,
+        # because users.club_id is NOT NULL and their club is what's missing.
+        # The pending-signup cookie set below is enough for that page, and
+        # provisioning turns it into a real User later.
+        if next_path.startswith(CLUB_REQUEST_PATH):
+            response = RedirectResponse(origin + next_path)
+        else:
+            join_url = f"{origin}/join"
+            if next_path:
+                join_url += f"?next={quote(next_path, safe='')}"
+            response = RedirectResponse(join_url)
         response.set_cookie(
             "cta_pending_signup",
             _make_pending_signup_cookie(discord_id, discord_name, avatar_url),

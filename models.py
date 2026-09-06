@@ -1141,6 +1141,36 @@ class ClubRequest(SQLModel, table=True):
     # approved/denied/pending but no club created yet. Prevents double-provision.
     provisioned_club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)
 
+    # --- Who is asking (2026-09-06) -------------------------------------
+    # The form used to be fully anonymous: any name, any club, an email nobody
+    # checked. Requesting now requires a Discord sign-in, so a request carries a
+    # real account you can look up. Nullable because rows predating this exist.
+    #
+    # discord_id is the identity, NOT requester_user_id: a brand-new organiser
+    # has no User row yet and cannot get one, because users.club_id is NOT NULL
+    # and their club is the thing that doesn't exist. The sign-in stops at the
+    # signed cta_pending_signup cookie and this column carries it forward, so
+    # provisioning can mint the User and the club together.
+    discord_id: Optional[str] = Field(default=None, index=True)
+    discord_name: Optional[str] = None
+    requester_user_id: Optional[int] = Field(default=None, index=True)
+
+    # --- What provisioning needs (2026-09-06) ---------------------------
+    # Each of these used to be an email exchange before a club could be set up.
+    # Captured at request time instead, so approving is one click and the club
+    # arrives with its systems and club night already configured.
+    region: Optional[str] = None
+    preferred_slug: Optional[str] = None
+    systems: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    club_night_day: Optional[str] = None
+    club_night_time: Optional[str] = None
+    player_count: Optional[int] = None
+    requester_role: Optional[str] = None
+    # Somewhere the club is publicly visible and the requester can be seen to
+    # run it. Discord login proves a person, not that they run this club, so
+    # this is what a human actually reviews before provisioning.
+    evidence_url: Optional[str] = None
+
 
 class CallOut(SQLModel, table=True):
     """An ad-hoc "call to arms": a player who can't make regular club night
