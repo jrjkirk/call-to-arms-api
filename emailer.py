@@ -64,6 +64,7 @@ def send_email(
     subject: str,
     html: str,
     cc: list[str] | None = None,
+    text: str | None = None,
 ) -> str:
     """Send an email via Resend. Returns the Resend message id.
 
@@ -78,6 +79,11 @@ def send_email(
         "subject": subject,
         "html": html,
     }
+    # A plain-text alternative alongside the HTML. Worth sending: spam filters
+    # mark down HTML-only mail, and a text part is what a screen reader or a
+    # plain-text client actually reads instead of falling back to tag soup.
+    if text:
+        payload["text"] = text
     if cc:
         payload["cc"] = cc
 

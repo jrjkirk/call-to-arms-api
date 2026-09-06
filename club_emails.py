@@ -74,12 +74,14 @@ EMAIL_KINDS: dict[str, dict] = {
             "systems", "club_night", "systems_line", "admin_line",
         ],
         "subject": "{club_name} is live on Call to Arms",
+        # The one email with somewhere to go, so it gets a button. The URL comes
+        # from the context rather than the body, which means an edited template
+        # cannot accidentally remove the way in.
+        "cta": {"url": "{club_url}", "label": "Open your club"},
         "body": (
             "Hi {requester_name},\n"
             "\n"
-            "{club_name} is live on Call to Arms.\n"
-            "\n"
-            "{club_url}\n"
+            "{club_name} is live on Call to Arms — it's ready for your players.\n"
             "\n"
             "{systems_line}\n"
             "\n"
@@ -163,18 +165,96 @@ _URL_RE = re.compile(r"https?://[^\s<]+")
 
 
 def _linkify(escaped: str) -> str:
-    return _URL_RE.sub(lambda m: f'<a href="{m.group(0)}">{m.group(0)}</a>', escaped)
+    return _URL_RE.sub(
+        lambda m: f'<a href="{m.group(0)}" style="color:{_ACCENT}">{m.group(0)}</a>',
+        escaped,
+    )
 
 
-_SHELL = (
-    '<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111;'
-    'line-height:1.5;max-width:520px">'
-    "{body}"
-    '<p style="color:#666;font-size:13px;margin-top:1.5rem">'
-    "Call to Arms — club night, organised."
-    "</p>"
-    "</div>"
+# ---------------------------------------------------------------------------
+# The wrapper
+# ---------------------------------------------------------------------------
+# Tables and inline styles, not divs and a stylesheet. That is not nostalgia:
+# Outlook renders with Word's engine, Gmail strips most of a <style> block, and
+# neither has ever supported flexbox or grid. Everything below is the shape that
+# survives — a centred table, explicit bgcolor attributes alongside the CSS, and
+# every rule written on the element it applies to.
+
+LOGO_URL_KEY = "club_email_logo_url"
+DEFAULT_LOGO_URL = "https://www.calltoarms.app/email-logo.png"
+
+# The app's own palette, so an email looks like the thing it is about.
+_PAGE = "#0a0b0e"        # outside the card
+_CARD = "#12141c"        # the card itself
+_HEADER = "#101219"      # the band the logo sits on
+_BORDER = "#332c1c"      # a gold-tinted hairline, not a grey one
+_TEXT = "#e9e0cd"
+_MUTED = "#9b937f"
+_ACCENT = "#c9a14a"
+
+_FONT = (
+    "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 )
+
+_SHELL = """\
+<!--[if mso]><style>body,table,td{{font-family:Arial,Helvetica,sans-serif!important}}</style><![endif]-->
+<div style="display:none;max-height:0;overflow:hidden;opacity:0">{preheader}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{page}" \
+style="background:{page};margin:0;padding:0;width:100%">
+  <tr><td align="center" style="padding:28px 12px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" \
+style="width:100%;max-width:600px;border-collapse:separate;border:1px solid {border};border-radius:10px;overflow:hidden">
+      <tr><td align="center" bgcolor="{header}" style="background:{header};padding:26px 24px 20px">
+        <img src="{logo_url}" width="240" alt="Call to Arms" \
+style="display:block;width:240px;max-width:70%;height:auto;border:0;outline:none;text-decoration:none" />
+      </td></tr>
+      <tr><td bgcolor="{card}" style="background:{card};padding:26px 28px 8px;font-family:{font};\
+font-size:15px;line-height:1.6;color:{text}">
+        {body}
+      </td></tr>
+      {cta}
+      <tr><td bgcolor="{card}" style="background:{card};padding:18px 28px 26px;border-top:1px solid {border};\
+font-family:{font};font-size:12px;line-height:1.5;color:{muted}">
+        Call to Arms — club night, organised.<br />
+        <a href="https://www.calltoarms.app" style="color:{muted};text-decoration:underline">calltoarms.app</a>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>"""
+
+# A padded link inside its own table cell. Bulletproof enough without dropping
+# to VML: the cell carries the colour, so a client that ignores the anchor's
+# styling still shows a gold block with readable text on it.
+_CTA = """\
+<tr><td bgcolor="{card}" style="background:{card};padding:8px 28px 26px">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+    <tr><td align="center" bgcolor="{accent}" style="background:{accent};border-radius:6px">
+      <a href="{url}" style="display:inline-block;padding:12px 26px;font-family:{font};font-size:15px;\
+font-weight:bold;color:#1b1206;text-decoration:none">{label}</a>
+    </td></tr>
+  </table>
+</td></tr>"""
+
+
+def logo_url(db: Session) -> str:
+    row = db.get(AppSetting, LOGO_URL_KEY)
+    return (row.value if row and row.value else DEFAULT_LOGO_URL)
+
+
+def _wrap(body_html: str, *, logo: str, preheader: str = "",
+          cta_url: Optional[str] = None, cta_label: Optional[str] = None) -> str:
+    cta = ""
+    if cta_url and cta_label:
+        cta = _CTA.format(card=_CARD, accent=_ACCENT, font=_FONT,
+                          url=esc(cta_url), label=esc(cta_label))
+    return _SHELL.format(
+        page=_PAGE, card=_CARD, header=_HEADER, border=_BORDER, text=_TEXT,
+        muted=_MUTED, accent=_ACCENT, font=_FONT, logo_url=esc(logo),
+        # The line an inbox shows next to the subject. Left empty it shows the
+        # first thing in the HTML, which for a branded email is usually nothing
+        # useful at all.
+        preheader=esc(preheader), body=body_html, cta=cta,
+    )
 
 
 def render_body(body_text: str, context: dict) -> str:
@@ -191,17 +271,59 @@ def render_body(body_text: str, context: dict) -> str:
     """
     filled = fill(body_text, context)
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", filled)]
+    # Styles are inline on every paragraph because a <style> block is stripped
+    # or ignored by most of the clients these land in.
+    style = f"margin:0 0 16px;font-family:{_FONT};font-size:15px;line-height:1.6;color:{_TEXT}"
     return "".join(
-        f"<p>{_linkify(esc(p)).replace(chr(10), '<br>')}</p>" for p in paragraphs if p
+        f'<p style="{style}">{_linkify(esc(p)).replace(chr(10), "<br />")}</p>'
+        for p in paragraphs if p
     )
 
 
-def render(db: Session, kind: str, context: dict) -> tuple[str, str]:
-    """(subject, html) for one email, using whatever template is in force."""
+def render_text(body_text: str, context: dict) -> str:
+    """The plain-text alternative — the filled template, unchanged.
+
+    Which is the quiet advantage of writing templates as text in the first
+    place: the text part is not a lossy conversion of the HTML, it IS the
+    source, and the HTML is the derived thing.
+    """
+    filled = fill(body_text, context)
+    return "\n\n".join(p.strip() for p in re.split(r"\n\s*\n", filled) if p.strip())
+
+
+def preview_html(db: Session, kind: str, subject: str, body_text: str, context: dict) -> str:
+    """The full email for an UNSAVED draft — shell, logo, button and all.
+
+    Separate from render() because that reads the stored template, and the whole
+    point of a preview is to see the version that isn't stored yet.
+    """
+    spec = EMAIL_KINDS[kind]
+    cta = spec.get("cta")
+    return _wrap(
+        render_body(body_text, context),
+        logo=logo_url(db),
+        preheader=render_text(body_text, context).split("\n")[0][:120],
+        cta_url=fill(cta["url"], context) if cta else None,
+        cta_label=cta["label"] if cta else None,
+    )
+
+
+def render(db: Session, kind: str, context: dict) -> tuple[str, str, str]:
+    """(subject, html, text) for one email, using whatever template is in force."""
     tpl = get_template(db, kind)
-    return _subject_safe(fill(tpl["subject"], context)), _SHELL.format(
-        body=render_body(tpl["body"], context)
+    spec = EMAIL_KINDS[kind]
+    subject = _subject_safe(fill(tpl["subject"], context))
+    cta = spec.get("cta")
+    html = _wrap(
+        render_body(tpl["body"], context),
+        logo=logo_url(db),
+        # The first line of the message, which is what an inbox shows beside the
+        # subject if we don't say otherwise.
+        preheader=render_text(tpl["body"], context).split("\n")[0][:120],
+        cta_url=fill(cta["url"], context) if cta else None,
+        cta_label=cta["label"] if cta else None,
     )
+    return subject, html, render_text(tpl["body"], context)
 
 
 def _subject_safe(value: str, limit: int = 120) -> str:
@@ -219,14 +341,14 @@ def _subject_safe(value: str, limit: int = 120) -> str:
 # Sending
 # ---------------------------------------------------------------------------
 
-def _send(to: str, subject: str, html: str) -> str:
+def _send(to: str, subject: str, html: str, text: Optional[str] = None) -> str:
     """Send, and say what happened instead of raising.
 
     Returns "sent", "bad_address", "not_configured:…" or "failed:…". Callers log
     or surface it; none of them should care enough to fail.
     """
     try:
-        send_email(to=to, subject=subject, html=html)
+        send_email(to=to, subject=subject, html=html, text=text)
         return "sent"
     except UndeliverableRecipient:
         return "bad_address"
@@ -237,8 +359,8 @@ def _send(to: str, subject: str, html: str) -> str:
 
 
 def send_kind(db: Session, kind: str, to: str, context: dict) -> str:
-    subject, html = render(db, kind, context)
-    return _send(to, subject, html)
+    subject, html, text = render(db, kind, context)
+    return _send(to, subject, html, text)
 
 
 def send_request_received(db: Session, *, to: str, requester_name: str, club_name: str) -> str:

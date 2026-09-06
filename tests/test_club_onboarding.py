@@ -59,8 +59,8 @@ with Session(database.engine) as db:
 SENT_EMAILS = []
 
 
-def _fake_send(to, subject, html, cc=None):
-    SENT_EMAILS.append({"to": to, "subject": subject, "html": html})
+def _fake_send(to, subject, html, cc=None, text=None):
+    SENT_EMAILS.append({"to": to, "subject": subject, "html": html, "text": text})
     return "fake-message-id"
 
 
@@ -283,6 +283,9 @@ check("the edited copy is what actually goes out",
 check("and the edited body too",
       SENT_EMAILS and "We got it — Edited Club." in SENT_EMAILS[0]["html"],
       SENT_EMAILS[0]["html"][:160] if SENT_EMAILS else "")
+check("a plain-text alternative goes with every send",
+      SENT_EMAILS and "We got it — Edited Club." in (SENT_EMAILS[0]["text"] or ""),
+      str(SENT_EMAILS[0]["text"])[:100] if SENT_EMAILS else "")
 
 print("\n13. Clearing a template restores the built-in wording")
 client.cookies.delete("cta_pending_signup")
@@ -314,6 +317,26 @@ r = client.post("/admin/platform/club-emails/preview", json={
 html = r.json().get("html", "")
 check("script and tags are inert", "<script" not in html and "<b>" not in html, html[:120])
 check("the text itself survives", "alert(1)" in html)
+
+print("\n15b. The branded wrapper is actually wrapped around it")
+r = client.post("/admin/platform/club-emails/preview",
+                json={"kind": "club_live", "subject": "x", "body": "Hi {requester_name}"})
+pv = r.json()
+html = pv["html"]
+check("the logo is in there", "email-logo.png" in html, html[:100])
+check("laid out with tables, which is what email clients render",
+      html.count("<table") >= 3, str(html.count("<table")))
+check("styles are inline, not in a stripped <style> block",
+      "style=" in html and html.count("<style") <= 1)
+check("the club link is a button, not just a bare URL",
+      "Open your club" in html and "https://badmoon.calltoarms.app" in html)
+check("a plain-text alternative comes back too",
+      pv.get("text", "").startswith("Hi Nick"), str(pv.get("text"))[:60])
+# The wrapper must not become a way round the escaping.
+r = client.post("/admin/platform/club-emails/preview",
+                json={"kind": "club_live", "subject": "x", "body": "<script>alert(1)</script>"})
+check("an editor still cannot inject through the wrapper",
+      "<script>alert(1)" not in r.json()["html"])
 
 print("\n16. Unknown kinds are refused everywhere")
 for path in ["/admin/platform/club-emails", "/admin/platform/club-emails/preview"]:
