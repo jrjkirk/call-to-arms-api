@@ -1,6 +1,7 @@
 """Pairing generation engine — faithful port of the original Streamlit matcher.
 
-_pair_dist returns (last_opp_pen, block_pen, weighted_score). last_opp_pen and
+_pair_dist returns (format_pen, last_opp_pen, block_pen, weighted_score).
+format_pen bars a pairing across an exclusive vibe. last_opp_pen and
 block_pen remain hard, unconfigurable top-priority filters (admin blocks /
 "don't repeat last week's opponent" are safety rules, not taste). The soft
 factors (mirror faction, rematch history, vibe, experience, eta, scenario,
@@ -25,7 +26,8 @@ from sqlmodel import select
 
 from database import scoped
 from models import Pairing, PairingBlock, PairingConfig, Signup, SystemConfig
-from signups import _get_system_config
+import vibes
+from signups import _effective_vibe_specs, _get_system_config
 
 
 def _get_pairing_config(session: Session, club_id: int, system_id: int) -> PairingConfig:
@@ -300,7 +302,15 @@ def _pair_dist(
     last_opp_pairs: set,
     config: SystemConfig,
     pconfig: PairingConfig,
+    vibe_specs: list = (),
 ) -> tuple:
+    # An exclusive vibe (a club-defined one like "Battle March") is a different
+    # game, not a preference: a 1000pt list cannot play a 2000pt one. It ranks
+    # ABOVE blocks and last-opponent because pairing across formats produces a
+    # game nobody can actually play, where the others produce one that is merely
+    # unwanted. Zero for every club that has not defined an exclusive vibe, so
+    # this tuple sorts exactly as it did before for everyone else.
+    format_pen = 1 if vibes.incompatible(ms.row.vibe, other.row.vibe, vibe_specs) else 0
     a_pid = ms.row.player_id
     b_pid = other.row.player_id
     last_opp_pen = (
@@ -344,7 +354,7 @@ def _pair_dist(
         + (pconfig.weight_points * dp if config.uses_points else 0)
     )
 
-    return (last_opp_pen, block_pen, score)
+    return (format_pen, last_opp_pen, block_pen, score)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +383,9 @@ def generate(
     if config is None:
         raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
     pconfig: PairingConfig = _get_pairing_config(session, club_id, config.id)
+    # How this club's vibes behave. Empty for a club that has only ever used the
+    # canonical five, in which case nothing below changes.
+    vibe_specs = _effective_vibe_specs(session, club_id, config)
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -515,7 +528,8 @@ def generate(
                 continue
             if has_played(ms, other):
                 continue
-            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config, pconfig)
+            d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks,
+                           last_opp_pairs, config, pconfig, vibe_specs)
             if best_dist is None or d < best_dist:
                 best_dist = d
                 best_j = j
@@ -530,7 +544,8 @@ def generate(
                 other = candidates[j]
                 if other.key in used:
                     continue
-                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks, last_opp_pairs, config, pconfig)
+                d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks,
+                           last_opp_pairs, config, pconfig, vibe_specs)
                 if best_dist is None or d < best_dist:
                     best_dist = d
                     best_j = j

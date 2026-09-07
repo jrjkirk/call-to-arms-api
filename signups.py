@@ -20,6 +20,7 @@ from sqlmodel import Session, SQLModel, select
 
 from database import active_player_id_for, posting_enabled, get_session, sibling_player_ids, name_with_mention, resolve_webhook_url, scoped, system_setting_slug, get_setting
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
+import vibes
 import discord_guild
 from experience import summary as experience_summary
 from levels import progress as level_progress
@@ -145,17 +146,41 @@ def _effective_vibe_config(db: Session, club_id: int, config: SystemConfig) -> t
             ClubSystem.system_id == config.id,
         )
     ).first()
-    if cs is not None and cs.vibe_options:
-        options, default = cs.vibe_options, (cs.default_vibe or (cs.vibe_options[0] if cs.vibe_options else None))
-    else:
-        options, default = config.vibe_options, config.default_vibe
-    # Only canonical vibes — drops any stale/removed value (e.g. the retired
-    # "Escalation") that may still linger in catalogue data.
-    options = [v for v in normalise_vibes(options) if v in CANONICAL_VIBES]
-    default = normalise_vibe(default)
+    specs = _effective_vibe_specs_from(cs, config)
+    options = vibes.names(specs)
+    default = normalise_vibe(cs.default_vibe if (cs is not None and cs.vibe_options) else config.default_vibe)
     if default not in options:
         default = options[0] if options else None
     return options, default
+
+
+def _effective_vibe_specs_from(cs, config: SystemConfig) -> list:
+    """The vibe list with each one's behaviour, club override winning.
+
+    The club's own list is taken as given. The platform catalogue's is still
+    filtered to CANONICAL_VIBES, because that is where stale values linger (the
+    retired "Escalation") and nobody edits it per club.
+
+    That difference is the point of the whole feature: a club may now name a
+    vibe the catalogue has never heard of, such as The Old World's "Battle
+    March", and say how it should behave.
+    """
+    if cs is not None and cs.vibe_options:
+        return vibes.parse(cs.vibe_options)
+    catalogue = [v for v in normalise_vibes(config.vibe_options) if v in CANONICAL_VIBES]
+    return vibes.parse(catalogue)
+
+
+def _effective_vibe_specs(db: Session, club_id: int, config: SystemConfig) -> list:
+    """Same, looked up by club. Used by the matcher, which needs the behaviours
+    rather than just the names."""
+    cs = db.exec(
+        select(ClubSystem).where(
+            ClubSystem.club_id == club_id,
+            ClubSystem.system_id == config.id,
+        )
+    ).first()
+    return _effective_vibe_specs_from(cs, config)
 
 
 def _require_system_enabled(db: Session, club_id: int, system: str) -> None:

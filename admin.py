@@ -66,6 +66,7 @@ from signups import (
     signup_cap,
 )
 import club_emails
+import vibes
 from github_dispatch import PAIRINGS_IMAGE_WORKFLOW, dispatch_workflow
 from week_logic import _DAY_NAME_TO_INT, next_session_date
 
@@ -3023,17 +3024,40 @@ def update_club_system_schedule(
     # canonical palette and stores as this club's override.
     vibe_fields: dict = {}
     if body.vibe_options is not None:
-        body.vibe_options = normalise_vibes(body.vibe_options)
-        invalid = [v for v in body.vibe_options if v not in CANONICAL_VIBES]
-        if invalid:
+        # Names are no longer checked against CANONICAL_VIBES. That list was the
+        # point of the restriction and is now the point of the feature: a club
+        # names its own vibes, such as The Old World's "Battle March". What IS
+        # checked is the behaviour, because the matcher branches on it.
+        # Checked against the RAW input, not the parsed specs: vibes.parse falls
+        # back to soft for anything it doesn't recognise, which is right when
+        # reading stored config written by another version, and wrong here,
+        # where a typo should be rejected rather than silently downgraded.
+        bad = [
+            item.get("name")
+            for item in body.vibe_options
+            if isinstance(item, dict)
+            and str(item.get("behaviour", "") or "").strip().lower() not in vibes.BEHAVIOURS
+        ]
+        if bad:
             raise HTTPException(
                 status_code=422,
-                detail=f"Invalid vibe(s): {invalid}. Must be from {CANONICAL_VIBES}.",
+                detail=(
+                    f"Invalid vibe behaviour on: {bad}. "
+                    f"Must be one of {list(vibes.BEHAVIOURS)}."
+                ),
             )
-        vibe_options = body.vibe_options or None
+        specs = vibes.parse(body.vibe_options)
+        long = [v.name for v in specs if len(v.name) > 40]
+        if long:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Vibe names must be 40 characters or fewer: {long}.",
+            )
+        names = vibes.names(specs)
+        vibe_options = vibes.to_storage(specs) or None
         default_vibe = None
-        if vibe_options:
-            default_vibe = body.default_vibe if body.default_vibe in vibe_options else vibe_options[0]
+        if names:
+            default_vibe = body.default_vibe if body.default_vibe in names else names[0]
         vibe_fields = {"vibe_options": vibe_options, "default_vibe": default_vibe}
 
     existing = db.exec(
