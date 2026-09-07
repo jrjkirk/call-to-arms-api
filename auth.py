@@ -592,7 +592,7 @@ def _reject_if_already_linked(db: Session, user: User, club_id: int) -> None:
             status_code=400,
             detail=(
                 f"Your profile ({existing.name}) is archived, so it's hidden for now. "
-                f"Ask a club admin to put you back on the roster — your games, level and "
+                f"Ask a club admin to put you back on the roster. Your games, level and "
                 f"league record are all still there."
             ),
         )

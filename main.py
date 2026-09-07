@@ -465,7 +465,7 @@ def _post_club_request_webhook(req: ClubRequest) -> None:
     content = (
         f"📬 **New club request:** {req.club_name}\n"
         f"📍 {req.club_location}" + (f" · {req.region}" if req.region else "") + "\n"
-        f"👤 {req.requester_name} — {req.requester_email}"
+        f"👤 {req.requester_name} · {req.requester_email}"
         + (f"\n🎮 Discord: {req.discord_name}" if req.discord_name else "")
         + (f"\n🧑‍⚖️ Role: {req.requester_role}" if req.requester_role else "")
         + (f"\n⚔️ {', '.join(req.systems)}" if req.systems else "")

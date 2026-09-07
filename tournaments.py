@@ -978,7 +978,7 @@ def start_checkout(
         session = stripe_client.create_checkout_session(
             account_id=club.stripe_account_id,
             amount_pence=t.ticket_price_pence,
-            product_name=f"{t.name} — entry",
+            product_name=f"{t.name} entry",
             success_url=f"{base}/tournaments/{t.id}?paid=1",
             cancel_url=f"{base}/tournaments/{t.id}",
             entry_id=e.id,

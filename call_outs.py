@@ -305,7 +305,7 @@ def cancel_call_out(
     # been meaning to take it up found out by turning up to the app.
     try:
         header = (
-            f"🚫 **Call Out withdrawn** — "
+            f"🚫 **Call Out withdrawn** · "
             f"{name_with_mention(db, c.creator_name, c.creator_player_id)} "
             f"is no longer looking for this game"
         )

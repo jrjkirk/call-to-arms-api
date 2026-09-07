@@ -402,7 +402,7 @@ def create_booking(
         if not email:
             raise HTTPException(
                 status_code=422,
-                detail="Please give an email address — it's where your confirmation goes.",
+                detail="Please give an email address. It's where your confirmation goes.",
             )
         if not _EMAIL_RE.match(email):
             raise HTTPException(status_code=422, detail="That email address doesn't look right.")
@@ -767,7 +767,7 @@ def save_venue_config(
     if cfg.enabled and all(r["closed"] for r in V.opening_hours(db, club_id)):
         raise HTTPException(
             status_code=409,
-            detail="Set your open hours before opening bookings — every day is "
+            detail="Set your open hours before opening bookings. Every day is "
                    "currently marked closed, so no slot could ever be offered.",
         )
     if cfg.enabled and not V.active_tables(db, club_id):
@@ -908,8 +908,8 @@ def delete_table(
     if used is not None:
         raise HTTPException(
             status_code=409,
-            detail=f"{t.name} has bookings against it. Turn it off instead of deleting it — "
-                   f"that stops new bookings and keeps the old ones readable.",
+            detail=f"{t.name} has bookings against it. Turn it off instead of deleting it. "
+                   f"That stops new bookings and keeps the old ones readable.",
         )
     db.delete(t)
     db.commit()
@@ -1652,7 +1652,7 @@ def test_venue_webhook(
             raise HTTPException(
                 status_code=502,
                 detail=f"Discord rejected that webhook ({resp.status_code}). "
-                       f"It may have been deleted — paste a fresh one.",
+                       f"It may have been deleted. Paste a fresh one.",
             )
     except HTTPException:
         raise
@@ -2121,7 +2121,7 @@ def save_layout(
             raise HTTPException(
                 status_code=409,
                 detail=f"{t.name} has bookings against it. Turn it off instead of deleting "
-                       f"it — that stops new bookings and keeps the old ones readable.",
+                       f"it. That stops new bookings and keeps the old ones readable.",
             )
         for row in db.exec(
             select(VenueNightTable).where(VenueNightTable.table_id == tid)

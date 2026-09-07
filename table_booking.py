@@ -68,7 +68,7 @@ def render_table_booking_email(
     venue_label = cfg.venue_name or "there"
     # The subject is NOT escaped: it is a plain-text header, and escaping it
     # would put &amp; in front of the venue rather than an ampersand.
-    subject = cfg.subject_template or f"{system} — {week}: {tables} table{'s' if tables != 1 else ''} needed"
+    subject = cfg.subject_template or f"{system} · {week}: {tables} table{'s' if tables != 1 else ''} needed"
 
     # Written as plain text and handed to email_layout, which escapes the lot
     # before adding markup. `player_names` in particular is whatever players

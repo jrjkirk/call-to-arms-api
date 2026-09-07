@@ -807,7 +807,7 @@ def _table_advice(
     if busiest <= expected - 2:
         return (f"Set aside {expected}, but the busiest recent session only used "
                 f"{busiest}. You could free up {expected - busiest}.")
-    return f"{expected} looks right — recent sessions peaked at {busiest}."
+    return f"{expected} looks right. Recent sessions peaked at {busiest}."
 
 
 def range_overview(db: Session, club_id: int, first: date, last: date) -> list[dict]:
@@ -1094,7 +1094,7 @@ def _staff_email_html(club: Club, d: dict, status: str) -> str:
     # attacker-controlled text going into HTML aimed at venue staff.
     return email_style.wrap(
         email_style.paragraphs(lead) + email_style.rows_table(rows),
-        preheader=f"{d['date']}, {d['time']} — {d['name']}",
+        preheader=f"{d['date']}, {d['time']} · {d['name']}",
         footer=club.name,
     )
 
@@ -1154,7 +1154,7 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
                 verb = {"requested": "requested", "cancelled": "cancelled"}.get(status, "booked")
                 send_email(
                     to=recipients,
-                    subject=f"Table {verb}: {d['date']} {d['time']} — {d['name']}",
+                    subject=f"Table {verb}: {d['date']} {d['time']} · {d['name']}",
                     html=_staff_email_html(club, d, status),
                     text=_staff_email_text(club, d, status),
                     from_addr=sender("venue"),

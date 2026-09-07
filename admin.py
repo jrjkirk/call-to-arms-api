@@ -402,8 +402,8 @@ def delete_player(
             status_code=409,
             detail=(
                 f"{player.name} has {len(signups)} signup(s) and {len(results)} league "
-                f"result(s). Deleting would orphan them. Archive the player instead — "
-                f"that hides them everywhere but keeps their history intact."
+                f"result(s). Deleting would orphan them. Archive the player instead. "
+                f"That hides them everywhere but keeps their history intact."
             ),
         )
 
@@ -1767,7 +1767,7 @@ def admin_signup_create(
     if existing:
         raise HTTPException(
             status_code=409,
-            detail="This player is already signed up for this week — edit their existing row instead.",
+            detail="This player is already signed up for this week. Edit their existing row instead.",
         )
 
     uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
@@ -5481,7 +5481,7 @@ def set_club_system_discord_gate(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "The bot can't see that Discord server yet — it needs to be added "
+                    "The bot can't see that Discord server yet. It needs to be added "
                     "by someone with Manage Server. Send them the invite link, then try again."
                 ),
             )

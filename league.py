@@ -465,7 +465,7 @@ def submit_result(
 ):
     caller_player_id = active_player_id_for(db, user, club_id)
     if caller_player_id is None:
-        raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
+        raise HTTPException(status_code=400, detail="No linked player profile at this club. Claim your profile first.")
 
     if body.player_1_id == body.player_2_id:
         raise HTTPException(status_code=422, detail="Players must be distinct.")

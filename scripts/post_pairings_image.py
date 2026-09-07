@@ -119,7 +119,7 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
         print(f"No pairings found for {system!r} week {week!r}, skipping.")
         return False
 
-    content = f"📋 **{system} — Pairings for {week}**"
+    content = f"📋 **{system} · Pairings for {week}**"
     mention_line = _mention_line(db, rows, signups_by_id)
     if mention_line:
         content = f"{content}\n{mention_line}"

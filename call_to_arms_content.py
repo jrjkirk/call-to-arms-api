@@ -87,15 +87,15 @@ Complete the online form if you are coming this Wednesday {session_date}. The re
 🤖 Your new AI overlords will pair everybody up based on responses and will make a post on Tuesday evening. If you wish to pre-arrange a game, feel free and just let us know so we can anticipate the numbers.
 """,
     "The Horus Heresy": (
-        "⚔️ **The Horus Heresy — Call to Arms** ⚔️\n\n"
+        "⚔️ **The Horus Heresy · Call to Arms** ⚔️\n\n"
         "*\"In the long shadow of the Emperor's wrath, brothers turn against brothers. "
         "The galaxy burns, and the loyal and the lost alike must answer the call to war.\"*\n\n"
         "Friday's gathering approaches.  Sign up here: {signup_url}"
     ),
     "Kill Team": (
-        "🔪 **Kill Team — Call to Arms** 🔪\n\n"
+        "🔪 **Kill Team · Call to Arms** 🔪\n\n"
         "*\"In the cramped corridors and shattered ruins, elite operatives wage their secret wars. "
-        "Quick, deadly, decisive — the perfect skirmish awaits.\"*\n\n"
+        "Quick, deadly, decisive. The perfect skirmish awaits.\"*\n\n"
         "Friday's session is approaching. Sign up here: {signup_url}"
     ),
 }
@@ -107,7 +107,7 @@ Complete the online form if you are coming this Wednesday {session_date}. The re
 # — Discord rejects an empty message. A plain, working call is a far better
 # starting point than a blank page, and it still reads as something to edit.
 GENERIC_TEMPLATE = (
-    "\u2694\ufe0f **{system} \u2014 Call to Arms** \u2694\ufe0f\n\n"
+    "\u2694\ufe0f **{system} \u00b7 Call to Arms** \u2694\ufe0f\n\n"
     "Next session: **{session_date}**\n\n"
     "Sign up here: {signup_url}"
 )

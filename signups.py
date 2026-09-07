@@ -206,7 +206,7 @@ def _require_linked_player(user: User, db: Session, club_id: int) -> Player:
     have a player at another club."""
     pid = active_player_id_for(db, user, club_id)
     if pid is None:
-        raise HTTPException(status_code=400, detail="No linked player profile at this club — claim your profile first.")
+        raise HTTPException(status_code=400, detail="No linked player profile at this club. Claim your profile first.")
     player = db.get(Player, pid)
     if player is None:
         raise HTTPException(status_code=400, detail="Linked player profile not found.")
@@ -217,7 +217,7 @@ def _require_linked_player(user: User, db: Session, club_id: int) -> Player:
         # histories. Name the real state and the real remedy.
         raise HTTPException(
             status_code=400,
-            detail="Your player profile is archived. Ask a club admin to restore it — don't create a new one, or you'll lose your history.",
+            detail="Your player profile is archived. Ask a club admin to restore it. Don't create a new one, or you'll lose your history.",
         )
     return player
 
@@ -403,7 +403,7 @@ def require_discord_member(
         detail={
             "code": "discord_membership_required",
             "message": (
-                f"Join {server_label} to take part — that's where pairings "
+                f"Join {server_label} to take part. That's where pairings "
                 f"and reminders for {system or 'this club'} get posted."
             ),
             "club_name": club.name if club else None,
@@ -593,13 +593,13 @@ def _post_discord_signup(db: Session, player_name: str, faction: Optional[str], 
     if first_ever:
         content = (
             f"🎉 **A NEW CHALLENGER APPROACHES!**\n"
-            f"{who} has joined the muster for their first game of {system} — "
+            f"{who} has joined the muster for their first game of {system}. "
             f"⚔️ {faction_label} • 🎭 {vibe_label}\n"
             f"📊 {phrase}: {count}\n"
             f"👋 Give them a warm welcome!"
         )
     else:
-        content = f"📝 {who} signed up — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}"
+        content = f"📝 {who} signed up · ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}"
 
     _post_webhook(db, club_id, system, content)
 
@@ -610,7 +610,7 @@ def _post_discord_drop(db: Session, player_name: str, faction: Optional[str], vi
     count = _signup_count(db, system, week, club_id)
     phrase = _signup_count_phrase_for_system(system)
     who = name_with_mention(db, player_name, player_id)
-    _post_webhook(db, club_id, system, f"❌ {who} dropped — ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
+    _post_webhook(db, club_id, system, f"❌ {who} dropped · ⚔️ {faction_label} • 🎭 {vibe_label}\n📊 {phrase}: {count}")
 
 
 def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dict]:
@@ -714,7 +714,7 @@ def set_my_experience_adjustment(
     if player_id is None:
         raise HTTPException(
             status_code=400,
-            detail="No linked player profile at this club — claim your profile first.",
+            detail="No linked player profile at this club. Claim your profile first.",
         )
 
     extra = body.extra_games
@@ -723,7 +723,7 @@ def set_my_experience_adjustment(
     # A ceiling so a typo can't produce a nonsense profile. Well above any real
     # club career, and the tiers top out at 20 anyway.
     if extra > 1000:
-        raise HTTPException(status_code=422, detail="That's more games than we can credit — 1000 is the maximum.")
+        raise HTTPException(status_code=422, detail="That's more games than we can credit. 1000 is the maximum.")
 
     config = _get_system_config(db, body.system)
     if config is None:
@@ -1229,8 +1229,8 @@ def submit_prearranged(
         # "**Name** (@tag) (Faction)" on one line read as two competing
         # bracketed groups. Faction can legitimately be unset, in which case
         # the dash is dropped rather than trailing an empty one.
-        a_line = f"{a_label} — {faction_a}" if faction_a else a_label
-        b_line = f"{b_label} — {faction_b}" if faction_b else b_label
+        a_line = f"{a_label} · {faction_a}" if faction_a else a_label
+        b_line = f"{b_label} · {faction_b}" if faction_b else b_label
         content = (
             f"🤝 **Pre-Arranged Game**\n"
             f"⚔️ {a_line}\n"
