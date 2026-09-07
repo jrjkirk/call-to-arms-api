@@ -4343,7 +4343,7 @@ def preview_club_email(
     # The whole email, logo and button and all — a preview of the paragraphs
     # alone tells you nothing about the thing that actually lands.
     return {
-        "subject": club_emails._subject_safe(club_emails.fill(subject, ctx)),
+        "subject": club_emails.subject_safe(club_emails.fill(subject, ctx)),
         "html": club_emails.preview_html(db, body.kind, subject, text, ctx),
         "text": club_emails.render_text(text, ctx),
         "unknown_tokens": sorted(
@@ -4374,7 +4374,7 @@ def test_send_club_email(
     ctx = club_emails.SAMPLE_CONTEXT
     outcome = club_emails._send(
         body.to,
-        club_emails._subject_safe(club_emails.fill(subject, ctx)),
+        club_emails.subject_safe(club_emails.fill(subject, ctx)),
         club_emails.preview_html(db, body.kind, subject, text, ctx),
         club_emails.render_text(text, ctx),
     )

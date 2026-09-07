@@ -24,6 +24,8 @@ import tempfile
 _DB = pathlib.Path(tempfile.mkdtemp()) / "onboarding.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
 os.environ.setdefault("SESSION_SECRET", "test-secret-for-onboarding")
+# sender() derives the per-purpose address from this domain.
+os.environ.setdefault("EMAIL_FROM", "notifications@calltoarms.app")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
@@ -59,8 +61,9 @@ with Session(database.engine) as db:
 SENT_EMAILS = []
 
 
-def _fake_send(to, subject, html, cc=None, text=None):
-    SENT_EMAILS.append({"to": to, "subject": subject, "html": html, "text": text})
+def _fake_send(to, subject, html, cc=None, text=None, from_addr=None):
+    SENT_EMAILS.append({"to": to, "subject": subject, "html": html, "text": text,
+                        "from": from_addr})
     return "fake-message-id"
 
 
@@ -411,6 +414,9 @@ check("the edited copy is what actually goes out",
 check("and the edited body too",
       SENT_EMAILS and "We got it — Edited Club." in SENT_EMAILS[0]["html"],
       SENT_EMAILS[0]["html"][:160] if SENT_EMAILS else "")
+check("sent from the onboarding address, with a display name",
+      SENT_EMAILS and SENT_EMAILS[0]["from"] == "Call to Arms <noreply@calltoarms.app>",
+      str(SENT_EMAILS[0]["from"]) if SENT_EMAILS else "")
 check("a plain-text alternative goes with every send",
       SENT_EMAILS and "We got it — Edited Club." in (SENT_EMAILS[0]["text"] or ""),
       str(SENT_EMAILS[0]["text"])[:100] if SENT_EMAILS else "")

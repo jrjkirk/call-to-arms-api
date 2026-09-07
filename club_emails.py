@@ -27,7 +27,8 @@ from typing import Optional
 
 from sqlmodel import Session
 
-from emailer import UndeliverableRecipient, esc, send_email
+from email_layout import logo_url, paragraphs, subject_safe, wrap
+from emailer import UndeliverableRecipient, send_email, sender
 from models import AppSetting
 
 # ---------------------------------------------------------------------------
@@ -166,106 +167,8 @@ def fill(text: str, context: dict) -> str:
         out = out.replace("{" + key + "}", "" if value is None else str(value))
     return out
 
-
-# Matches a URL in text we have ALREADY escaped, which is why this is safe: the
-# haystack cannot contain a raw '<', so the match can't run past the URL into
-# markup, and the href is re-escaped for the attribute anyway.
-_URL_RE = re.compile(r"https?://[^\s<]+")
-
-
-def _linkify(escaped: str) -> str:
-    return _URL_RE.sub(
-        lambda m: f'<a href="{m.group(0)}" style="color:{_ACCENT}">{m.group(0)}</a>',
-        escaped,
-    )
-
-
-# ---------------------------------------------------------------------------
-# The wrapper
-# ---------------------------------------------------------------------------
-# Tables and inline styles, not divs and a stylesheet. That is not nostalgia:
-# Outlook renders with Word's engine, Gmail strips most of a <style> block, and
-# neither has ever supported flexbox or grid. Everything below is the shape that
-# survives — a centred table, explicit bgcolor attributes alongside the CSS, and
-# every rule written on the element it applies to.
-
-LOGO_URL_KEY = "club_email_logo_url"
-DEFAULT_LOGO_URL = "https://www.calltoarms.app/email-logo.png"
-
-# The app's own palette, so an email looks like the thing it is about.
-_PAGE = "#0a0b0e"        # outside the card
-_CARD = "#12141c"        # the card itself
-_HEADER = "#101219"      # the band the logo sits on
-_BORDER = "#332c1c"      # a gold-tinted hairline, not a grey one
-_TEXT = "#e9e0cd"
-_MUTED = "#9b937f"
-_ACCENT = "#c9a14a"
-
-_FONT = (
-    "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
-)
-
-_SHELL = """\
-<!--[if mso]><style>body,table,td{{font-family:Arial,Helvetica,sans-serif!important}}</style><![endif]-->
-<div style="display:none;max-height:0;overflow:hidden;opacity:0">{preheader}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{page}" \
-style="background:{page};margin:0;padding:0;width:100%">
-  <tr><td align="center" style="padding:28px 12px">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" \
-style="width:100%;max-width:600px;border-collapse:separate;border:1px solid {border};border-radius:10px;overflow:hidden">
-      <tr><td align="center" bgcolor="{header}" style="background:{header};padding:26px 24px 20px">
-        <img src="{logo_url}" width="240" alt="Call to Arms" \
-style="display:block;width:240px;max-width:70%;height:auto;border:0;outline:none;text-decoration:none" />
-      </td></tr>
-      <tr><td bgcolor="{card}" style="background:{card};padding:26px 28px 8px;font-family:{font};\
-font-size:15px;line-height:1.6;color:{text}">
-        {body}
-      </td></tr>
-      {cta}
-      <tr><td bgcolor="{card}" style="background:{card};padding:18px 28px 26px;border-top:1px solid {border};\
-font-family:{font};font-size:12px;line-height:1.5;color:{muted}">
-        The Call to Arms Team<br />
-        <a href="https://www.calltoarms.app" style="color:{muted};text-decoration:underline">calltoarms.app</a>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>"""
-
-# A padded link inside its own table cell. Bulletproof enough without dropping
-# to VML: the cell carries the colour, so a client that ignores the anchor's
-# styling still shows a gold block with readable text on it.
-_CTA = """\
-<tr><td bgcolor="{card}" style="background:{card};padding:8px 28px 26px">
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-    <tr><td align="center" bgcolor="{accent}" style="background:{accent};border-radius:6px">
-      <a href="{url}" style="display:inline-block;padding:12px 26px;font-family:{font};font-size:15px;\
-font-weight:bold;color:#1b1206;text-decoration:none">{label}</a>
-    </td></tr>
-  </table>
-</td></tr>"""
-
-
-def logo_url(db: Session) -> str:
-    row = db.get(AppSetting, LOGO_URL_KEY)
-    return (row.value if row and row.value else DEFAULT_LOGO_URL)
-
-
-def _wrap(body_html: str, *, logo: str, preheader: str = "",
-          cta_url: Optional[str] = None, cta_label: Optional[str] = None) -> str:
-    cta = ""
-    if cta_url and cta_label:
-        cta = _CTA.format(card=_CARD, accent=_ACCENT, font=_FONT,
-                          url=esc(cta_url), label=esc(cta_label))
-    return _SHELL.format(
-        page=_PAGE, card=_CARD, header=_HEADER, border=_BORDER, text=_TEXT,
-        muted=_MUTED, accent=_ACCENT, font=_FONT, logo_url=esc(logo),
-        # The line an inbox shows next to the subject. Left empty it shows the
-        # first thing in the HTML, which for a branded email is usually nothing
-        # useful at all.
-        preheader=esc(preheader), body=body_html, cta=cta,
-    )
-
-
+# The look lives in email_layout, shared with the venue and booking emails so
+# everything this app sends is recognisably from the same product.
 def render_body(body_text: str, context: dict) -> str:
     """Plain-text template + context -> the HTML we actually send.
 
@@ -278,15 +181,7 @@ def render_body(body_text: str, context: dict) -> str:
     work: a club with no systems enabled gets no stray blank paragraph where
     {systems_line} was.
     """
-    filled = fill(body_text, context)
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", filled)]
-    # Styles are inline on every paragraph because a <style> block is stripped
-    # or ignored by most of the clients these land in.
-    style = f"margin:0 0 16px;font-family:{_FONT};font-size:15px;line-height:1.6;color:{_TEXT}"
-    return "".join(
-        f'<p style="{style}">{_linkify(esc(p)).replace(chr(10), "<br />")}</p>'
-        for p in paragraphs if p
-    )
+    return paragraphs(fill(body_text, context))
 
 
 def render_text(body_text: str, context: dict) -> str:
@@ -308,7 +203,7 @@ def preview_html(db: Session, kind: str, subject: str, body_text: str, context: 
     """
     spec = EMAIL_KINDS[kind]
     cta = spec.get("cta")
-    return _wrap(
+    return wrap(
         render_body(body_text, context),
         logo=logo_url(db),
         preheader=render_text(body_text, context).split("\n")[0][:120],
@@ -321,9 +216,9 @@ def render(db: Session, kind: str, context: dict) -> tuple[str, str, str]:
     """(subject, html, text) for one email, using whatever template is in force."""
     tpl = get_template(db, kind)
     spec = EMAIL_KINDS[kind]
-    subject = _subject_safe(fill(tpl["subject"], context))
+    subject = subject_safe(fill(tpl["subject"], context))
     cta = spec.get("cta")
-    html = _wrap(
+    html = wrap(
         render_body(tpl["body"], context),
         logo=logo_url(db),
         # The first line of the message, which is what an inbox shows beside the
@@ -335,15 +230,6 @@ def render(db: Session, kind: str, context: dict) -> tuple[str, str, str]:
     return subject, html, render_text(tpl["body"], context)
 
 
-def _subject_safe(value: str, limit: int = 120) -> str:
-    """A subject line, fit to be a header.
-
-    Deliberately NOT html-escaped — entities in a subject line are their own bug
-    (see CLAUDE.md). Flattened and capped instead: a club name off a public form
-    has no business putting newlines in a header or 400 characters in a subject.
-    """
-    flat = " ".join(str(value).split())
-    return flat[: limit - 1] + "…" if len(flat) > limit else flat
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +243,8 @@ def _send(to: str, subject: str, html: str, text: Optional[str] = None) -> str:
     or surface it; none of them should care enough to fail.
     """
     try:
-        send_email(to=to, subject=subject, html=html, text=text)
+        send_email(to=to, subject=subject, html=html, text=text,
+                   from_addr=sender("onboarding"))
         return "sent"
     except UndeliverableRecipient:
         return "bad_address"

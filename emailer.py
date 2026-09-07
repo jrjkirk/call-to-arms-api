@@ -4,6 +4,13 @@ alerts to venues, and any future transactional email).
 Config (env, server-side only):
   RESEND_API_KEY  - Resend API key ("Sending access" scope is sufficient)
   EMAIL_FROM      - verified sender address, e.g. notifications@calltoarms.app
+  EMAIL_FROM_NAME - display name, default "Call to Arms"
+  EMAIL_FROM_ONBOARDING / EMAIL_FROM_VENUE
+                  - optional per-purpose overrides; see sender()
+
+Resend verifies a DOMAIN, not individual addresses, so any local part on the
+verified domain sends without further setup. That is what lets the purposes
+below have their own addresses for free.
 
 Read at call time (not import time), so the module imports fine in
 environments where email isn't configured yet — it only raises when a send
@@ -47,6 +54,55 @@ def _config() -> tuple[str, str]:
     return api_key, from_addr
 
 
+# Which address a given kind of mail comes from. Both default to the local part
+# the purpose deserves, on whatever domain EMAIL_FROM already uses:
+#
+#   onboarding -> noreply@   nothing here can be replied to (the domain has no
+#                            MX records), and saying so in the address is more
+#                            honest than a friendly one that bounces
+#   venue      -> notifications@  a venue getting a booking alert is being
+#                            notified about something, which is what it says
+#
+# Overridable per purpose if either should differ.
+_PURPOSE_LOCAL_PARTS = {
+    "onboarding": "noreply",
+    "venue": "notifications",
+}
+
+DEFAULT_FROM_NAME = "Call to Arms"
+
+
+def sender(purpose: str | None = None) -> str:
+    """The From header for one kind of mail, display name included.
+
+    The display name is the part that actually reads as professional: without
+    it every inbox shows the raw address, so a club organiser sees
+    "notifications@calltoarms.app" where they should see "Call to Arms".
+
+    An explicit EMAIL_FROM_<PURPOSE> wins. Otherwise the purpose's local part is
+    swapped onto EMAIL_FROM's domain, so a deployment on another domain gets the
+    right addresses without configuring each one.
+    """
+    base = os.environ.get("EMAIL_FROM", "")
+    name = os.environ.get("EMAIL_FROM_NAME", DEFAULT_FROM_NAME).strip()
+
+    addr = ""
+    if purpose:
+        addr = os.environ.get(f"EMAIL_FROM_{purpose.upper()}", "").strip()
+    if not addr:
+        local = _PURPOSE_LOCAL_PARTS.get(purpose or "")
+        if local and "@" in base:
+            addr = f"{local}@{base.split('@', 1)[1]}"
+        else:
+            addr = base
+
+    # An address configured WITH a display name is left exactly as given:
+    # someone who set "Badmoon <x@y>" meant it.
+    if not addr or "<" in addr:
+        return addr
+    return f"{name} <{addr}>" if name else addr
+
+
 class UndeliverableRecipient(RuntimeError):
     """The recipient address was rejected, so this send will never work.
 
@@ -65,16 +121,17 @@ def send_email(
     html: str,
     cc: list[str] | None = None,
     text: str | None = None,
+    from_addr: str | None = None,
 ) -> str:
     """Send an email via Resend. Returns the Resend message id.
 
     Raises UndeliverableRecipient when Resend rejects the recipient address,
     and RuntimeError on any other non-2xx response, so callers can tell
     "this person's address is wrong" from "our email is broken"."""
-    api_key, from_addr = _config()
+    api_key, default_from = _config()
 
     payload = {
-        "from": from_addr,
+        "from": from_addr or default_from,
         "to": [to] if isinstance(to, str) else to,
         "subject": subject,
         "html": html,

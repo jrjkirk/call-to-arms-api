@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 # Module level, unlike send_email below, which stays function-local so this
 # module still imports where email isn't configured. esc() has no such
 # dependency — it is pure string handling.
+import email_layout as email_style
 from emailer import esc
 
 from sqlmodel import Session, select
@@ -1061,40 +1062,49 @@ def describe_booking(db: Session, booking: VenueBooking) -> dict:
     }
 
 
-def _staff_email_html(club: Club, d: dict, status: str) -> str:
+def _booking_rows(d: dict, *, contact: bool) -> list:
+    """The booking, as label/value pairs. One builder so the HTML table and the
+    plain-text alternative can never drift apart. `contact` adds the booker's
+    details, which staff need and the booker already knows."""
     rows = [
         ("When", f"{d['date']}, {d['time']}"),
         ("Table", d["table"] + (f" ({d['table_size']})" if d["table_size"] else "")),
         ("Playing", d["game"]),
         ("Party", f"{d['party_size']} player{'s' if d['party_size'] != 1 else ''}"),
-        ("Booked by", d["name"]),
     ]
-    if d["email"]:
-        rows.append(("Email", d["email"]))
-    if d["phone"]:
-        rows.append(("Phone", d["phone"]))
-    if d["notes"]:
-        rows.append(("Notes", d["notes"]))
+    if contact:
+        rows += [("Booked by", d["name"]), ("Email", d["email"]),
+                 ("Phone", d["phone"]), ("Notes", d["notes"])]
+    # rows_table drops empty values, so optional fields need no guard here.
+    return rows
 
-    # Escaped: name, phone and notes come off a public booking form that needs
-    # no account, so they are attacker-controlled text going into HTML aimed at
-    # venue staff. See emailer.esc.
-    cells = "".join(
-        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{esc(k)}</td>'
-        f'<td style="padding:4px 0"><strong>{esc(v)}</strong></td></tr>'
-        for k, v in rows
-    )
-    lead = {
+
+def _staff_lead(status: str) -> str:
+    return {
         "requested": "A table has been requested and is waiting for you to confirm it.",
         "cancelled": "A booking has been cancelled.",
     }.get(status, "A table has been booked.")
-    return (
-        f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
-        f"<p>{lead}</p>"
-        f'<table style="border-collapse:collapse">{cells}</table>'
-        f'<p style="color:#666;font-size:13px">{esc(club.name)} — sent by Call to Arms.</p>'
-        f"</div>"
+
+
+def _staff_email_html(club: Club, d: dict, status: str) -> str:
+    rows = _booking_rows(d, contact=True)
+    lead = _staff_lead(status)
+    # email_layout escapes both halves of every row: name, phone and notes come
+    # off a public booking form that needs no account, so they are
+    # attacker-controlled text going into HTML aimed at venue staff.
+    return email_style.wrap(
+        email_style.paragraphs(lead) + email_style.rows_table(rows),
+        preheader=f"{d['date']}, {d['time']} — {d['name']}",
+        footer=club.name,
     )
+
+
+def _staff_email_text(club: Club, d: dict, status: str) -> str:
+    """The plain-text alternative. Worth sending: HTML-only mail scores worse
+    with spam filters, and a venue reading this on a phone gets the details
+    either way."""
+    detail = "\n".join(f"{k}: {v}" for k, v in _booking_rows(d, contact=True) if v)
+    return f"{_staff_lead(status)}\n\n{detail}\n\n{club.name}, sent by Call to Arms."
 
 
 def _staff_discord_text(club: Club, d: dict, status: str) -> str:
@@ -1140,12 +1150,14 @@ def notify_staff(db: Session, club_id: int, booking: VenueBooking) -> dict:
             result["email"] = "no_recipients"
         else:
             try:
-                from emailer import UndeliverableRecipient, send_email
+                from emailer import UndeliverableRecipient, send_email, sender
                 verb = {"requested": "requested", "cancelled": "cancelled"}.get(status, "booked")
                 send_email(
                     to=recipients,
                     subject=f"Table {verb}: {d['date']} {d['time']} — {d['name']}",
                     html=_staff_email_html(club, d, status),
+                    text=_staff_email_text(club, d, status),
+                    from_addr=sender("venue"),
                 )
                 result["email"] = "sent"
             except UndeliverableRecipient as e:
@@ -1226,38 +1238,25 @@ BOOKER_EVENTS = {
 
 def _booker_email_html(club: Club, d: dict, event: str, link: Optional[str]) -> str:
     _, lead = BOOKER_EVENTS[event]
-    rows = [
-        ("When", f"{d['date']}, {d['time']}"),
-        ("Table", d["table"] + (f" ({d['table_size']})" if d["table_size"] else "")),
-        ("Playing", d["game"]),
-        ("Party", f"{d['party_size']} player{'s' if d['party_size'] != 1 else ''}"),
-    ]
-    # Escaped for the same reason as the staff email above: the table name and
-    # the game come from club/booker input, and the club's own name is admin
-    # text. See emailer.esc.
-    cells = "".join(
-        f'<tr><td style="padding:4px 14px 4px 0;color:#666;white-space:nowrap">{esc(k)}</td>'
-        f'<td style="padding:4px 0"><strong>{esc(v)}</strong></td></tr>'
-        for k, v in rows
-    )
+    rows = _booking_rows(d, contact=False)
     # No cancel link on a booking that is already over as far as the venue is
-    # concerned -- offering to cancel a cancellation is just confusing.
-    tail = ""
-    if link and event in ("requested", "confirmed"):
-        # esc() on an href quotes the quote characters too, so a link can't
-        # break out of the attribute even though we build this one ourselves.
-        tail = (
-            f'<p style="font-size:13px">Need to change or cancel it? '
-            f'<a href="{esc(link)}">Manage this booking</a>.</p>'
-        )
-    return (
-        f'<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">'
-        f"<p>{lead.format(club=esc(club.name))}</p>"
-        f'<table style="border-collapse:collapse">{cells}</table>'
-        f"{tail}"
-        f'<p style="color:#666;font-size:13px">{esc(club.name)} — sent by Call to Arms.</p>'
-        f"</div>"
+    # concerned: offering to cancel a cancellation is just confusing.
+    show_manage = bool(link) and event in ("requested", "confirmed")
+    return email_style.wrap(
+        email_style.paragraphs(lead.format(club=club.name)) + email_style.rows_table(rows),
+        preheader=f"{d['date']}, {d['time']} at {club.name}",
+        cta_url=link if show_manage else None,
+        cta_label="Manage this booking" if show_manage else None,
+        footer=club.name,
     )
+
+
+def _booker_email_text(club: Club, d: dict, event: str, link: Optional[str]) -> str:
+    _, lead = BOOKER_EVENTS[event]
+    detail = "\n".join(f"{k}: {v}" for k, v in _booking_rows(d, contact=False) if v)
+    tail = (f"\n\nNeed to change or cancel it? {link}"
+            if link and event in ("requested", "confirmed") else "")
+    return f"{lead.format(club=club.name)}\n\n{detail}{tail}\n\n{club.name}, sent by Call to Arms."
 
 
 def notify_booker(db: Session, club_id: int, booking: VenueBooking, event: str) -> Optional[str]:
@@ -1285,11 +1284,14 @@ def notify_booker(db: Session, club_id: int, booking: VenueBooking, event: str) 
     subject_verb, _ = BOOKER_EVENTS[event]
     d = describe_booking(db, booking)
     try:
-        from emailer import UndeliverableRecipient, send_email
+        from emailer import UndeliverableRecipient, send_email, sender
+        link = manage_url(club, booking)
         send_email(
             to=booking.contact_email,
             subject=f"{subject_verb}: {d['date']}, {d['time']} at {club.name}",
-            html=_booker_email_html(club, d, event, manage_url(club, booking)),
+            html=_booker_email_html(club, d, event, link),
+            text=_booker_email_text(club, d, event, link),
+            from_addr=sender("venue"),
         )
         return "sent"
     except UndeliverableRecipient as e:

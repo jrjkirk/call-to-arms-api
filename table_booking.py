@@ -16,8 +16,9 @@ import math
 
 from sqlmodel import Session, select
 
+import email_layout as layout
 import emailer
-from emailer import esc
+from emailer import sender
 from database import scoped
 from models import ClubSystem, Pairing, Signup, TableBookingConfig, TableBookingNotification
 from signups import _get_system_config
@@ -69,24 +70,52 @@ def render_table_booking_email(
     # would put &amp; in front of the venue rather than an ampersand.
     subject = cfg.subject_template or f"{system} — {week}: {tables} table{'s' if tables != 1 else ''} needed"
 
-    # Everything interpolated below is escaped. `player_names` in particular is
-    # whatever players typed at signup, and this same HTML is handed back by
-    # admin/table-booking/preview and rendered with {@html} in the admin page —
-    # so an unescaped name executed in a club admin's browser. See emailer.esc.
-    parts = [
-        f"<p>Hi {esc(venue_label)},</p>",
-        f"<p>For {esc(system)} on {esc(week)}, we're expecting <strong>{headcount} player"
-        f"{'s' if headcount != 1 else ''}</strong>, needing approximately "
-        f"<strong>{tables} table{'s' if tables != 1 else ''}</strong> "
-        f"(based on {cfg.players_per_table} players per table).</p>",
+    # Written as plain text and handed to email_layout, which escapes the lot
+    # before adding markup. `player_names` in particular is whatever players
+    # typed at signup, and this same HTML is handed back by
+    # admin/table-booking/preview and rendered with {@html} in the admin page,
+    # so an unescaped name executed in a club admin's browser.
+    body = (
+        f"Hi {venue_label},\n"
+        "\n"
+        f"For {system} on {week}, we're expecting {headcount} "
+        f"player{'s' if headcount != 1 else ''}, needing approximately "
+        f"{tables} table{'s' if tables != 1 else ''} "
+        f"(based on {cfg.players_per_table} players per table)."
+    )
+    html = layout.paragraphs(body)
+    if cfg.include_player_names and player_names:
+        html += layout.paragraphs("Players:")
+        html += layout.rows_table([(str(i), n) for i, n in enumerate(player_names, 1)])
+    if cfg.notes:
+        html += layout.paragraphs(cfg.notes)
+
+    return subject, layout.wrap(
+        html,
+        preheader=f"{tables} table{'s' if tables != 1 else ''} for {system} on {week}",
+        footer=cfg.venue_name or "Call to Arms",
+    )
+
+
+def render_table_booking_text(
+    cfg: TableBookingConfig, system: str, week: str, tables: int, headcount: int,
+    player_names: list[str],
+) -> str:
+    """The plain-text alternative, same content without the markup."""
+    lines = [
+        f"Hi {cfg.venue_name or 'there'},",
+        "",
+        f"For {system} on {week}, we're expecting {headcount} "
+        f"player{'s' if headcount != 1 else ''}, needing approximately "
+        f"{tables} table{'s' if tables != 1 else ''} "
+        f"(based on {cfg.players_per_table} players per table).",
     ]
     if cfg.include_player_names and player_names:
-        items = "".join(f"<li>{esc(n)}</li>" for n in player_names)
-        parts.append(f"<p>Players:</p><ul>{items}</ul>")
+        lines += ["", "Players:"] + [f"  {i}. {n}" for i, n in enumerate(player_names, 1)]
     if cfg.notes:
-        parts.append(f"<p>{esc(cfg.notes)}</p>")
-    parts.append("<p>Thanks!<br>Call to Arms</p>")
-    return subject, "".join(parts)
+        lines += ["", cfg.notes]
+    lines += ["", "Call to Arms"]
+    return "\n".join(lines)
 
 
 def send_table_booking_notification(
@@ -120,7 +149,13 @@ def send_table_booking_notification(
         tables=data["tables"], headcount=data["headcount"],
     )
     try:
-        emailer.send_email(to=cfg.venue_email, subject=subject, html=html, cc=cfg.cc_emails or None)
+        emailer.send_email(
+            to=cfg.venue_email, subject=subject, html=html, cc=cfg.cc_emails or None,
+            text=render_table_booking_text(
+                cfg, system, week, data["tables"], data["headcount"], data["player_names"]
+            ),
+            from_addr=sender("venue"),
+        )
         notif.status = "sent"
     except Exception as e:
         notif.status = "failed"

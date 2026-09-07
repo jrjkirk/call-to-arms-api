@@ -33,6 +33,8 @@ def check(label, cond, detail=""):
 # The classic: closes nothing, needs no script tag, fires on render.
 PAYLOAD = '<img src=x onerror="alert(1)">'
 ESCAPED = "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"
+# The one image an email is allowed to contain.
+LOGO_SRC = "https://www.calltoarms.app/email-logo.png"
 
 
 class _Tags(HTMLParser):
@@ -42,10 +44,13 @@ class _Tags(HTMLParser):
         super().__init__()
         self.tags: list[str] = []
         self.attrs: list[str] = []
+        self.imgs: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         self.tags.append(tag)
         self.attrs += [a for a, _ in attrs]
+        if tag == "img":
+            self.imgs.append(dict(attrs).get("src", ""))
 
 
 def inert(html: str) -> bool:
@@ -57,7 +62,11 @@ def inert(html: str) -> bool:
     """
     t = _Tags()
     t.feed(html)
-    injected_tags = {"img", "script", "iframe", "object", "embed", "svg"}
+    # The branded shell has one legitimate <img>, the logo. Anything else with a
+    # src, and any executable tag or on* handler, came from the payload.
+    if any(src != LOGO_SRC for src in t.imgs):
+        return False
+    injected_tags = {"script", "iframe", "object", "embed", "svg"}
     return not (set(t.tags) & injected_tags) and not any(
         a.startswith("on") for a in t.attrs
     )
@@ -84,7 +93,9 @@ check("a player's name cannot inject markup", ESCAPED in html)
 check("the venue name cannot inject markup", html.count(ESCAPED) >= 2)
 check("admin notes cannot inject markup", html.count(ESCAPED) >= 3)
 check("nothing live survived anywhere in the body", inert(html), html[:120])
-check("the real content is still there", "<li>Ann</li>" in html and "<strong>8 player" in html)
+check("the real content is still there", ">Ann<" in html and "8 players" in html)
+check("and it comes in the branded shell",
+      "email-logo.png" in html and html.count("<table") >= 3)
 # The subject is a plain-text header: escaping it would show &amp; to the venue.
 check("the subject is left unescaped on purpose", "&lt;" not in subject, subject)
 
@@ -103,6 +114,7 @@ check("booker name, phone, notes and table are all escaped", staff.count(ESCAPED
 check("nothing live survived", inert(staff), staff[:120])
 check("the club name in the footer is escaped", ESCAPED in staff)
 check("the table still renders", "<table" in staff and "Booked by" in staff)
+check("branded like everything else", "email-logo.png" in staff)
 
 
 print("\n4. Booker confirmation email")
