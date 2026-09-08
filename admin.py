@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlmodel import Session, or_, select
 
 from auth import (
@@ -47,7 +47,8 @@ from league import (
 from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlayerDiscordVerification, PlayerExperienceAdjustment, PlayerLevelAnnouncement, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from observability import capture
-from levels import announce_level_ups
+from experience import counts_for_players, games_played, tier_for
+from levels import announce_level_ups, level_for
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate, _get_pairing_config, summarize_pairings
@@ -484,8 +485,24 @@ def patch_player(
 
 
 # ---------------------------------------------------------------------------
-# Pairing blocks (global — no system column, canonical low < high storage)
+# Pairing blocks (canonical low < high storage; system_id NULL = club-wide)
 # ---------------------------------------------------------------------------
+
+
+def _system_id_for(db: Session, system: str) -> int:
+    """Catalogue id for a legacy system name.
+
+    Deliberately NOT league._resolve_system_id, which additionally insists the
+    club has a league enabled for that system. A pairing block has nothing to
+    do with leagues, and routing it through that helper would have made
+    blocking a pair impossible in any system whose league is switched off.
+    """
+    sc = db.exec(
+        select(SystemConfig).where(SystemConfig.legacy_system_name == system)
+    ).first()
+    if sc is None:
+        raise HTTPException(status_code=422, detail=f"Unknown system {system!r}.")
+    return sc.id
 
 @router.get("/blocks/players")
 def block_players(
@@ -501,11 +518,28 @@ def block_players(
 
 @router.get("/blocks")
 def list_blocks(
+    system: Optional[str] = None,
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """All pairing blocks, enriched with player names, sorted A→B."""
+    """Pairing blocks, enriched with player names, sorted A→B.
+
+    No `system`: every block the club has, which is what the club-level
+    Players & blocks tab shows.
+
+    With `system`: the blocks that would actually apply when pairing it, which
+    is both its own and the club-wide ones. The club-wide rows are marked so
+    the system tab can show them without implying its admin may remove them.
+    """
     block_rows = db.exec(scoped(PairingBlock, user.club_id)).all()
+
+    system_id = None
+    if system:
+        _require_system_scope(system, user, db)
+        system_id = _system_id_for(db, system)
+        block_rows = [
+            b for b in block_rows if b.system_id is None or b.system_id == system_id
+        ]
 
     player_ids = {b.player_a_id for b in block_rows} | {b.player_b_id for b in block_rows}
     players_by_id: dict[int, Player] = {}
@@ -517,6 +551,16 @@ def list_blocks(
         p = players_by_id.get(pid)
         return p.name if p else f"#{pid}"
 
+    # System names for the club-level view, which lists blocks from every
+    # system at once and has to say which is which. One query, not one per row.
+    system_names: dict[int, str] = {}
+    scoped_ids = {b.system_id for b in block_rows if b.system_id is not None}
+    if scoped_ids:
+        system_names = {
+            sc.id: sc.legacy_system_name
+            for sc in db.exec(select(SystemConfig).where(SystemConfig.id.in_(scoped_ids))).all()
+        }
+
     result = [
         {
             "block_id": b.id,
@@ -525,6 +569,8 @@ def list_blocks(
             "player_b_id": b.player_b_id,
             "player_b_name": _name(b.player_b_id),
             "note": b.note,
+            "system": system_names.get(b.system_id) if b.system_id else None,
+            "club_wide": b.system_id is None,
         }
         for b in block_rows
     ]
@@ -536,25 +582,59 @@ class BlockBody(BaseModel):
     player_a_id: int
     player_b_id: int
     note: Optional[str] = None
+    # Omit for a club-wide block (super-admin only). Name it to block the pair
+    # in that system alone, which its own admin may do.
+    system: Optional[str] = None
+
+
+def _authorize_block(system: Optional[str], user: User, db: Session) -> Optional[int]:
+    """Check the caller may write this block, and return its system_id.
+
+    Two different powers behind one endpoint. A club-wide block reaches every
+    game night the club runs, so it stays super-admin only — exactly who could
+    create one before this existed. A system-scoped block only affects the
+    system named, so that system's own admin may create it, the same way they
+    already own its pairings and its schedule.
+
+    A scope admin therefore cannot widen a block to the whole club by leaving
+    the field off, which is the escalation worth being explicit about.
+    """
+    if not system:
+        if not (user.is_platform_admin or user.is_super_admin):
+            raise HTTPException(
+                status_code=403,
+                detail="A club-wide block is a super-admin's call. Name a system to block a pair for that system only.",
+            )
+        return None
+    _require_system_scope(system, user, db)
+    return _system_id_for(db, system)
 
 
 @router.post("/blocks")
 def add_block(
     body: BlockBody,
-    user: User = Depends(require_super_admin),
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
     """Insert a canonical (low, high) block. Idempotent; updates note if block exists."""
     if body.player_a_id == body.player_b_id:
         raise HTTPException(status_code=422, detail="Cannot block a player from themselves.")
 
+    system_id = _authorize_block(body.system, user, db)
+
     low, high = sorted([body.player_a_id, body.player_b_id])
     note = (body.note or "").strip() or None
 
+    # Uniqueness is per (club, pair, system), not per (club, pair). The same
+    # two players can carry a club-wide block AND a system one, and can be
+    # blocked in two systems independently — so a lookup that ignored
+    # system_id would silently edit the wrong row's note, or refuse to create
+    # the second block at all.
     existing = db.exec(
         scoped(PairingBlock, user.club_id)
         .where(PairingBlock.player_a_id == low)
         .where(PairingBlock.player_b_id == high)
+        .where(PairingBlock.system_id == system_id)
     ).first()
 
     if existing is not None:
@@ -564,7 +644,10 @@ def add_block(
             db.commit()
         return {"ok": True, "created": False}
 
-    db.add(PairingBlock(player_a_id=low, player_b_id=high, note=note, club_id=user.club_id))
+    db.add(PairingBlock(
+        player_a_id=low, player_b_id=high, note=note,
+        club_id=user.club_id, system_id=system_id,
+    ))
     db.commit()
     return {"ok": True, "created": True}
 
@@ -573,15 +656,22 @@ def add_block(
 def remove_block(
     player_a_id: int,
     player_b_id: int,
-    user: User = Depends(require_super_admin),
+    system: Optional[str] = None,
+    user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """Delete the canonical (low, high) block if it exists."""
+    """Delete the canonical (low, high) block if it exists.
+
+    Same authorization as creating one: a scope admin can lift their own
+    system's block and cannot touch a club-wide one.
+    """
+    system_id = _authorize_block(system, user, db)
     low, high = sorted([player_a_id, player_b_id])
     row = db.exec(
         scoped(PairingBlock, user.club_id)
         .where(PairingBlock.player_a_id == low)
         .where(PairingBlock.player_b_id == high)
+        .where(PairingBlock.system_id == system_id)
     ).first()
 
     if row is not None:
@@ -590,6 +680,171 @@ def remove_block(
         return {"ok": True, "removed": True}
 
     return {"ok": True, "removed": False}
+
+
+# ---------------------------------------------------------------------------
+# Per-system player roster
+# ---------------------------------------------------------------------------
+# The club roster answers "who is a member". This answers "who plays MY game
+# night", which is a different and much shorter list, and it is the one a
+# system admin actually works from. There is no membership table behind it and
+# deliberately so: turning up is what makes you a player of a system, so the
+# roster is derived from signups and needs nothing kept in step.
+
+
+@router.get("/system-players")
+def system_players(
+    system: str,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Everyone who has ever signed up for this system at this club.
+
+    Signups rather than pairings, so someone who signed up and was byed still
+    counts as one of yours. Archived players are included and flagged rather
+    than hidden — a system admin looking at a name on last month's pairings
+    needs to find them, and hiding the row makes it look like a data error.
+    """
+    _require_system_scope(system, user, db)
+
+    # One aggregate for the whole roster: player_id, how many weeks they have
+    # signed up for, and the most recent one. Doing this per player is the N+1
+    # that made the pairings page expensive (see experience.counts_for_players).
+    rows = db.exec(
+        text(
+            """
+            SELECT player_id, count(DISTINCT week) AS weeks, max(created_at) AS last_at
+            FROM signups
+            WHERE club_id = :club_id AND system = :system AND player_id IS NOT NULL
+            GROUP BY player_id
+            """
+        ),
+        params={"club_id": user.club_id, "system": system},
+    ).all()
+    if not rows:
+        return []
+
+    weeks_by_id = {pid: weeks for pid, weeks, _ in rows}
+    last_by_id = {pid: last for pid, _, last in rows}
+    ids = list(weeks_by_id)
+
+    players = {
+        p.id: p
+        for p in db.exec(scoped(Player, user.club_id).where(Player.id.in_(ids))).all()
+    }
+    games_by_id = counts_for_players(db, user.club_id, system, ids)
+
+    # Self-declared games played elsewhere. Already per (club, system), and
+    # until now only the player could set it.
+    adj_by_id = {
+        a.player_id: a.extra_games
+        for a in db.exec(
+            select(PlayerExperienceAdjustment)
+            .where(PlayerExperienceAdjustment.club_id == user.club_id)
+            .where(PlayerExperienceAdjustment.system == system)
+            .where(PlayerExperienceAdjustment.player_id.in_(ids))
+        ).all()
+    }
+
+    # Rating comes from the CURRENT season only. An all-time number would mix
+    # seasons that each reset to 1000 and mean nothing.
+    system_id = _system_id_for(db, system)
+    season_id = _current_season_id(db, user.club_id, system_id)
+    ratings_by_id: dict[int, float] = {}
+    if season_id is not None:
+        ratings_by_id = {
+            r.player_id: r.rating
+            for r in db.exec(
+                scoped(LeagueRating, user.club_id)
+                .where(LeagueRating.system_id == system_id)
+                .where(LeagueRating.season_id == season_id)
+                .where(LeagueRating.player_id.in_(ids))
+            ).all()
+        }
+
+    out = []
+    for pid in ids:
+        p = players.get(pid)
+        if p is None:
+            # A signup whose player row belongs to another club, or was
+            # deleted. Not this roster's problem, and not worth a blank row.
+            continue
+        games = games_by_id.get(pid, 0)
+        extra = adj_by_id.get(pid, 0)
+        out.append({
+            "player_id": pid,
+            "name": p.name,
+            "active": p.active,
+            "league_visible": p.league_visible,
+            "weeks_signed_up": weeks_by_id.get(pid, 0),
+            "last_signup_at": last_by_id.get(pid),
+            "games": games,
+            # The tier the matcher sees, which counts declared games too.
+            "experience": tier_for(games + extra),
+            "extra_games": extra,
+            "level": level_for(games),
+            "rating": ratings_by_id.get(pid),
+        })
+    out.sort(key=lambda r: (-r["games"], r["name"].lower()))
+    return out
+
+
+class SystemExperienceBody(BaseModel):
+    system: str
+    player_id: int
+    extra_games: int
+
+
+@router.post("/system-players/experience")
+def set_system_player_experience(
+    body: SystemExperienceBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Set a player's declared games-played-elsewhere for this system.
+
+    The player can already set this themselves; an admin needs to as well,
+    because the common case is someone who never will. It only moves the
+    experience tier the matcher reads, never the level: levels come from
+    pairings alone, on purpose, so that a self-declared number can never buy
+    progression (see levels.py).
+    """
+    _require_system_scope(body.system, user, db)
+    if body.extra_games < 0:
+        raise HTTPException(status_code=422, detail="Games played elsewhere cannot be negative.")
+    if body.extra_games > 1000:
+        raise HTTPException(status_code=422, detail="That's more games than we can credit. 1000 is the maximum.")
+
+    player = db.exec(
+        scoped(Player, user.club_id).where(Player.id == body.player_id)
+    ).first()
+    if player is None:
+        raise HTTPException(status_code=404, detail="No such player at this club.")
+
+    row = db.exec(
+        select(PlayerExperienceAdjustment)
+        .where(PlayerExperienceAdjustment.club_id == user.club_id)
+        .where(PlayerExperienceAdjustment.player_id == body.player_id)
+        .where(PlayerExperienceAdjustment.system == body.system)
+    ).first()
+    if row is None:
+        row = PlayerExperienceAdjustment(
+            club_id=user.club_id, player_id=body.player_id,
+            system=body.system, extra_games=body.extra_games,
+        )
+    else:
+        row.extra_games = body.extra_games
+        row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+
+    games = games_played(db, user.club_id, body.player_id, body.system)
+    return {
+        "ok": True,
+        "player_id": body.player_id,
+        "extra_games": body.extra_games,
+        "experience": tier_for(games + body.extra_games),
+    }
 
 
 # ---------------------------------------------------------------------------

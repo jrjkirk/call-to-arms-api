@@ -499,8 +499,22 @@ def generate(
         return tuple(sorted([x.key, y.key])) in seen_recent
 
     # 6. Load blocks
+    #
+    # A block is club-wide (system_id NULL) or belongs to one system. Both are
+    # hard filters and behave identically once loaded; the only question is
+    # whether this run should see it at all.
+    #
+    # Written as a filter on rows already fetched rather than in the query so
+    # that a club that has never scoped a block builds the exact same `blocks`
+    # set it always did — the property that made this safe to add to a frozen
+    # engine. Blocks are per club and few; there is nothing to gain by pushing
+    # it into SQL.
     block_rows = session.exec(scoped(PairingBlock, club_id)).all()
-    blocks: set = {tuple(sorted([b.player_a_id, b.player_b_id])) for b in block_rows}
+    blocks: set = {
+        tuple(sorted([b.player_a_id, b.player_b_id]))
+        for b in block_rows
+        if b.system_id is None or b.system_id == config.id
+    }
 
     last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
     bye_player_ids = previous_bye_player_ids(session, system, week, club_id)

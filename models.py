@@ -139,6 +139,17 @@ class PairingBlock(SQLModel, table=True):
     player_b_id: int
     note: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Which system this block applies to, or NULL for club-wide.
+    #
+    # NULL is a MEANING, not a backfill state: most blocks are two people who
+    # should never be drawn against each other anywhere, and every row that
+    # existed before 2026-09-08 is one of those. A system_id is for the other
+    # kind — "they have met four times in Kill Team" — which is that system
+    # admin's call and says nothing about the club's other game nights.
+    #
+    # Never make this NOT NULL. See
+    # migrations/add_system_id_to_pairing_blocks.py.
+    system_id: Optional[int] = Field(default=None, foreign_key="systems.id", index=True)
     # Phase 1 expand/contract step, table 1 of 10. Nullable during
     # backfill/dual-run; a later contract step makes this NOT NULL once
     # every row is populated. See multitenancy-plan-v2.md.
