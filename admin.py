@@ -4917,6 +4917,10 @@ def _club_request_dict(r: ClubRequest, db: Optional[Session] = None) -> dict:
         "region": r.region,
         "preferred_slug": r.preferred_slug,
         "systems": r.systems or [],
+        # Per-system nights. Empty on requests predating 2026-09-09, which is
+        # why the flat club-wide fields below are still sent: the reviewer
+        # needs to see whichever one this request actually carries.
+        "system_details": r.system_details or {},
         "club_night_day": r.club_night_day,
         "club_night_time": r.club_night_time,
         "player_count": r.player_count,
@@ -5156,35 +5160,57 @@ def provision_club_request(
     # and inventing "Wednesday" published a specific wrong night on a club's
     # public page and drove every schedule default from it. No systems is
     # obviously unfinished; a plausible wrong answer is not.
+    #
+    # Each system gets ITS OWN night. The form used to ask one question for the
+    # whole club and stamp that answer onto every ClubSystem, always weekly,
+    # which was wrong for any club running two games on two nights and put a
+    # specific wrong night on their public page.
+    #
+    # `req.system_details` carries the per-system answers. Requests submitted
+    # before 2026-09-09 have NULL there and the flat club-wide columns instead,
+    # so those are the fallback and every pending row still provisions.
+    #
+    # A system with no day is SKIPPED, not guessed. session_day is NOT NULL and
+    # inventing "Wednesday" is how a club ended up advertising a night it does
+    # not run.
     enabled_systems: list[str] = []
+    skipped_systems: list[str] = []
     skipped_systems_reason = None
-    if body.enable_systems and req.systems and not req.club_night_day:
-        skipped_systems_reason = "no club night on the request, so nothing was scheduled"
-    elif body.enable_systems and req.systems:
-        day = req.club_night_day
-        # The club told us its start time on the form, and ClubSystem has a field
-        # for it, but provisioning was dropping it on the floor and leaving the
-        # club page saying nothing about when to turn up.
-        start = (req.club_night_time or "").strip() or None
+    details = req.system_details if isinstance(req.system_details, dict) else {}
+    fallback_day = (req.club_night_day or "").strip() or None
+    fallback_time = (req.club_night_time or "").strip() or None
+
+    if body.enable_systems and req.systems:
         for name in req.systems:
             config = db.exec(
                 select(SystemConfig).where(SystemConfig.legacy_system_name == name)
             ).first()
             if config is None:
                 continue
+            entry = details.get(name) if isinstance(details.get(name), dict) else {}
+            day = (entry.get("day") or fallback_day or "").strip() or None
+            if not day:
+                skipped_systems.append(name)
+                continue
+            start = (entry.get("time") or fallback_time or "").strip() or None
+            cadence = (entry.get("cadence") or "weekly").strip().lower()
+            if cadence not in ("weekly", "fortnightly", "monthly"):
+                cadence = "weekly"
             db.add(ClubSystem(
                 club_id=club.id,
                 system_id=config.id,
                 enabled=True,
                 session_day=day,
-                # Weekly, and the same night for every system the club asked
-                # for. A club running two games on two nights, or anything
-                # fortnightly, corrects this in the admin; the form asks one
-                # question because five would put people off answering any.
-                session_cadence="weekly",
+                session_cadence=cadence,
                 session_start_time=start,
             ))
             enabled_systems.append(name)
+
+        if skipped_systems:
+            skipped_systems_reason = (
+                f"no club night given for {', '.join(skipped_systems)}, "
+                "so nothing was scheduled for them"
+            )
 
     req.status = "approved"
     req.reviewed_at = datetime.utcnow()
@@ -5219,6 +5245,7 @@ def provision_club_request(
         "request": _club_request_dict(req),
         "appointed_super_admin": appointed,
         "enabled_systems": enabled_systems,
+        "skipped_systems": skipped_systems,
         "skipped_systems_reason": skipped_systems_reason,
         "email": email_outcome,
     }

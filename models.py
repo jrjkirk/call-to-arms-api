@@ -1173,6 +1173,20 @@ class ClubRequest(SQLModel, table=True):
     region: Optional[str] = None
     preferred_slug: Optional[str] = None
     systems: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    # --- Per-system schedule (2026-09-09) --------------------------------
+    # The three columns below are the CLUB-WIDE originals and are still read,
+    # because every request submitted before today has them and has NULL here.
+    # New requests carry a night per system instead, keyed on the legacy system
+    # name (the same key `systems` holds, and the one ClubSystem resolves):
+    #
+    #   {"The Old World": {"day": ..., "time": ..., "cadence": ...,
+    #                      "players": ...}, ...}
+    #
+    # One club night for a whole club was wrong for most of them. Old World on
+    # a Thursday and Kill Team fortnightly on a Tuesday is ordinary, and a club
+    # forced to give one answer gives the one that fits their biggest night and
+    # publishes the wrong night for the rest.
+    system_details: Optional[dict] = Field(default=None, sa_column=Column(JSON))
     club_night_day: Optional[str] = None
     club_night_time: Optional[str] = None
     player_count: Optional[int] = None

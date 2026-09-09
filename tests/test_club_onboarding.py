@@ -279,6 +279,98 @@ with Session(database.engine) as db:
     check("no ClubSystem row invented a Wednesday",
           db.exec(select(ClubSystem).where(ClubSystem.club_id == club.id)).first() is None)
 
+print("\n11b-ii. Each system gets its own night, cadence and start time")
+# The whole point of system_details. One club night for a whole club published
+# the wrong night for every system that did not run on it.
+club_emails.send_email = _fake_send
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-persys", "Ali", None))
+r = client.post("/club-requests", json={
+    **REQUEST, "club_name": "Two Nights", "preferred_slug": "twonights",
+    "systems": ["The Old World", "Kill Team"],
+    # Deliberately different from the flat fields, which are still sent, so a
+    # pass here proves the per-system values won rather than coinciding.
+    "club_night_day": "Thursday", "club_night_time": "18:00",
+    "system_details": {
+        "The Old World": {"day": "Thursday", "time": "18:30",
+                          "cadence": "weekly", "players": 20},
+        "Kill Team": {"day": "Tuesday", "time": "19:00",
+                      "cadence": "fortnightly", "players": 8},
+        # Not selected, so it must be discarded rather than provisioned.
+        "Warhammer 40,000": {"day": "Monday"},
+    },
+})
+check("request accepted", r.status_code == 201, r.text[:140])
+with Session(database.engine) as db:
+    row = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-persys")).first()
+    ps = row.id
+    check("a system that was not selected is dropped",
+          "Warhammer 40,000" not in (row.system_details or {}), str(row.system_details))
+    check("the selected ones are kept", set(row.system_details or {}) ==
+          {"The Old World", "Kill Team"}, str(row.system_details))
+
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{ps}/provision", json={"slug": "twonights"})
+check("provision succeeded", r.status_code == 200, r.text[:140])
+check("both systems enabled", sorted(r.json().get("enabled_systems", [])) ==
+      ["Kill Team", "The Old World"], str(r.json().get("enabled_systems")))
+with Session(database.engine) as db:
+    club = db.exec(select(Club).where(Club.slug == "twonights")).first()
+    rows = db.exec(select(ClubSystem, SystemConfig)
+                   .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+                   .where(ClubSystem.club_id == club.id)).all()
+    by_name = {sc.legacy_system_name: cs for cs, sc in rows}
+    tow, kt = by_name.get("The Old World"), by_name.get("Kill Team")
+    check("Old World took its own night",
+          tow is not None and tow.session_day == "Thursday"
+          and tow.session_start_time == "18:30" and tow.session_cadence == "weekly",
+          f"{tow and (tow.session_day, tow.session_start_time, tow.session_cadence)}")
+    check("Kill Team took a DIFFERENT night and cadence",
+          kt is not None and kt.session_day == "Tuesday"
+          and kt.session_start_time == "19:00" and kt.session_cadence == "fortnightly",
+          f"{kt and (kt.session_day, kt.session_start_time, kt.session_cadence)}")
+
+print("\n11b-iii. A request predating per-system detail still provisions")
+# Every pending row on 2026-09-09 has system_details NULL and the flat columns
+# set. Those must keep working or approving them silently enables nothing.
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-legacy", "Jo", None))
+client.post("/club-requests", json={**REQUEST, "club_name": "Old Shape",
+                                    "preferred_slug": "oldshape",
+                                    "club_night_day": "Friday", "club_night_time": "17:45"})
+with Session(database.engine) as db:
+    lg = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-legacy")).first()
+    lg.system_details = None          # exactly the shape an old row has
+    db.add(lg); db.commit()
+    lg_id = lg.id
+client.cookies.delete("cta_pending_signup")
+client.cookies.set("cta_session", _make_session_cookie(1))
+r = client.post(f"/admin/platform/club-requests/{lg_id}/provision", json={"slug": "oldshape"})
+check("provision succeeded", r.status_code == 200, r.text[:140])
+check("systems still enabled from the flat columns",
+      sorted(r.json().get("enabled_systems", [])) == ["Kill Team", "The Old World"],
+      str(r.json().get("enabled_systems")))
+with Session(database.engine) as db:
+    club = db.exec(select(Club).where(Club.slug == "oldshape")).first()
+    days = {cs.session_day for cs in db.exec(
+        select(ClubSystem).where(ClubSystem.club_id == club.id)).all()}
+    check("both fell back to the club-wide night", days == {"Friday"}, str(days))
+
+print("\n11b-iv. Junk in the per-system block is dropped, not stored")
+client.cookies.delete("cta_session")
+client.cookies.set("cta_pending_signup", _make_pending_signup_cookie("discord-junk", "Kim", None))
+client.post("/club-requests", json={
+    **REQUEST, "club_name": "Junk In", "preferred_slug": "junkin",
+    "systems": ["The Old World"],
+    "system_details": {"The Old World": {"day": "Funday", "time": "25:99",
+                                         "cadence": "hourly", "players": -3}},
+})
+with Session(database.engine) as db:
+    row = db.exec(select(ClubRequest).where(ClubRequest.discord_id == "discord-junk")).first()
+    check("every bad value was dropped rather than stored",
+          not (row.system_details or {}).get("The Old World"), str(row.system_details))
+
 print("\n11c. The club night's start time reaches the club")
 with Session(database.engine) as db:
     cs = db.exec(select(ClubSystem).where(ClubSystem.session_start_time == "18:00")).first()

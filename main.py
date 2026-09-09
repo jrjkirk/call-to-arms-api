@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 import httpx
@@ -522,11 +523,66 @@ class ClubRequestBody(BaseModel):
     region: Optional[str] = None
     preferred_slug: Optional[str] = None
     systems: Optional[list[str]] = None
+    # Per-system schedule, keyed on legacy system name (2026-09-09):
+    #   {"The Old World": {"day", "time", "cadence", "players"}, ...}
+    # The three club-wide fields below are still accepted, and still what an
+    # older client sends.
+    system_details: Optional[dict] = None
     club_night_day: Optional[str] = None
     club_night_time: Optional[str] = None
     player_count: Optional[int] = None
     requester_role: Optional[str] = None
     evidence_url: Optional[str] = None
+
+
+_REQUEST_DAYS = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                 "Saturday", "Sunday"}
+_REQUEST_CADENCES = {"weekly", "fortnightly", "monthly"}
+_REQUEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _clean_system_details(raw, systems: list[str]) -> dict:
+    """Sanitise the per-system schedule off a PUBLIC form.
+
+    Nothing here is trusted. The keys are narrowed to systems actually
+    selected, so a submission cannot smuggle in schedules for systems it did
+    not ask for, and every value is checked against the same vocabularies the
+    admin UI uses. A bad value is DROPPED rather than rejected: this arrives
+    from a form a stranger fills in once, and losing the whole request over a
+    malformed time would cost a club, where a missing time costs a reviewer ten
+    seconds. A missing day is caught at provisioning, which already refuses to
+    guess one.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    allowed = set(systems)
+    out: dict[str, dict] = {}
+    for key, value in raw.items():
+        name = str(key).strip()
+        if name not in allowed or not isinstance(value, dict):
+            continue
+        entry: dict = {}
+        day = str(value.get("day", "") or "").strip().title()
+        if day in _REQUEST_DAYS:
+            entry["day"] = day
+        time = str(value.get("time", "") or "").strip()
+        if _REQUEST_TIME_RE.match(time):
+            entry["time"] = time
+        cadence = str(value.get("cadence", "") or "").strip().lower()
+        if cadence in _REQUEST_CADENCES:
+            entry["cadence"] = cadence
+        players = value.get("players")
+        try:
+            n = int(players)
+            # Capped so a typo cannot present a reviewer with a club of four
+            # million; 0 and negatives are simply not answers.
+            if 1 <= n <= 10000:
+                entry["players"] = n
+        except (TypeError, ValueError):
+            pass
+        if entry:
+            out[name] = entry
+    return out
 
 
 @app.get("/club-requests/identity")
@@ -589,6 +645,7 @@ def create_club_request(
         raise HTTPException(status_code=422, detail="region must be one of the known UK regions.")
 
     systems = [s.strip() for s in (body.systems or []) if s and s.strip()]
+    details = _clean_system_details(body.system_details, systems)
 
     # One pending request per Discord account. Someone clicking submit twice, or
     # having second thoughts about the wording, shouldn't leave two rows for a
@@ -616,6 +673,7 @@ def create_club_request(
         region=region,
         preferred_slug=(body.preferred_slug or "").strip().lower() or None,
         systems=systems or None,
+        system_details=details or None,
         club_night_day=(body.club_night_day or "").strip() or None,
         club_night_time=(body.club_night_time or "").strip() or None,
         player_count=body.player_count,
