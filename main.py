@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import scheduler
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select, or_
 
 from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, scoped
@@ -294,6 +295,34 @@ def list_clubs(response: Response, session: Session = Depends(get_session)):
         }
         for c in rows
     ]
+
+
+@app.get("/stats")
+def public_stats(response: Response, session: Session = Depends(get_session)):
+    """Headline numbers for the logged-out hero. Public, no auth, no identities.
+
+    Counts ACTIVE players at ACTIVE clubs. Both filters are deliberate: an
+    archived player has left the club (see Player.active, which is roster
+    membership, not identity), and a club that has been deactivated is not part
+    of the network a visitor is being told about. Counting either would inflate
+    the figure the front page leads with, which is the one number a prospective
+    club has no way to sanity-check.
+
+    Two aggregates, no rows, so this is cheap enough to sit behind the same
+    60-second public cache as /clubs.
+    """
+    response.headers["Cache-Control"] = _PUBLIC_CACHE
+    players = session.exec(
+        select(func.count())
+        .select_from(Player)
+        .join(Club, Club.id == Player.club_id)
+        .where(Player.active == True)
+        .where(Club.active == True)
+    ).one()
+    clubs = session.exec(
+        select(func.count()).select_from(Club).where(Club.active == True)
+    ).one()
+    return {"players": players, "clubs": clubs}
 
 
 @app.get("/regions")
