@@ -15,6 +15,25 @@ primary_region = "lhr"
   # (e.g. the first signup on a quiet club night) doesn't pay a cold-start wake.
   min_machines_running = 1
 
+# Without this, nothing notices the app has stopped answering. On 2026-09-09 the
+# VM wedged and flyd went on reporting it as "started" for hours, because a
+# thrashing machine never exits and there was nothing else being asked. It
+# stayed down until a person complained.
+#
+# Pointed at /health DELIBERATELY, which returns a literal dict and touches no
+# database. The job here is "is this process still answering", not "is Supabase
+# well". A check on a DB-backed route would turn a thirty-second Supabase blip
+# into a restart loop, which is worse than the thing it is guarding against.
+#
+# 5s timeout against an endpoint that answers in under 50ms, so only a genuine
+# stall trips it. 20s grace covers boot.
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/health"
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
