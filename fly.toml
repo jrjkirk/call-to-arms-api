@@ -18,4 +18,13 @@ primary_region = "lhr"
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory_mb = 256
+  # 256 MB wedged the whole VM on 2026-09-09. At rest, with no traffic, the app
+  # held 167 MB of the ~207 MB a 256 MB machine actually gives you, so a couple
+  # of concurrent admin page loads had nowhere to go. There is no swap, so the
+  # kernel thrashed instead of OOM-killing anything: the API, and Fly's own SSH
+  # daemon, both stopped answering while flyd still reported the machine as
+  # "started". It stayed down until a human noticed.
+  #
+  # Keep this in fly.toml rather than `fly scale memory`, or the next deploy
+  # reads this file and silently puts it back to 256.
+  memory_mb = 512
