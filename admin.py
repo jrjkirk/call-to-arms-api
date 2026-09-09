@@ -734,6 +734,23 @@ def system_players(
     }
     games_by_id = counts_for_players(db, user.club_id, system, ids)
 
+    # The Discord handle behind each player, so an admin reading the roster can
+    # match a name here to a name in their server without opening two tabs.
+    #
+    # Both links are read because both exist: Player.user_id is the multi-club
+    # ownership link and the one to trust, User.player_id is the pre-2026-07-25
+    # home-club link that is still populated. Taking only one leaves a column
+    # of blanks for whichever half of the roster was claimed under the other.
+    discord_by_player: dict[int, str] = {}
+    owner_ids = {p.user_id for p in players.values() if p.user_id is not None}
+    if owner_ids:
+        for u in db.exec(select(User).where(User.id.in_(owner_ids))).all():
+            for pid, p in players.items():
+                if p.user_id == u.id:
+                    discord_by_player[pid] = u.discord_name
+    for u in db.exec(select(User).where(User.player_id.in_(ids))).all():
+        discord_by_player.setdefault(u.player_id, u.discord_name)
+
     # Self-declared games played elsewhere. Already per (club, system), and
     # until now only the player could set it.
     adj_by_id = {
@@ -774,6 +791,8 @@ def system_players(
         out.append({
             "player_id": pid,
             "name": p.name,
+            "discord_name": discord_by_player.get(pid),
+            "titles": player_titles(p),
             "active": p.active,
             "league_visible": p.league_visible,
             "weeks_signed_up": weeks_by_id.get(pid, 0),
@@ -787,6 +806,54 @@ def system_players(
         })
     out.sort(key=lambda r: (-r["games"], r["name"].lower()))
     return out
+
+
+class SystemTitlesBody(BaseModel):
+    system: str
+    player_id: int
+    titles: list[str]
+
+
+@router.post("/system-players/titles")
+def set_system_player_titles(
+    body: SystemTitlesBody,
+    user: User = Depends(_require_any_admin),
+    db: Session = Depends(get_session),
+):
+    """Set a player's titles from their system's roster.
+
+    Separate from PATCH /players, which is super-admin only and also carries
+    name, roster status and league visibility. Those are club-level decisions
+    and stay where they are; awarding "Old World Champion 2026" is the system
+    admin's, so it gets an endpoint that can do nothing else.
+
+    NOTE titles are stored on the Player and are therefore CLUB-WIDE: they show
+    on that player's profile whatever system you are looking at. Two systems
+    editing the same list will overwrite each other. That is a real limitation
+    of putting them here, and the alternative was a per-system titles table
+    nobody asked for.
+    """
+    _require_system_scope(body.system, user, db)
+
+    player = db.exec(
+        scoped(Player, user.club_id).where(Player.id == body.player_id)
+    ).first()
+    if player is None:
+        raise HTTPException(status_code=404, detail="No such player at this club.")
+
+    cleaned = [t.strip() for t in body.titles if t and t.strip()]
+    if len(cleaned) > 20:
+        raise HTTPException(status_code=422, detail="Twenty titles is the most one player can hold.")
+    if any(len(t) > 80 for t in cleaned):
+        raise HTTPException(status_code=422, detail="A title can be at most 80 characters.")
+
+    set_player_titles(player, cleaned)
+    db.add(player)
+    log_audit(db, user, "player.titles", "player", player.id,
+              f"{player.name!r} in {body.system!r}: {cleaned}")
+    db.commit()
+    db.refresh(player)
+    return {"ok": True, "player_id": player.id, "titles": player_titles(player)}
 
 
 class SystemExperienceBody(BaseModel):

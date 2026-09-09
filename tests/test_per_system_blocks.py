@@ -251,7 +251,63 @@ check("with the fields the tab shows",
 r = client.get(f"/admin/system-players?system={TOW}")
 check("and a scope admin cannot read another system's roster", r.status_code == 403, r.text)
 
-print("\n9. Declared games move the tier, never the level")
+print("\n9. The roster carries the Discord handle behind each player")
+# Both links are populated in the wild: Player.user_id is the multi-club
+# ownership link, User.player_id the older home-club one. A roster that reads
+# only one leaves half the column blank, so both are seeded and both asserted.
+with Session(database.engine) as db:
+    db.add(User(id=3, discord_id="3", discord_name="ann_plays", player_id=None,
+                club_id=1, home_club_id=1, is_super_admin=False))
+    db.add(User(id=4, discord_id="4", discord_name="bob_legacy", player_id=2,
+                club_id=1, home_club_id=1, is_super_admin=False))
+    db.flush()
+    db.get(Player, 1).user_id = 3          # new-style ownership
+    db.commit()
+
+by_id = {p["player_id"]: p for p in client.get(f"/admin/system-players?system={KT}").json()}
+check("a player claimed through Player.user_id shows their handle",
+      by_id[1]["discord_name"] == "ann_plays", str(by_id[1]))
+check("and one linked the old way through User.player_id does too",
+      by_id[2]["discord_name"] == "bob_legacy", str(by_id[2]))
+check("an unclaimed roster entry is null, not a guess",
+      by_id[3]["discord_name"] is None, str(by_id[3]))
+
+
+print("\n10. Titles can be set from a system's roster")
+check("they start empty", by_id[1]["titles"] == [], str(by_id[1]["titles"]))
+r = client.post("/admin/system-players/titles",
+                json={"system": KT, "player_id": 1, "titles": ["Kill Team Champion 2026", " ", "Best Painted"]})
+check("a scope admin can award one", r.status_code == 200, r.text)
+check("blank lines are dropped",
+      r.json()["titles"] == ["Kill Team Champion 2026", "Best Painted"], r.text)
+
+again = {p["player_id"]: p for p in client.get(f"/admin/system-players?system={KT}").json()}
+check("and the roster shows them back",
+      again[1]["titles"] == ["Kill Team Champion 2026", "Best Painted"], str(again[1]["titles"]))
+
+check("a system they don't run is refused",
+      client.post("/admin/system-players/titles",
+                  json={"system": TOW, "player_id": 1, "titles": ["x"]}).status_code == 403)
+check("an over-long title is refused",
+      client.post("/admin/system-players/titles",
+                  json={"system": KT, "player_id": 1, "titles": ["x" * 81]}).status_code == 422)
+check("and too many of them",
+      client.post("/admin/system-players/titles",
+                  json={"system": KT, "player_id": 1, "titles": [f"t{i}" for i in range(21)]}).status_code == 422)
+
+# The endpoint exists so a SCOPE admin can award a title. It must not become a
+# second way to edit the club-level fields that PATCH /players guards.
+with Session(database.engine) as db:
+    p1 = db.get(Player, 1)
+    check("it touches nothing else on the player",
+          p1.name == "Ann" and p1.active is True and p1.league_visible is True)
+
+r = client.post("/admin/system-players/titles",
+                json={"system": KT, "player_id": 1, "titles": []})
+check("clearing them back to none works", r.json()["titles"] == [], r.text)
+
+
+print("\n11. Declared games move the tier, never the level")
 before = {p["player_id"]: p for p in roster}[1]
 r = client.post("/admin/system-players/experience",
                 json={"system": KT, "player_id": 1, "extra_games": 25})
