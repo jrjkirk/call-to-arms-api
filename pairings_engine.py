@@ -4,8 +4,8 @@ _pair_dist returns (format_pen, last_opp_pen, block_pen, weighted_score).
 format_pen bars a pairing across an exclusive vibe. last_opp_pen and
 block_pen remain hard, unconfigurable top-priority filters (admin blocks /
 "don't repeat last week's opponent" are safety rules, not taste). The soft
-factors (mirror faction, same faction category, rematch history, vibe,
-experience, eta, scenario, points) are combined into weighted_score using
+factors (intro games, mirror faction, same faction category, rematch history,
+vibe, experience, eta, scenario, points) are combined into weighted_score using
 per-(club,system) weights from
 PairingConfig (see models.py) — admin-configurable via sliders in the web UI.
 Do NOT reorder or change how last_opp_pen/block_pen dominate — that ordering
@@ -278,6 +278,36 @@ def _mirror_flag(a: MatcherSignup, b: MatcherSignup) -> int:
     return 1 if (af and bf and af == bf) else 0
 
 
+def _intro_flag(a: MatcherSignup, b: MatcherSignup) -> int:
+    """1 when someone asking for an intro game would not get a teacher.
+
+    A "seeker" is a player whose vibe is Intro; a "teacher" is one who ticked
+    "I can lead an intro game" (can_demo). The flag fires when either side is a
+    seeker and the other cannot teach — which includes two seekers paired
+    together, the case the whole feature exists to prevent, since neither of
+    them can show the other the game.
+
+    A seeker who can also teach satisfies the other's need, so can_demo is
+    checked on its own rather than excluding seekers from the teacher side.
+
+    This REPLACED the intro pre-pass, which ran before the matcher and paired
+    seekers with teachers directly. That pass scored on (vibe, experience,
+    points) distance and nothing else: `blocks` and `last_opp_pairs` were not
+    in scope, so it would pair two players an admin had blocked while an
+    equally close unblocked teacher sat free. Being a weight means going
+    through the same path as every other factor and inheriting all of them.
+    """
+    a_seeks = (a.row.vibe or "").strip().lower() == "intro"
+    b_seeks = (b.row.vibe or "").strip().lower() == "intro"
+    if not a_seeks and not b_seeks:
+        return 0
+    if a_seeks and not b.row.can_demo:
+        return 1
+    if b_seeks and not a.row.can_demo:
+        return 1
+    return 0
+
+
 def _faction_group_index(config: SystemConfig) -> dict:
     """Lowercased faction name -> its category label, or {} for a flat system.
 
@@ -376,6 +406,7 @@ def _pair_dist(
     )
     mir = _mirror_flag(ms, other)
     same_group = _same_group_flag(ms, other, group_of or {})
+    intro_unmet = _intro_flag(ms, other)
 
     pair_key = tuple(sorted([ms.key, other.key]))
     if pair_key in seen_recent:
@@ -392,7 +423,8 @@ def _pair_dist(
     dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
 
     score = (
-        pconfig.weight_mirror * mir
+        pconfig.weight_intro * intro_unmet
+        + pconfig.weight_mirror * mir
         + pconfig.weight_faction_group * same_group
         + pconfig.weight_rematch * rematch_p
         + pconfig.weight_vibe * dv
@@ -435,7 +467,7 @@ def generate(
     # than no override at all: a club that turns scenarios off would get a form
     # with no scenario field and a matcher still scoring scenario agreement
     # between two blank values. EffectiveSystem proxies everything it does not
-    # override, so config.id / config.recent_weeks / config.has_intro_prepass
+    # override, so config.id / config.recent_weeks / config.uses_scenarios
     # below are unchanged for every club that has customised nothing.
     config = effective_system(session, club_id, config)
     pconfig: PairingConfig = _get_pairing_config(session, club_id, config.id)
@@ -482,64 +514,47 @@ def generate(
         for k, su in seen_names.items()
     ]
 
-    # 3. Intro pre-pass (per-system, via the catalogue — TOW and HH today)
-    has_intro_prepass = config.has_intro_prepass
+    # 3. Intro games are matched by WEIGHT now, not by a pre-pass.
+    #
+    # There used to be a sweep here: anyone whose vibe was "Intro" was paired
+    # with the nearest player who had ticked "I can lead an intro game", both
+    # were dropped from the pool, and everything below never saw them. It
+    # scored on (vibe, experience, points) distance and nothing else — blocks
+    # and last_opp_pairs were not in scope — so it would pair two players an
+    # admin had explicitly blocked while an equally close unblocked teacher
+    # sat free.
+    #
+    # PairingConfig.weight_intro carries it instead, applied in _pair_dist
+    # like every other factor, so blocks, last week's opponent and exclusive
+    # vibes all apply to an intro game as they do to any other. It is
+    # defaulted above every other weight, so on a night with a teacher free
+    # the result is what the pre-pass would have produced.
+    #
+    # config.has_intro_prepass is deliberately no longer read. Intro matching
+    # follows what the signup form actually offers (the Intro vibe and the
+    # teach checkbox), so a third flag could no longer disagree with them.
 
-    intro_pairs: list = []
-    if has_intro_prepass:
-        used_keys: set[str] = set()
-        seekers = [ms for ms in candidates if (ms.row.vibe or "").lower() == "intro"]
-        leaders = [ms for ms in candidates if ms.row.can_demo]
-
-        for seeker in seekers:
-            if seeker.key in used_keys:
-                continue
-            best_leader: Optional[MatcherSignup] = None
-            best_diff: Optional[tuple] = None
-            for leader in leaders:
-                if leader.key == seeker.key or leader.key in used_keys:
-                    continue
-                diff = (
-                    abs(seeker.preference[0] - leader.preference[0]),
-                    abs(seeker.preference[1] - leader.preference[1]),
-                    abs(seeker.preference[2] - leader.preference[2]),
-                )
-                if best_diff is None or diff < best_diff:
-                    best_leader = leader
-                    best_diff = diff
-                    if diff == (0, 0, 0):
-                        break
-            if best_leader is not None:
-                used_keys.add(seeker.key)
-                used_keys.add(best_leader.key)
-                if persist:
-                    p = Pairing(
-                        week=week, system=system,
-                        a_signup_id=seeker.row.id,
-                        b_signup_id=best_leader.row.id,
-                        status="pending",
-                        a_faction=seeker.row.faction,
-                        b_faction=best_leader.row.faction,
-                        club_id=club_id,
-                    )
-                    session.add(p)
-                    session.flush()
-                    intro_pairs.append(p)
-                else:
-                    intro_pairs.append({
-                        "a_signup_id": seeker.row.id,
-                        "a_name": seeker.row.player_name,
-                        "a_faction": seeker.row.faction,
-                        "b_signup_id": best_leader.row.id,
-                        "b_name": best_leader.row.player_name,
-                        "b_faction": best_leader.row.faction,
-                    })
-
-        candidates = [ms for ms in candidates if ms.key not in used_keys]
-
-    # 4. Sort remaining candidates
+    # 4. Sort candidates, intro seekers first
+    #
+    # The order is load-bearing, because the matching below is greedy: each
+    # candidate in turn takes the best partner still free, so whoever is
+    # considered first gets first pick.
+    #
+    # A player asking for an intro game has to be near the front or the weight
+    # cannot help them. Their vibe is not "Casual", so build_match_preference
+    # gives them a 1 where everyone else has a 0 and they sorted LAST — by
+    # which point every teacher in the room has already been taken by someone
+    # who did not need one. That is the real thing the old pre-pass was working
+    # around, and dropping it without this line would have quietly made intro
+    # games worse rather than better.
+    #
+    # It is only an ORDER. Every pairing an intro seeker makes still goes
+    # through _pair_dist, so blocks, last week's opponent and exclusive vibes
+    # apply to them exactly as they do to everyone else — which is the part the
+    # pre-pass got wrong.
     candidates.sort(
         key=lambda ms: (
+            0 if (ms.row.vibe or "").strip().lower() == "intro" else 1,
             0 if ms.row.standby_ok else 1,
             ms.preference,
             ms.key,
@@ -578,9 +593,9 @@ def generate(
     last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
     bye_player_ids = previous_bye_player_ids(session, system, week, club_id)
 
-    # 7. Greedy matching; out starts with intro pairs
+    # 7. Greedy matching
     used: set[str] = set()
-    out: list = list(intro_pairs)
+    out: list = []
 
     for i, ms in enumerate(candidates):
         if ms.key in used:

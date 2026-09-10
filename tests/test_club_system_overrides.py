@@ -54,7 +54,6 @@ with Session(database.engine) as db:
         uses_points=True, default_points=2000, max_points=3000,
         uses_scenarios=True, scenario_options=["Open Battle", "Weekly Scenario"],
         default_scenario="Open Battle", allows_demo=True, uses_standby=True,
-        has_intro_prepass=True,
         vibe_options=["Casual", "Competitive", "Open"], default_vibe="Open",
     ))
     # A system the catalogue gives no scenarios at all, so "turn scenarios on"
@@ -169,7 +168,7 @@ with Session(database.engine) as db:
                       scenario="Open Battle", club_id=1))
     db.commit()
 
-save_overrides({"uses_scenarios": False, "has_intro_prepass": False})
+save_overrides({"uses_scenarios": False, "uses_points": False})
 import pairings_engine  # noqa: E402
 seen = {}
 real_pair_dist = pairings_engine._pair_dist
@@ -180,7 +179,7 @@ def spy(ms, other, system, *a, **kw):
     # _pair_dist does not turn this into a silently-passing test.
     cfg = kw.get("config") or next(x for x in a if hasattr(x, "uses_scenarios"))
     seen["uses_scenarios"] = cfg.uses_scenarios
-    seen["has_intro_prepass"] = cfg.has_intro_prepass
+    seen["uses_points"] = cfg.uses_points
     return real_pair_dist(ms, other, system, *a, **kw)
 
 
@@ -190,9 +189,9 @@ with Session(database.engine) as db:
 pairings_engine._pair_dist = real_pair_dist
 check("the matcher saw the club's scenarios-off override",
       seen.get("uses_scenarios") is False, str(seen))
-check("and its intro-prepass override", seen.get("has_intro_prepass") is False, str(seen))
+check("and its points-off override", seen.get("uses_points") is False, str(seen))
 
-save_overrides({"uses_scenarios": None, "has_intro_prepass": None})
+save_overrides({"uses_scenarios": None, "uses_points": None})
 
 
 print("\n6. A club cannot save a form that cannot be filled in")

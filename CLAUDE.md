@@ -179,8 +179,25 @@ fly status                  # machine health
 "optimise", or change the algorithm logic without explicit instruction.
 
 Key invariants:
-- **`_pair_dist` returns `(format_pen, last_opp_pen, block_pen, weighted_score)`.** `format_pen` bars a pairing across an **exclusive vibe** (a club-defined one such as The Old World's "Battle March", a smaller points game whose players must only meet each other). It ranks above the other two because pairing across formats produces a game nobody can play, where a block or a repeat produces one that is merely unwanted. It is `0` for every club that has not defined an exclusive vibe, so the tuple sorts exactly as it did before for everyone else. See `vibes.py`. `last_opp_pen`/`block_pen` stay hard, unconfigurable top-priority filters (admin blocks / "don't repeat last week's opponent"). `weighted_score` linearly combines the soft factors (mirror, rematch, vibe, experience, eta, scenario, points) using per-(club,system) weights from `PairingConfig` (`models.py`), editable via admin UI sliders — `GET/POST /admin/pairing-config`. Do not change how `last_opp_pen`/`block_pen` dominate without explicit instruction.
-- Intro pre-pass applies to The Old World and The Horus Heresy only (never Kill Team)
+- **`_pair_dist` returns `(format_pen, last_opp_pen, block_pen, weighted_score)`.** `format_pen` bars a pairing across an **exclusive vibe** (a club-defined one such as The Old World's "Battle March", a smaller points game whose players must only meet each other). It ranks above the other two because pairing across formats produces a game nobody can play, where a block or a repeat produces one that is merely unwanted. It is `0` for every club that has not defined an exclusive vibe, so the tuple sorts exactly as it did before for everyone else. See `vibes.py`. `last_opp_pen`/`block_pen` stay hard, unconfigurable top-priority filters (admin blocks / "don't repeat last week's opponent"). `weighted_score` linearly combines the soft factors (intro, mirror, faction category, rematch, vibe, experience, eta, scenario, points) using per-(club,system) weights from `PairingConfig` (`models.py`), editable via admin UI sliders — `GET/POST /admin/pairing-config`. Do not change how `last_opp_pen`/`block_pen` dominate without explicit instruction.
+- **Intro games are a WEIGHT, not a pre-pass.** There used to be a sweep before
+  the matcher that paired anyone with the "Intro" vibe against anyone who had
+  ticked "I can lead an intro game", removed both from the pool, and ran on
+  `(vibe, experience, points)` distance alone — so it ignored blocks, last
+  week's opponent and exclusive vibes, and would pair a blocked pair while an
+  equally close unblocked teacher sat free. `PairingConfig.weight_intro`
+  (default 8.0, the highest weight there is) carries it now, through
+  `_pair_dist` like every other factor.
+  - **Intro seekers sort to the FRONT of the candidate list**, and that line is
+    load-bearing. Matching is greedy, so whoever is considered first gets first
+    pick; an Intro vibe is not "Casual", so those players used to sort last and
+    every teacher was gone by the time they were reached. Removing the pre-pass
+    without that sort would have made intro games worse, not better.
+  - `SystemConfig.has_intro_prepass` is **no longer read** by anything. Whether
+    a system runs intro games follows what its signup form offers: the Intro
+    vibe, and `allows_demo` for the teach checkbox. A third flag could disagree
+    with both, which is how Kill Team ended up with the pre-pass on while the
+    seed and this file said it never had it.
 - **Vibes carry a behaviour** (`soft` / `wildcard` / `exclusive`), stored per club-system in `ClubSystem.vibe_options` as either plain strings (the old shape, meaning soft, with "Open" implying wildcard) or `{name, behaviour}` objects. `vibes.py` reads both. Club names are no longer restricted to `CANONICAL_VIBES`; the platform catalogue still is.
 - T&T / 3-way grouping intentionally removed (club never uses it)
 - Odd numbers produce a single BYE via the greedy fallback — this is correct behaviour

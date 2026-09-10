@@ -85,10 +85,16 @@ SEED_ROWS = [
         uses_points=False,
         default_points=None,
         max_points=None,
-        # Standard + Intro. Read from the catalogue by all signup/admin
-        # surfaces (no per-surface hardcoding). Intro is a signup label only —
-        # KT has no intro pre-pass (has_intro_prepass=False), so the matcher is
-        # unaffected.
+        # Standard + Intro. Read from the catalogue by every signup and admin
+        # surface (no per-surface hardcoding), so this must match the live row.
+        #
+        # This comment used to say KT had no intro pre-pass and the matcher was
+        # therefore unaffected by offering the Intro vibe. Both halves are now
+        # out of date: has_intro_prepass had drifted to True in live data, and
+        # as of 2026-09-10 nothing reads it at all. Intro games are a weight in
+        # _pair_dist, applied wherever a system offers the Intro vibe AND the
+        # "I can lead an intro game" checkbox. Kill Team offers both, so its
+        # newcomers do get matched with a teacher.
         vibe_options=["Standard", "Intro"],
         default_vibe="Standard",
         uses_scenarios=False,
