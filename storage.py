@@ -69,16 +69,26 @@ def _upload_image(
     ext = extension_for(content_type)
     object_path = f"{object_prefix}/{uuid.uuid4().hex}.{ext}"
 
-    resp = httpx.post(
-        f"{url}/storage/v1/object/{bucket}/{object_path}",
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": content_type,
-            "x-upsert": "true",
-        },
-        content=data,
-        timeout=30,
-    )
+    # A transport failure has to raise RuntimeError too, not escape as an
+    # httpx error. This function's contract is "RuntimeError so the caller can
+    # 502 cleanly", and every caller catches exactly that — so a DNS failure or
+    # a refused connection was reaching the client as an unhandled 500 with a
+    # traceback instead of "could not store the image, try again". Found when
+    # the local Supabase host stopped resolving.
+    try:
+        resp = httpx.post(
+            f"{url}/storage/v1/object/{bucket}/{object_path}",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            },
+            content=data,
+            timeout=30,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Supabase Storage is unreachable: {e}") from e
+
     if resp.status_code >= 300:
         raise RuntimeError(
             f"Supabase Storage upload failed ({resp.status_code}): {resp.text[:300]}"
@@ -131,6 +141,20 @@ def upload_carousel_photo(
 ) -> tuple[str, str]:
     return _upload_image(
         data, content_type, f"{club_id}/{system_id}/carousel",
+        "CLUB_IMAGE_BUCKET", "club-images",
+    )
+
+
+def upload_system_logo(data: bytes, content_type: str, system_id: int) -> tuple[str, str]:
+    """A game system's wordmark, shown on the picker, carousel and club page.
+
+    Platform-wide rather than per-club, so it lives under its own prefix in the
+    club-images bucket rather than getting a bucket of its own — one bucket is
+    one thing to configure, and these are the same kind of object with the same
+    public-read policy.
+    """
+    return _upload_image(
+        data, content_type, f"systems/{system_id}/logo",
         "CLUB_IMAGE_BUCKET", "club-images",
     )
 

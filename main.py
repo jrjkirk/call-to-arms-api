@@ -19,7 +19,14 @@ import club_emails
 from levels import levels_for_players
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
-from systems import factions_for, faction_groups_for, icon_folder_for
+from systems import (
+    faction_groups_for,
+    factions_for,
+    icon_folder_for,
+    resolved_faction_groups,
+    resolved_factions,
+    resolved_icon_folder,
+)
 from services import (
     compute_league_record,
     fetch_player_results,
@@ -224,15 +231,17 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
         "session_start_time": (
             club_system.session_start_time if club_system is not None else None
         ),
-        # System *rules* — sourced from the hardcoded per-system modules in
-        # systems/, keyed by legacy_system_name, NOT from the (dead)
-        # SystemConfig.faction_list / icon_folder DB columns. None for any
-        # catalogue system without a hardcoded ruleset yet.
-        "faction_list": factions_for(r.legacy_system_name),
+        # System *rules*. Authored on the catalogue row when set, otherwise
+        # the hardcoded module in systems/ — see systems/__init__.py. The six
+        # systems predating the authoring UI have NULL and still read code.
+        "faction_list": resolved_factions(r),
         # Grouped factions ([{label, factions}]) for systems that define them
         # (Middle Earth's Good/Evil), else null → frontend renders the flat list.
-        "faction_groups": faction_groups_for(r.legacy_system_name),
-        "icon_folder": icon_folder_for(r.legacy_system_name),
+        "faction_groups": resolved_faction_groups(r),
+        "icon_folder": resolved_icon_folder(r),
+        # An uploaded logo when there is one; null leaves the frontend on the
+        # committed /logos/<slug>.png, which is where all six existing ones are.
+        "logo_url": r.logo_url,
     }
 
 

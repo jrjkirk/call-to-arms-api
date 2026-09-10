@@ -404,12 +404,36 @@ class SystemConfig(SQLModel, table=True):
     recent_weeks: int = 3
     extended_weeks: int = 6
 
+    # --- Authored ruleset (2026-09-10) -----------------------------------
+    # These three used to be dead: the faction list, groups and icon folder all
+    # came from a hardcoded module in systems/, and main.py said so in a
+    # comment. They are now the AUTHORED source, written by the platform admin
+    # UI, and the module is the fallback:
+    #
+    #     factions = row.faction_list or module.FACTIONS
+    #
+    # DB first, code second, deliberately. The six systems that predate this
+    # keep NULL here and go on reading their module, and migrating one is
+    # reversible: populate its column, watch it, set it back to NULL to fall
+    # straight through to the module again. Code-first would have meant an
+    # authored value on those six was silently ignored.
     faction_list: Optional[list] = Field(default=None, sa_column=Column(JSON))
-
-    # Informational only for now — render_pairings_image.py currently
-    # searches icons/TOW, icons/HH, and icons/KT for every faction lookup
-    # regardless of system, so this field does not yet gate anything.
+    # [{"label": "Good", "factions": [...]}, ...] for systems with too many
+    # army lists for one flat dropdown (Middle Earth's Good/Evil). NULL means
+    # the flat faction_list is the whole story.
+    faction_groups: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    # Directory name under icons/ holding this system's faction artwork.
     icon_folder: Optional[str] = None
+
+    # System artwork. Uploaded to Supabase Storage rather than committed, so a
+    # new system gets a logo without a deploy; logo_path is kept so the old
+    # object can be deleted on re-upload, logo_url denormalized for serving.
+    # Same pattern as Club.logo_path / Mission.image_path.
+    #
+    # The six committed logos in call-to-arms-web/static/logos/<slug>.png are
+    # untouched and still win when these are NULL.
+    logo_path: Optional[str] = None
+    logo_url: Optional[str] = None
 
     active: bool = True
 

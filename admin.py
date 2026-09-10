@@ -52,7 +52,13 @@ from levels import announce_level_ups, level_for
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate, _get_pairing_config, summarize_pairings
-from systems import factions_for, icon_folder_for
+from systems import (
+    factions_for,
+    icon_folder_for,
+    resolved_faction_groups,
+    resolved_factions,
+    resolved_icon_folder,
+)
 from table_booking import compute_table_booking, maybe_send_table_booking, render_table_booking_email, send_table_booking_notification
 from signups import (
     CANONICAL_VIBES,
@@ -3442,19 +3448,19 @@ class SystemConfigCreateBody(BaseModel):
     has_league: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
-    # faction_list / icon_folder are NOT accepted here. A system's factions
-    # and icon directory are rules that live in versioned code (systems/),
-    # not editable catalogue data. Following the same convention as `slug`
-    # immutability-on-edit, they're simply omitted from the request body so
-    # Pydantic silently ignores them if a client sends them.
+    # A system's ruleset is authored here now. It used to live only in
+    # systems/<name>.py and need a deploy; the module is still the fallback for
+    # any system whose faction_list is left empty, which is all six that
+    # predate this. See systems/__init__.py.
+    faction_list: Optional[list[str]] = None
+    faction_groups: Optional[list[dict]] = None
+    icon_folder: Optional[str] = None
     active: bool = True
 
 
 class SystemConfigEditBody(BaseModel):
     """Same shape as SystemConfigCreateBody minus slug — slug is immutable
-    after creation, since it's used as a stable identifier elsewhere.
-    faction_list / icon_folder are likewise omitted: they are code-owned
-    rules (systems/), never editable, and silently ignored if sent."""
+    after creation, since it names the logo and icon files on disk."""
     name: str
     legacy_system_name: str
     uses_points: bool = False
@@ -3471,7 +3477,66 @@ class SystemConfigEditBody(BaseModel):
     has_league: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
+    faction_list: Optional[list[str]] = None
+    faction_groups: Optional[list[dict]] = None
+    icon_folder: Optional[str] = None
     active: bool = True
+
+
+def _clean_ruleset(
+    faction_list: Optional[list[str]],
+    faction_groups: Optional[list[dict]],
+    icon_folder: Optional[str],
+) -> tuple[Optional[list[str]], Optional[list[dict]], Optional[str]]:
+    """Normalise an authored ruleset, or return NULLs meaning "use the module".
+
+    Empty is not the same as absent anywhere here. An empty faction list stores
+    NULL rather than [], because NULL is what makes a system fall back to its
+    code module, and a system with a genuinely empty list would otherwise show
+    players an empty faction dropdown with no way to tell the two states apart.
+
+    Groups are the authored grouping and are rebuilt from the flat list rather
+    than trusted: a faction named in a group but missing from the list would
+    appear in the dropdown and then fail validation on submit.
+    """
+    factions = [f.strip() for f in (faction_list or []) if f and f.strip()]
+    # Order-preserving de-dupe. Two identical options in a dropdown is a bug
+    # report, and the matcher would treat them as one anyway.
+    seen: dict[str, None] = {}
+    for f in factions:
+        seen.setdefault(f, None)
+    factions = list(seen)
+
+    if not factions:
+        return None, None, (icon_folder or "").strip() or None
+
+    groups_out: list[dict] = []
+    for g in faction_groups or []:
+        if not isinstance(g, dict):
+            continue
+        label = str(g.get("label", "")).strip()
+        members = [
+            str(f).strip() for f in (g.get("factions") or [])
+            if str(f).strip() in seen
+        ]
+        if label and members:
+            groups_out.append({"label": label, "factions": members})
+
+    # A group set that does not cover the whole list would silently hide
+    # factions from the dropdown, so it is all or nothing.
+    grouped = {f for g in groups_out for f in g["factions"]}
+    if groups_out and grouped != set(factions):
+        missing = sorted(set(factions) - grouped)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Every faction must belong to a category once categories are used. "
+                f"Not in any category: {', '.join(missing[:5])}"
+                + ("…" if len(missing) > 5 else "")
+            ),
+        )
+
+    return factions, (groups_out or None), (icon_folder or "").strip() or None
 
 
 def _validate_system_config_fields(
@@ -3500,15 +3565,22 @@ def list_platform_systems(
     """All SystemConfig rows, full fields — the catalogue-management table
     source for the platform admin panel.
 
-    faction_list / icon_folder are overridden from the hardcoded per-system
-    modules (systems/), not read from the DB columns, so the panel shows the
-    real code-owned ruleset (and never presents it as editable data)."""
+Each row carries BOTH its authored ruleset (the raw columns, which the edit
+    form binds to) and the resolved one actually in force, plus `ruleset_source`
+    so the panel can say whether a system is reading its own data or still
+    falling back to a code module in systems/."""
     rows = db.exec(select(SystemConfig).order_by(SystemConfig.name)).all()
     result = []
     for r in rows:
         row = r.model_dump()
-        row["faction_list"] = factions_for(r.legacy_system_name)
-        row["icon_folder"] = icon_folder_for(r.legacy_system_name)
+        authored = bool(r.faction_list)
+        row["ruleset_source"] = "authored" if authored else (
+            "code" if factions_for(r.legacy_system_name) else "none"
+        )
+        # What is actually served to players right now, whichever source won.
+        row["resolved_faction_list"] = resolved_factions(r)
+        row["resolved_faction_groups"] = resolved_faction_groups(r)
+        row["resolved_icon_folder"] = resolved_icon_folder(r)
         result.append(row)
     return result
 
@@ -3535,7 +3607,11 @@ def create_platform_system(
         body.scenario_options, body.default_scenario,
     )
 
-    system = SystemConfig(**body.model_dump())
+    data = body.model_dump()
+    data["faction_list"], data["faction_groups"], data["icon_folder"] = _clean_ruleset(
+        body.faction_list, body.faction_groups, body.icon_folder
+    )
+    system = SystemConfig(**data)
     db.add(system)
     db.flush()
     log_audit(db, user, "system.create", "system", system.id, f"{system.name!r} (slug={system.slug})")
@@ -3572,13 +3648,195 @@ def edit_platform_system(
         body.scenario_options, body.default_scenario,
     )
 
-    for k, v in body.model_dump().items():
+    data = body.model_dump()
+    data["faction_list"], data["faction_groups"], data["icon_folder"] = _clean_ruleset(
+        body.faction_list, body.faction_groups, body.icon_folder
+    )
+    # logo_path / logo_url are not in the body and must not be touched here:
+    # the logo is owned by its own upload endpoint, and a full-replace edit
+    # that included them would wipe the artwork every time someone renamed a
+    # system.
+    for k, v in data.items():
         setattr(system, k, v)
     db.add(system)
     log_audit(db, user, "system.update", "system", system.id, system.name)
     db.commit()
     db.refresh(system)
     return system
+
+
+def _faction_icon_slug(name: str) -> str:
+    """The filename a faction's icon must have.
+
+    Must stay identical to scripts/render_pairings_image.py::_faction_slug and
+    the frontend's factionSlug() in src/lib/factions.ts. Three copies of one
+    rule is two too many, but the other two are in different languages and one
+    of them runs on a GitHub runner — so the rule is duplicated deliberately
+    and this comment is the tripwire. Change one, change all three.
+    """
+    s = (name or "").lower().strip()
+    s = s.replace("&", "and")
+    s = "".join(ch if ch.isalnum() else " " for ch in s)
+    return "_".join(s.split())
+
+
+@router.get("/platform/systems/{system_id}/icon-checklist")
+def system_icon_checklist(
+    system_id: int,
+    _: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Exactly which icon files this system needs, and where they go.
+
+    Faction icons stay committed rather than uploaded, and not for want of
+    somewhere to put them: the weekly pairings image is rendered by a GitHub
+    Actions runner that checks this repo out at main (matplotlib is not in the
+    API image — see github_dispatch.py), so the PNGs have to be in git for the
+    post to have artwork. Uploading them would mean teaching that renderer to
+    fetch and cache remote files, and a slow fetch would degrade the one post a
+    club actually looks at.
+
+    So the compromise is: the app cannot place the files, but it can remove
+    every chance to get them wrong. This returns the exact slugified names,
+    both destinations, and which are already present on this machine.
+    """
+    system = db.get(SystemConfig, system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    folder = resolved_icon_folder(system) or (system.slug or "").upper()
+    factions = resolved_factions(system) or []
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    icons_dir = os.path.join(repo_root, "icons", folder)
+
+    items = []
+    for f in factions:
+        slug = _faction_icon_slug(f)
+        items.append({
+            "faction": f,
+            "slug": slug,
+            "png": f"{slug}.png",
+            "svg": f"{slug}.svg",
+            # Only the API side can be checked from here; the web repo is a
+            # different deployment and its files are not on this machine.
+            "png_present_in_api_repo": os.path.exists(
+                os.path.join(icons_dir, f"{slug}.png")
+            ),
+        })
+
+    return {
+        "system": system.name,
+        "icon_folder": folder,
+        "destinations": {
+            # The renderer reads PNGs off disk; matplotlib will not take an SVG.
+            "api_png": f"call-to-arms-api/icons/{folder}/",
+            # The browser prefers the SVG and falls back to the PNG.
+            "web": f"call-to-arms-web/static/icons/{folder}/",
+        },
+        "factions": items,
+        "missing_png_count": sum(1 for i in items if not i["png_present_in_api_repo"]),
+        "note": (
+            "A faction with no icon still pairs and still renders; it just has "
+            "no artwork beside its name."
+        ),
+    }
+
+
+# A wordmark is a few tens of KB. 3 MB is generous headroom and still stops an
+# accidental camera-roll drop reaching storage.
+MAX_SYSTEM_LOGO_BYTES = 3 * 1024 * 1024
+
+SYSTEM_LOGO_GUIDELINES = {
+    "formats": ["PNG", "WEBP"],
+    "max_size_mb": 3,
+    # The browser resizes to this before uploading, so it is a ceiling rather
+    # than a requirement. The existing committed logos run 600x157 to 1384x320
+    # and every slot renders them with object-fit: contain, so the width is
+    # what matters and the height just has to not be silly.
+    "max_width": 1200,
+    "max_height": 300,
+    "recommended": (
+        "A transparent PNG wordmark, landscape, around 3:1 to 4:1. It is "
+        "scaled down to fit 1200x300 before upload and never scaled up."
+    ),
+}
+
+
+@router.post("/platform/systems/{system_id}/logo")
+def upload_system_logo(
+    system_id: int,
+    image: UploadFile = File(...),
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Replace a system's logo.
+
+    Uploaded rather than committed, so adding a system no longer needs a deploy
+    to have artwork. The six committed logos in the web repo's static/logos are
+    untouched and still serve any system with no upload.
+    """
+    system = db.get(SystemConfig, system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="That file is empty.")
+    if len(data) > MAX_SYSTEM_LOGO_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"That image is over {MAX_SYSTEM_LOGO_BYTES // (1024 * 1024)} MB.",
+        )
+    try:
+        storage.extension_for(image.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    old_path = system.logo_path
+    try:
+        object_path, public_url = storage.upload_system_logo(
+            data, image.content_type, system_id
+        )
+    except RuntimeError as e:
+        capture(e, kind="system_logo_upload", system_id=system_id)
+        raise HTTPException(status_code=502, detail="Could not store the image. Try again.")
+
+    system.logo_path = object_path
+    system.logo_url = public_url
+    db.add(system)
+    log_audit(db, user, "system.logo", "system", system.id, system.name)
+    db.commit()
+    db.refresh(system)
+
+    # After the commit, and never allowed to fail it: the new logo is live
+    # either way, and an orphaned blob is cheaper than losing the row that
+    # points at the new one.
+    if old_path and old_path != object_path:
+        storage.delete_club_image(old_path)
+    return {"ok": True, "logo_url": system.logo_url}
+
+
+@router.delete("/platform/systems/{system_id}/logo")
+def delete_system_logo(
+    system_id: int,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Drop the uploaded logo. The system falls back to a committed
+    /logos/<slug>.png if one exists, which is how all six originals work."""
+    system = db.get(SystemConfig, system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="System not found.")
+    old_path = system.logo_path
+    system.logo_path = None
+    system.logo_url = None
+    db.add(system)
+    log_audit(db, user, "system.logo.delete", "system", system.id, system.name)
+    db.commit()
+    if old_path:
+        storage.delete_club_image(old_path)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
