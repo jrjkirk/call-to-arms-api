@@ -323,7 +323,34 @@ def public_stats(response: Response, session: Session = Depends(get_session)):
     clubs = session.exec(
         select(func.count()).select_from(Club).where(Club.active == True)
     ).one()
-    return {"players": players, "clubs": clubs}
+
+    # Games the app has actually arranged, for good, across every club and
+    # system. Two filters, both load-bearing:
+    #
+    #   b_signup_id IS NOT NULL   a bye is not a game. Nobody plays it.
+    #   published                 an unpublished week is a draft the admin can
+    #                             still regenerate, so counting it would make a
+    #                             "running total" jump around and sometimes go
+    #                             DOWN, which is the one thing a running total
+    #                             must never do.
+    #
+    # NOT filtered on Club.active, unlike the player count above, and the
+    # difference is deliberate: players answers "how many people use this now",
+    # where this answers "how many games has this arranged, ever". A club going
+    # quiet does not un-play its games.
+    games = session.exec(
+        select(func.count())
+        .select_from(Pairing)
+        .join(
+            PublishState,
+            (PublishState.week == Pairing.week)
+            & (PublishState.system == Pairing.system)
+            & (PublishState.club_id == Pairing.club_id),
+        )
+        .where(Pairing.b_signup_id.is_not(None))
+        .where(PublishState.published == True)
+    ).one()
+    return {"players": players, "clubs": clubs, "games": games}
 
 
 @app.get("/regions")
