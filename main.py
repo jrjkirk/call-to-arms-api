@@ -19,6 +19,7 @@ import club_emails
 from levels import levels_for_players
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
+from system_overrides import EffectiveSystem, effective_system
 from systems import (
     faction_groups_for,
     factions_for,
@@ -187,6 +188,10 @@ def list_systems(response: Response, club: Optional[str] = None, session: Sessio
 
 
 def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -> dict:
+    # The system as THIS club runs it. Falls back to the catalogue field by
+    # field wherever the club has expressed no opinion, so an unscoped call
+    # and a club that has customised nothing both see exactly the catalogue.
+    eff = EffectiveSystem(r, club_system)
     vibe_options = r.vibe_options
     default_vibe = r.default_vibe
     if club_system is not None and club_system.vibe_options:
@@ -203,15 +208,16 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
         "slug": r.slug,
         "name": r.name,
         "legacy_system_name": r.legacy_system_name,
-        "uses_points": r.uses_points,
-        "default_points": r.default_points,
-        "max_points": r.max_points,
+        "uses_points": eff.uses_points,
+        "default_points": eff.default_points,
+        "max_points": eff.max_points,
         "vibe_options": vibe_options,
         "default_vibe": default_vibe,
-        "uses_scenarios": r.uses_scenarios,
-        "scenario_options": r.scenario_options,
-        "default_scenario": r.default_scenario,
-        "allows_demo": r.allows_demo,
+        "uses_scenarios": eff.uses_scenarios,
+        "scenario_options": eff.scenario_options,
+        "default_scenario": eff.default_scenario,
+        "allows_demo": eff.allows_demo,
+        "uses_standby": eff.uses_standby,
         # Per-club reality when club context is available (does THIS club run
         # a league for this system — ClubSystem.league_enabled, the source of
         # truth since the modular-leagues work). If the call is club-scoped but
@@ -1256,6 +1262,10 @@ def get_pairings(
         signups_by_id = {s.id: s for s in rows}
 
     system_config = _get_system_config(session, system)
+    # Club-resolved: whether points are SHOWN on the pairings card has to match
+    # whether the club asked for them on the signup form.
+    if system_config is not None:
+        system_config = effective_system(session, club_id, system_config)
 
     # One pass for everyone in the week, rather than a query per player.
     player_levels = levels_for_players(

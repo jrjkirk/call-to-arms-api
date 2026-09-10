@@ -52,6 +52,7 @@ from levels import announce_level_ups, level_for
 from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate, _get_pairing_config, summarize_pairings
+from system_overrides import OVERRIDABLE_FIELDS as OVERRIDABLE_SYSTEM_FIELDS
 from systems import (
     factions_for,
     icon_folder_for,
@@ -3280,9 +3281,128 @@ def list_club_systems(
             "default_vibe": cs.default_vibe,
             "default_vibe_options": sc.vibe_options,
             "default_default_vibe": sc.default_vibe,
+            # Per-club overrides of the signup form. Each is null when this
+            # club has no opinion, paired with a catalogue_* value so the form
+            # can show what "inherited" actually resolves to rather than an
+            # empty box that means something.
+            **{f: getattr(cs, f) for f in OVERRIDABLE_SYSTEM_FIELDS},
+            "catalogue": {f: getattr(sc, f) for f in OVERRIDABLE_SYSTEM_FIELDS},
         }
         for cs, sc in rows
     ]
+
+
+# OVERRIDABLE_SYSTEM_FIELDS is system_overrides.OVERRIDABLE_FIELDS, imported
+# rather than restated so the API and the resolver cannot drift: a field the
+# resolver honours but the API refuses to set is invisible, and one the API
+# accepts but the resolver ignores is a lie.
+_OVERRIDE_BOOLS = {"uses_points", "uses_scenarios", "allows_demo",
+                   "uses_standby", "has_intro_prepass"}
+
+
+def _clean_system_overrides(raw: dict, catalogue: SystemConfig, existing=None) -> dict:
+    """Validate a club's overrides into the columns to write.
+
+    A key that is present with a null value CLEARS that override, which is how
+    the UI puts a field back to "inherit the catalogue". A key that is absent
+    is left alone. Both matter: without the first there is no way back to the
+    platform default once a club has set anything.
+    """
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Overrides must be an object.")
+    unknown = [k for k in raw if k not in OVERRIDABLE_SYSTEM_FIELDS]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"These cannot be set per club: {sorted(unknown)}.",
+        )
+
+    out: dict = {}
+    for field, value in raw.items():
+        if value is None:
+            out[field] = None
+            continue
+        if field in _OVERRIDE_BOOLS:
+            out[field] = bool(value)
+        elif field in ("default_points", "max_points"):
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{field} must be a whole number.")
+            if n < 0:
+                raise HTTPException(status_code=422, detail=f"{field} cannot be negative.")
+            if n > 100000:
+                raise HTTPException(status_code=422, detail=f"{field} is unrealistically large.")
+            out[field] = n
+        elif field == "scenario_options":
+            if not isinstance(value, list):
+                raise HTTPException(status_code=422, detail="scenario_options must be a list.")
+            names, seen = [], set()
+            for item in value:
+                name = str(item).strip()
+                if not name or name.lower() in seen:
+                    continue
+                if len(name) > 60:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Scenario names must be 60 characters or fewer: {name!r}.",
+                    )
+                seen.add(name.lower())
+                names.append(name)
+            # An empty list is how the UI clears the override, so store NULL
+            # rather than [] and keep one representation of "unset".
+            out[field] = names or None
+        elif field == "default_scenario":
+            out[field] = str(value).strip() or None
+        else:  # pragma: no cover - guarded by the unknown-key check above
+            raise HTTPException(status_code=422, detail=f"Unhandled field {field}.")
+
+    # Cross-field checks, run against the values that will actually be in
+    # force: an override merged over the catalogue, not the override alone. A
+    # club that sets only max_points still has to end up above the default it
+    # inherited.
+    def resolved(field):
+        """What this field will be after the write: the value being set, else
+        the club's existing override, else the catalogue."""
+        if field in out:
+            if out[field] is not None:
+                return out[field]
+            return getattr(catalogue, field)  # explicitly cleared
+        current = getattr(existing, field, None) if existing is not None else None
+        return current if current is not None else getattr(catalogue, field)
+
+    if resolved("uses_points"):
+        default_pts, max_pts = resolved("default_points"), resolved("max_points")
+        if max_pts is not None and default_pts is not None and default_pts > max_pts:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Default points ({default_pts}) cannot be above the maximum ({max_pts}).",
+            )
+
+    if resolved("uses_scenarios"):
+        options = resolved("scenario_options") or []
+        if not options:
+            raise HTTPException(
+                status_code=422,
+                detail="Turn scenarios on and there has to be at least one scenario to pick.",
+            )
+        chosen = resolved("default_scenario")
+        if chosen not in options:
+            # Only an error when the caller ASKED for this default. An
+            # inherited one going stale is the ordinary consequence of writing
+            # a new scenario list, and telling someone their save failed
+            # because of a value they did not send is not useful — so that
+            # case falls to the first scenario instead. Without the
+            # distinction, replacing a club's whole scenario list would be
+            # impossible in one call.
+            if "default_scenario" in out and out["default_scenario"] is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"The default scenario must be one of {options}.",
+                )
+            out["default_scenario"] = options[0]
+
+    return out
 
 
 class ClubSystemScheduleBody(BaseModel):
@@ -3296,6 +3416,11 @@ class ClubSystemScheduleBody(BaseModel):
     # clears the override (falls back to the catalogue default).
     vibe_options: Optional[list] = None
     default_vibe: Optional[str] = None
+    # Per-club overrides of the signup form. Sent as one object so "the client
+    # did not mention overrides at all" (omitted → None) stays distinguishable
+    # from "clear this one" (present, null). A flat field could not express
+    # both, and clearing an override is the operation that has to work.
+    overrides: Optional[dict] = None
 
 
 @router.post("/club-systems")
@@ -3401,6 +3526,17 @@ def update_club_system_schedule(
         )
     ).first()
 
+    # Signup-form overrides. Omitted leaves every one unchanged; a key present
+    # with a null value clears that one back to the catalogue. `existing` goes
+    # in because a partial update has to be checked against what will actually
+    # be in force: a club sending only scenario_options must still be told if
+    # the result leaves the scenarios it turned on last week with nothing to
+    # pick from.
+    override_fields = (
+        _clean_system_overrides(body.overrides, system, existing)
+        if body.overrides is not None else {}
+    )
+
     fields = dict(
         enabled=body.enabled,
         session_day=body.session_day,
@@ -3408,6 +3544,7 @@ def update_club_system_schedule(
         cadence_anchor=body.cadence_anchor,
         session_start_time=body.session_start_time,
         **vibe_fields,
+        **override_fields,
     )
     if existing:
         for k, v in fields.items():

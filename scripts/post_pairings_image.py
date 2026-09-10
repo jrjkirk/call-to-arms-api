@@ -17,6 +17,7 @@ import httpx
 from sqlmodel import Session, select
 
 from database import posting_enabled, discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
+from system_overrides import effective_system
 from models import Club, ClubSystem, Pairing, SystemConfig
 from admin import _collect_signups_for_rows, _pairing_rows_to_display
 # Qualified with the package name, not a bare sibling import: these modules
@@ -106,6 +107,10 @@ def post_pairings_image_for(db: Session, system: str, week: str, club_id: int) -
     # uses_points was being passed `system` — a non-empty string, so always
     # truthy. Harmless in practice (a system that doesn't use points has no
     # points on its signups) but it meant the flag never did anything.
+    # Club-resolved, so the posted image agrees with the signup form and the
+    # pairings page about whether this club plays this system to points.
+    if system_config is not None:
+        system_config = effective_system(db, club_id, system_config)
     uses_points = bool(system_config.uses_points) if system_config else False
 
     player_levels = levels_for_players(

@@ -30,6 +30,7 @@ from models import Pairing, PairingBlock, PairingConfig, Signup, SystemConfig
 from systems import resolved_faction_groups
 import vibes
 from signups import _effective_vibe_specs, _get_system_config
+from system_overrides import effective_system
 
 
 def _get_pairing_config(session: Session, club_id: int, system_id: int) -> PairingConfig:
@@ -429,6 +430,14 @@ def generate(
     config: SystemConfig = _get_system_config(session, system)
     if config is None:
         raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
+    # The system as THIS club runs it, not as the platform catalogue describes
+    # it. An override that reaches the signup form but not the matcher is worse
+    # than no override at all: a club that turns scenarios off would get a form
+    # with no scenario field and a matcher still scoring scenario agreement
+    # between two blank values. EffectiveSystem proxies everything it does not
+    # override, so config.id / config.recent_weeks / config.has_intro_prepass
+    # below are unchanged for every club that has customised nothing.
+    config = effective_system(session, club_id, config)
     pconfig: PairingConfig = _get_pairing_config(session, club_id, config.id)
     # How this club's vibes behave. Empty for a club that has only ever used the
     # canonical five, in which case nothing below changes.

@@ -25,6 +25,7 @@ import discord_guild
 from experience import summary as experience_summary
 from levels import progress as level_progress
 from auth import active_club_id, admin_scopes, require_user
+from system_overrides import effective_system
 from systems import SYSTEM_RULES
 from observability import capture
 
@@ -810,6 +811,10 @@ def submit_signup(
     config = _get_system_config(db, body.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    # As THIS club runs it. Everything below validates points, scenario, demo
+    # and standby against the club's own answers where it has given any, which
+    # is what the signup form was served and therefore what it may submit.
+    config = effective_system(db, club_id, config)
 
     _require_system_enabled(db, club_id, body.system)
 
@@ -1054,6 +1059,7 @@ def submit_prearranged(
     config = _get_system_config(db, body.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    config = effective_system(db, club_id, config)
 
     _require_system_enabled(db, club_id, body.system)
 

@@ -545,6 +545,30 @@ class ClubSystem(SQLModel, table=True):
     vibe_options: Optional[list] = Field(default=None, sa_column=Column(JSON))
     default_vibe: Optional[str] = None
 
+    # --- Per-club overrides of the platform catalogue (2026-09-10) -------
+    # NULL on every one of these means "no opinion, use SystemConfig". That is
+    # the same rule vibe_options above already follows, and it is load-bearing:
+    # it keeps the platform default LIVE, so a club that has never touched
+    # these still picks up a catalogue correction. Copying the catalogue values
+    # in at migration time would have looked equivalent and quietly frozen
+    # every club at the values of the day it was created.
+    #
+    # False is a real answer here, not an absent one ("we don't play to points
+    # on our Kill Team night"), which is why the booleans are nullable rather
+    # than defaulted. Resolved through system_overrides.EffectiveSystem, which
+    # the signup form, the validation in signups.py AND the matcher all read
+    # through: an override that reaches the form but not pairings_engine is
+    # worse than no override at all.
+    uses_points: Optional[bool] = None
+    default_points: Optional[int] = None
+    max_points: Optional[int] = None
+    uses_scenarios: Optional[bool] = None
+    scenario_options: Optional[list] = Field(default=None, sa_column=Column(JSON))
+    default_scenario: Optional[str] = None
+    allows_demo: Optional[bool] = None
+    uses_standby: Optional[bool] = None
+    has_intro_prepass: Optional[bool] = None
+
     # Per-club-system random mission pool (see the Mission table below).
     # missions_enabled off => the Call-to-Arms post keeps its pre-catalogue
     # behavior (hardcoded SCENARIO_DATA fallback in call_to_arms_content.py).
