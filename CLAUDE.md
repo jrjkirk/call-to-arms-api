@@ -179,20 +179,29 @@ fly status                  # machine health
 "optimise", or change the algorithm logic without explicit instruction.
 
 Key invariants:
-- **`_pair_dist` returns `(format_pen, last_opp_pen, block_pen, weighted_score)`.** `format_pen` bars a pairing across an **exclusive vibe** (a club-defined one such as The Old World's "Battle March", a smaller points game whose players must only meet each other). It ranks above the other two because pairing across formats produces a game nobody can play, where a block or a repeat produces one that is merely unwanted. It is `0` for every club that has not defined an exclusive vibe, so the tuple sorts exactly as it did before for everyone else. See `vibes.py`. `last_opp_pen`/`block_pen` stay hard, unconfigurable top-priority filters (admin blocks / "don't repeat last week's opponent"). `weighted_score` linearly combines the soft factors (intro, mirror, faction category, rematch, vibe, experience, eta, scenario, points) using per-(club,system) weights from `PairingConfig` (`models.py`), editable via admin UI sliders — `GET/POST /admin/pairing-config`. Do not change how `last_opp_pen`/`block_pen` dominate without explicit instruction.
-- **Intro games are a WEIGHT, not a pre-pass.** There used to be a sweep before
-  the matcher that paired anyone with the "Intro" vibe against anyone who had
-  ticked "I can lead an intro game", removed both from the pool, and ran on
-  `(vibe, experience, points)` distance alone — so it ignored blocks, last
-  week's opponent and exclusive vibes, and would pair a blocked pair while an
-  equally close unblocked teacher sat free. `PairingConfig.weight_intro`
-  (default 8.0, the highest weight there is) carries it now, through
-  `_pair_dist` like every other factor.
+- **`_pair_dist` returns `(format_pen, last_opp_pen, block_pen, intro_pen, weighted_score)`.** `format_pen` bars a pairing across an **exclusive vibe** (a club-defined one such as The Old World's "Battle March", a smaller points game whose players must only meet each other). It ranks above the other two because pairing across formats produces a game nobody can play, where a block or a repeat produces one that is merely unwanted. It is `0` for every club that has not defined an exclusive vibe, so the tuple sorts exactly as it did before for everyone else. See `vibes.py`. `last_opp_pen`/`block_pen` stay hard, unconfigurable top-priority filters (admin blocks / "don't repeat last week's opponent"). `intro_pen` sits below all three and above every soft factor (see the intro-games bullet below). `weighted_score` linearly combines the soft factors (mirror, faction category, rematch, vibe, experience, eta, scenario, points) using per-(club,system) weights from `PairingConfig` (`models.py`), editable via admin UI sliders — `GET/POST /admin/pairing-config`. Do not change how `last_opp_pen`/`block_pen` dominate without explicit instruction.
+- **Intro games are a TIER, not a pre-pass and not a weight.** The whole rule:
+  *if a legal teacher is free, the player who asked to be taught gets one; if
+  not, they are matched on everything else exactly as anyone would be.* A player
+  asks by picking the **Intro vibe**; a player offers by ticking **"I can lead
+  an intro game"** (`Signup.can_demo`). `intro_pen` in `_pair_dist` carries it —
+  nothing configurable, because there is no sensible middle setting between yes
+  and no.
+  - It briefly WAS a weight, with a 0-10 slider. That was the wrong shape for
+    the question: every club would have left it at maximum or dragged it to
+    zero, and the positions in between were a choice nobody could act on.
+  - There used to be a sweep before the matcher instead, pairing seekers with
+    teachers and removing both from the pool. It ran on `(vibe, experience,
+    points)` distance alone, with `blocks` and `last_opp_pairs` not even in
+    scope, so it would pair a blocked pair while an equally close unblocked
+    teacher sat free.
   - **Intro seekers sort to the FRONT of the candidate list**, and that line is
     load-bearing. Matching is greedy, so whoever is considered first gets first
     pick; an Intro vibe is not "Casual", so those players used to sort last and
     every teacher was gone by the time they were reached. Removing the pre-pass
-    without that sort would have made intro games worse, not better.
+    without that sort would have made intro games worse, not better. `intro_pen`
+    decides WHO a seeker takes; the sort is what gets them there while a teacher
+    is still free.
   - `SystemConfig.has_intro_prepass` is **no longer read** by anything. Whether
     a system runs intro games follows what its signup form offers: the Intro
     vibe, and `allows_demo` for the teach checkbox. A third flag could disagree

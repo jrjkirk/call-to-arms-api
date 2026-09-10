@@ -5,11 +5,15 @@ Two controls make an intro game possible. A player asks for one by picking the
 (can_demo). Whether the matcher does anything about it used to be a THIRD flag,
 has_intro_prepass, which could silently disagree with both.
 
-The pre-pass it drove ran before the matcher: it paired each seeker with the
-nearest teacher, removed both from the pool, and the matcher never saw them. It
-scored on (vibe, experience, points) distance and nothing else, so `blocks` and
-`last_opp_pairs` were not in scope. Block 2 is the bug that came from that, and
-is the reason this is a weight now.
+The rule now IS the whole feature: if a legal teacher is free, the seeker gets
+one; if not, they are matched on everything else exactly as anyone would be.
+That is a tier in _pair_dist, below blocks and above every soft factor, so
+there is nothing to configure and no middle setting to get wrong.
+
+The pre-pass it replaced ran before the matcher, paired each seeker with the
+nearest teacher and removed both from the pool. It scored (vibe, experience,
+points) distance and nothing else, so `blocks` and `last_opp_pairs` were not in
+scope. Block 2 is the bug that came from that.
 
 Run: PYTHONPATH=. python tests/test_intro_games.py
 """
@@ -25,7 +29,7 @@ from sqlmodel import Session, SQLModel, select  # noqa: E402
 
 import database  # noqa: E402
 from models import (  # noqa: E402
-    Club, ClubSystem, Pairing, PairingBlock, PairingConfig, Player, Signup, SystemConfig,
+    Club, ClubSystem, Pairing, PairingBlock, Player, Signup, SystemConfig,
 )
 from pairings_engine import generate  # noqa: E402
 
@@ -53,7 +57,7 @@ with Session(database.engine) as db:
     db.commit()
 
 
-def setup(people, blocks=(), weight=None):
+def setup(people, blocks=()):
     """people: (name, vibe, can_demo). Everything else is identical between
     them, so the intro weight is the only thing that can decide a pairing."""
     with Session(database.engine) as db:
@@ -72,14 +76,6 @@ def setup(people, blocks=(), weight=None):
         for a, b in blocks:
             lo, hi = sorted([a, b])
             db.add(PairingBlock(player_a_id=lo, player_b_id=hi, club_id=1))
-        cfg = db.exec(select(PairingConfig).where(PairingConfig.club_id == 1)).first()
-        if weight is not None:
-            if cfg is None:
-                cfg = PairingConfig(club_id=1, system_id=1)
-            cfg.weight_intro = weight
-            db.add(cfg)
-        elif cfg is not None:
-            db.delete(cfg)
         db.commit()
 
 
@@ -132,47 +128,49 @@ p = pairs()
 check("the two of them can be paired", frozenset({"Ann", "Eve"}) in p, str(p))
 
 
-print("\n5. It outranks every other soft factor, and no hard one")
+print("\n5. It outranks every soft factor, and no hard one")
+# The tier sits below format, last opponent and blocks, and above the entire
+# weighted score, so a mirror match or a vibe mismatch never costs a newcomer
+# their teacher...
 setup([("Ann", "Intro", False), ("Bob", "Casual", True), ("Cat", "Casual", False)])
-check("the default weight is above mirror, the next highest",
-      PairingConfig().weight_intro > PairingConfig().weight_mirror,
-      f"{PairingConfig().weight_intro} vs {PairingConfig().weight_mirror}")
+p = pairs()
+check("a teacher is taken over a same-faction, same-vibe alternative",
+      frozenset({"Ann", "Bob"}) in p, str(p))
 
-# With the only teacher blocked, the block still wins: a block is a tier above
-# the weighted score entirely, which is exactly what the pre-pass ignored.
+# ...but with the only teacher blocked, the block still wins. That is the whole
+# difference from the pre-pass, which had no idea blocks existed.
 setup([("Ann", "Intro", False), ("Bob", "Casual", True), ("Cat", "Casual", False),
        ("Dan", "Casual", False)],
       blocks=[(1, 2)])
 p = pairs()
-check("a block beats the intro weight, however high it is",
-      frozenset({"Ann", "Bob"}) not in p, str(p))
+check("a block beats the intro rule", frozenset({"Ann", "Bob"}) not in p, str(p))
 check("and Ann still gets a game, just not a taught one",
       any("Ann" in x and len(x) == 2 for x in p), str(p))
 
 
-print("\n6. Turning the weight off returns to indifference")
+print("\n6. With no teacher in the room, nothing changes for anyone")
+# The other half of the rule, and what makes it safe to have no switch at all:
+# a seeker with nobody to learn from is matched on the ordinary factors, not
+# held back and not given a BYE.
 setup([("Ann", "Intro", False), ("Bob", "Casual", False),
-       ("Cat", "Casual", True), ("Dan", "Casual", False)], weight=0.0)
-off = pairs()
-setup([("Ann", "Intro", False), ("Bob", "Casual", False),
-       ("Cat", "Casual", True), ("Dan", "Casual", False)], weight=8.0)
-on = pairs()
-check("with it off, Ann takes the first candidate rather than the teacher",
-      frozenset({"Ann", "Cat"}) not in off, str(off))
-check("with it on, she gets the teacher", frozenset({"Ann", "Cat"}) in on, str(on))
+       ("Cat", "Casual", False), ("Dan", "Casual", False)])
+none_free = pairs()
+check("everyone is paired", sum(len(x) for x in none_free) == 4, str(none_free))
+check("Ann has a real opponent",
+      any("Ann" in x and len(x) == 2 for x in none_free), str(none_free))
 
 
-print("\n7. A system with no intro vibe is untouched")
-# Nobody can be a seeker, so the flag is 0 for every pair and the weight is
-# inert no matter what it is set to.
+print("\n7. A system with no intro seekers is untouched")
+# Nobody can be a seeker, so the tier is 0 for every pair and the tuple sorts
+# exactly as it did before intro matching existed.
 setup([("Ann", "Casual", False), ("Bob", "Casual", True),
-       ("Cat", "Casual", False), ("Dan", "Casual", False)], weight=0.0)
-none_off = pairs()
-setup([("Ann", "Casual", False), ("Bob", "Casual", True),
-       ("Cat", "Casual", False), ("Dan", "Casual", False)], weight=10.0)
-none_on = pairs()
-check("pairings are identical at weight 0 and weight 10",
-      none_off == none_on, f"{none_off} vs {none_on}")
+       ("Cat", "Casual", False), ("Dan", "Casual", False)])
+plain = pairs()
+check("everyone is paired on the ordinary factors",
+      sum(len(x) for x in plain) == 4, str(plain))
+check("and offering to teach costs the teacher nothing",
+      any("Bob" in x and len(x) == 2 for x in plain), str(plain))
+
 
 print(f"\n{'ALL PASS' if not FAILURES else str(len(FAILURES)) + ' FAILURE(S): ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

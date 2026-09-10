@@ -2583,7 +2583,6 @@ def save_league_config(
 
 def _pairing_config_row(cfg: PairingConfig) -> dict:
     return {
-        "weight_intro": cfg.weight_intro,
         "weight_mirror": cfg.weight_mirror,
         "weight_faction_group": cfg.weight_faction_group,
         "weight_rematch": cfg.weight_rematch,
@@ -2618,16 +2617,6 @@ def get_pairing_config(
         # weight is inert without them, so the UI hides that slider rather
         # than offering a control that provably does nothing.
         "has_faction_groups": bool(resolved_faction_groups(config)),
-        # Whether this system offers intro games at all: the Intro vibe to ask
-        # for one, and the checkbox to offer to teach one. Without both there
-        # can be no seeker or no teacher, so the weight is inert and the
-        # slider is not shown. This IS the on/off switch now — there is no
-        # separate flag that could disagree with the form.
-        "has_intro_games": bool(
-            config.allows_demo
-            and any(str(v).strip().lower() == "intro"
-                    for v in _effective_vibe_config(db, user.club_id, config)[0] or [])
-        ),
         # Platform defaults shown as placeholders when the club hasn't overridden
         # the rematch windows.
         "default_recent_weeks": config.recent_weeks,
@@ -2638,7 +2627,6 @@ def get_pairing_config(
 
 class PairingConfigBody(BaseModel):
     system: str
-    weight_intro: float = 8.0
     weight_mirror: float = 5.0
     weight_faction_group: float = 1.0
     weight_rematch: float = 3.0

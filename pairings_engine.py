@@ -1,12 +1,14 @@
 """Pairing generation engine — faithful port of the original Streamlit matcher.
 
-_pair_dist returns (format_pen, last_opp_pen, block_pen, weighted_score).
-format_pen bars a pairing across an exclusive vibe. last_opp_pen and
-block_pen remain hard, unconfigurable top-priority filters (admin blocks /
-"don't repeat last week's opponent" are safety rules, not taste). The soft
-factors (intro games, mirror faction, same faction category, rematch history,
-vibe, experience, eta, scenario, points) are combined into weighted_score using
-per-(club,system) weights from
+_pair_dist returns (format_pen, last_opp_pen, block_pen, intro_pen,
+weighted_score). format_pen bars a pairing across an exclusive vibe.
+last_opp_pen and block_pen remain hard, unconfigurable top-priority filters
+(admin blocks / "don't repeat last week's opponent" are safety rules, not
+taste). intro_pen sits below all three and above every soft factor: a player
+who asked to be taught takes a teacher if any legal one is free, and falls
+through to the ordinary factors if none is. The soft factors (mirror faction,
+same faction category, rematch history, vibe, experience, eta, scenario,
+points) are combined into weighted_score using per-(club,system) weights from
 PairingConfig (see models.py) — admin-configurable via sliders in the web UI.
 Do NOT reorder or change how last_opp_pen/block_pen dominate — that ordering
 is still load-bearing.
@@ -290,12 +292,18 @@ def _intro_flag(a: MatcherSignup, b: MatcherSignup) -> int:
     A seeker who can also teach satisfies the other's need, so can_demo is
     checked on its own rather than excluding seekers from the teacher side.
 
-    This REPLACED the intro pre-pass, which ran before the matcher and paired
-    seekers with teachers directly. That pass scored on (vibe, experience,
-    points) distance and nothing else: `blocks` and `last_opp_pairs` were not
-    in scope, so it would pair two players an admin had blocked while an
-    equally close unblocked teacher sat free. Being a weight means going
-    through the same path as every other factor and inheriting all of them.
+    This is a TIER in the distance tuple, not a weighted factor, because there
+    was never a sensible middle setting. "How much would you like a newcomer to
+    be taught" only has two answers, and a slider offering ninety-eight others
+    is a question nobody can act on. As a tier the rule states itself: if a
+    teacher is free and legal, the seeker gets one; if not, they are matched on
+    everything else exactly as they would have been.
+
+    It ranks BELOW format, last opponent and blocks, so a block still wins — the
+    thing the old intro pre-pass got wrong. That pass ran before the matcher and
+    scored (vibe, experience, points) distance alone, with `blocks` and
+    `last_opp_pairs` not even in scope, so it would pair two players an admin
+    had blocked while an equally close unblocked teacher sat free.
     """
     a_seeks = (a.row.vibe or "").strip().lower() == "intro"
     b_seeks = (b.row.vibe or "").strip().lower() == "intro"
@@ -406,7 +414,8 @@ def _pair_dist(
     )
     mir = _mirror_flag(ms, other)
     same_group = _same_group_flag(ms, other, group_of or {})
-    intro_unmet = _intro_flag(ms, other)
+    # A tier of its own below, not part of the score.
+    intro_pen = _intro_flag(ms, other)
 
     pair_key = tuple(sorted([ms.key, other.key]))
     if pair_key in seen_recent:
@@ -423,8 +432,7 @@ def _pair_dist(
     dp = 0 if not config.uses_points else abs(ms.preference[2] - other.preference[2])
 
     score = (
-        pconfig.weight_intro * intro_unmet
-        + pconfig.weight_mirror * mir
+        pconfig.weight_mirror * mir
         + pconfig.weight_faction_group * same_group
         + pconfig.weight_rematch * rematch_p
         + pconfig.weight_vibe * dv
@@ -434,7 +442,7 @@ def _pair_dist(
         + (pconfig.weight_points * dp if config.uses_points else 0)
     )
 
-    return (format_pen, last_opp_pen, block_pen, score)
+    return (format_pen, last_opp_pen, block_pen, intro_pen, score)
 
 
 # ---------------------------------------------------------------------------
@@ -524,11 +532,16 @@ def generate(
     # admin had explicitly blocked while an equally close unblocked teacher
     # sat free.
     #
-    # PairingConfig.weight_intro carries it instead, applied in _pair_dist
-    # like every other factor, so blocks, last week's opponent and exclusive
-    # vibes all apply to an intro game as they do to any other. It is
-    # defaulted above every other weight, so on a night with a teacher free
-    # the result is what the pre-pass would have produced.
+    # _pair_dist carries it instead, as a tier below blocks and above every
+    # soft factor: a seeker takes a teacher whenever a legal one is free, and
+    # falls through to the ordinary factors when none is. Blocks, last week's
+    # opponent and exclusive vibes therefore apply to an intro game as they do
+    # to any other, which is what the pre-pass got wrong.
+    #
+    # A tier rather than a weight because there is no sensible middle setting:
+    # the answer to "should a newcomer be taught" is yes or no, and a slider
+    # offering ninety-eight positions between them is a question nobody can
+    # act on.
     #
     # config.has_intro_prepass is deliberately no longer read. Intro matching
     # follows what the signup form actually offers (the Intro vibe and the

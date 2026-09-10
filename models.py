@@ -274,8 +274,11 @@ class LeagueConfig(SQLModel, table=True):
 class PairingConfig(SQLModel, table=True):
     """Pairing weighting configuration for one club's system. One row per
     (club_id, system_id). Weights combine the soft matchmaking factors
-    (intro games, mirror faction, same faction category, rematch history,
-    vibe, experience, eta, scenario, points) into a single score for ranking candidate opponents — see
+    (mirror faction, same faction category, rematch history, vibe,
+    experience, eta, scenario, points) into a single score.
+    Intro games are NOT here: a player asking to be taught takes a teacher
+    whenever a legal one is free, which is a tier in pairings_engine._pair_dist
+    rather than a number, because there is no sensible middle setting for ranking candidate opponents — see
     pairings_engine._pair_dist(). Defaults approximate the original
     lexicographic priority order (mirror > rematch > vibe > experience >
     eta > scenario > points) but are not a byte-exact reproduction of it.
@@ -291,19 +294,6 @@ class PairingConfig(SQLModel, table=True):
     # 0-10 scale (arbitrary magnitude units — only the ratios between them
     # matter, not the absolute range). Defaults approximate the original
     # priority order at 1/10th the earlier 0-100-scale values.
-    # How hard to insist that a player asking for an intro game gets someone
-    # who offered to teach one. Defaulted ABOVE every other weight, mirror
-    # included, because this is the one factor about a person rather than a
-    # preference: a newcomer put opposite another newcomer has nobody to show
-    # them the game, and that is the outcome the whole feature exists to
-    # prevent. Blocks and last-week's-opponent still outrank it, being separate
-    # tiers above the score entirely.
-    #
-    # Replaced the intro PRE-PASS, which paired seekers with teachers before
-    # the matcher ran and therefore ignored blocks, last opponent and exclusive
-    # vibes. As a weight it goes through the same path as everything else and
-    # inherits all of them. Set it to 0 to switch intro matching off.
-    weight_intro: float = 8.0
     weight_mirror: float = 5.0
     # How hard to avoid pairing two factions from the SAME authored category
     # (Middle Earth's Good/Evil, Bolt Action's Axis/Allies). Only has any

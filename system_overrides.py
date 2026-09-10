@@ -54,11 +54,11 @@ OVERRIDABLE_FIELDS = (
     "allows_demo",
     "uses_standby",
 )
-# has_intro_prepass was here until the intro pre-pass was replaced by
-# PairingConfig.weight_intro. Nothing reads the column on either table now:
-# whether a system runs intro games follows what its signup form offers, the
-# Intro vibe and the teach checkbox, and how hard the matcher tries is the
-# weight. Both columns are left in place rather than dropped.
+# has_intro_prepass was here until the intro pre-pass was replaced. Nothing
+# reads the column on either table now: whether a system runs intro games
+# follows what its signup form offers, the Intro vibe and the teach checkbox,
+# and the matching itself is a tier in pairings_engine._pair_dist rather than
+# anything configurable. Both columns are left in place rather than dropped.
 
 
 def _is_set(value) -> bool:
