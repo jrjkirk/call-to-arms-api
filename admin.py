@@ -2583,6 +2583,7 @@ def save_league_config(
 def _pairing_config_row(cfg: PairingConfig) -> dict:
     return {
         "weight_mirror": cfg.weight_mirror,
+        "weight_faction_group": cfg.weight_faction_group,
         "weight_rematch": cfg.weight_rematch,
         "weight_vibe": cfg.weight_vibe,
         "weight_experience": cfg.weight_experience,
@@ -2611,6 +2612,10 @@ def get_pairing_config(
     return {
         "uses_scenarios": config.uses_scenarios,
         "uses_points": config.uses_points,
+        # Whether this system HAS faction categories at all. The category
+        # weight is inert without them, so the UI hides that slider rather
+        # than offering a control that provably does nothing.
+        "has_faction_groups": bool(resolved_faction_groups(config)),
         # Platform defaults shown as placeholders when the club hasn't overridden
         # the rematch windows.
         "default_recent_weeks": config.recent_weeks,
@@ -2622,6 +2627,7 @@ def get_pairing_config(
 class PairingConfigBody(BaseModel):
     system: str
     weight_mirror: float = 5.0
+    weight_faction_group: float = 1.0
     weight_rematch: float = 3.0
     weight_vibe: float = 1.5
     weight_experience: float = 0.8

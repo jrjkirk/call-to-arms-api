@@ -4,8 +4,9 @@ _pair_dist returns (format_pen, last_opp_pen, block_pen, weighted_score).
 format_pen bars a pairing across an exclusive vibe. last_opp_pen and
 block_pen remain hard, unconfigurable top-priority filters (admin blocks /
 "don't repeat last week's opponent" are safety rules, not taste). The soft
-factors (mirror faction, rematch history, vibe, experience, eta, scenario,
-points) are combined into weighted_score using per-(club,system) weights from
+factors (mirror faction, same faction category, rematch history, vibe,
+experience, eta, scenario, points) are combined into weighted_score using
+per-(club,system) weights from
 PairingConfig (see models.py) — admin-configurable via sliders in the web UI.
 Do NOT reorder or change how last_opp_pen/block_pen dominate — that ordering
 is still load-bearing.
@@ -26,6 +27,7 @@ from sqlmodel import select
 
 from database import scoped
 from models import Pairing, PairingBlock, PairingConfig, Signup, SystemConfig
+from systems import resolved_faction_groups
 import vibes
 from signups import _effective_vibe_specs, _get_system_config
 
@@ -275,6 +277,48 @@ def _mirror_flag(a: MatcherSignup, b: MatcherSignup) -> int:
     return 1 if (af and bf and af == bf) else 0
 
 
+def _faction_group_index(config: SystemConfig) -> dict:
+    """Lowercased faction name -> its category label, or {} for a flat system.
+
+    Built once per generate/preview call rather than per candidate pair: this
+    walks the whole faction list, and Middle Earth has ninety-five of them
+    against a candidate loop that is quadratic in signups.
+
+    Reads through resolved_faction_groups so an authored system (categories set
+    in the platform admin UI) and a code-backed one (systems/middle_earth.py)
+    behave identically. A system with no categories yields {}, which makes
+    _same_group_flag return 0 for every pair and leaves the weight inert.
+    """
+    groups = resolved_faction_groups(config) or []
+    index: dict = {}
+    for g in groups:
+        label = (g or {}).get("label")
+        for f in (g or {}).get("factions", []) or []:
+            key = str(f).lower().strip()
+            if key and label:
+                # First category wins if a faction is listed twice. Authoring
+                # validates against that, but the code modules were never
+                # checked, and a duplicate must not have its answer decided by
+                # dictionary ordering.
+                index.setdefault(key, label)
+    return index
+
+
+def _same_group_flag(a: MatcherSignup, b: MatcherSignup, group_of: dict) -> int:
+    """1 when both armies sit in the same category (Good vs Good, Axis vs Axis).
+
+    Zero whenever either faction is unset or unknown — a player who has not
+    picked yet, or one carrying a historical faction name no longer in the
+    list, must not be shoved around by a category nobody can see. Zero is the
+    "no opinion" value here, exactly as it is for mirror.
+    """
+    if not group_of:
+        return 0
+    ag = group_of.get((a.row.faction or "").lower().strip())
+    bg = group_of.get((b.row.faction or "").lower().strip())
+    return 1 if (ag is not None and ag == bg) else 0
+
+
 # Lowercased. Both spellings of the "happy with anything" vibe — see
 # signups.OLD_VIBE_ALIASES.
 _FLEXIBLE_VIBES = {"open", "either"}
@@ -303,6 +347,7 @@ def _pair_dist(
     config: SystemConfig,
     pconfig: PairingConfig,
     vibe_specs: list = (),
+    group_of: dict = None,
 ) -> tuple:
     # An exclusive vibe (a club-defined one like "Battle March") is a different
     # game, not a preference: a 1000pt list cannot play a 2000pt one. It ranks
@@ -329,6 +374,7 @@ def _pair_dist(
         else 0
     )
     mir = _mirror_flag(ms, other)
+    same_group = _same_group_flag(ms, other, group_of or {})
 
     pair_key = tuple(sorted([ms.key, other.key]))
     if pair_key in seen_recent:
@@ -346,6 +392,7 @@ def _pair_dist(
 
     score = (
         pconfig.weight_mirror * mir
+        + pconfig.weight_faction_group * same_group
         + pconfig.weight_rematch * rematch_p
         + pconfig.weight_vibe * dv
         + pconfig.weight_experience * de
@@ -386,6 +433,9 @@ def generate(
     # How this club's vibes behave. Empty for a club that has only ever used the
     # canonical five, in which case nothing below changes.
     vibe_specs = _effective_vibe_specs(session, club_id, config)
+    # Faction categories, for the "don't put Good against Good" nudge. Empty
+    # dict for every flat-list system, which is most of them.
+    group_of = _faction_group_index(config)
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -543,7 +593,7 @@ def generate(
             if has_played(ms, other):
                 continue
             d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks,
-                           last_opp_pairs, config, pconfig, vibe_specs)
+                           last_opp_pairs, config, pconfig, vibe_specs, group_of)
             if best_dist is None or d < best_dist:
                 best_dist = d
                 best_j = j
@@ -559,7 +609,7 @@ def generate(
                 if other.key in used:
                     continue
                 d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks,
-                           last_opp_pairs, config, pconfig, vibe_specs)
+                           last_opp_pairs, config, pconfig, vibe_specs, group_of)
                 if best_dist is None or d < best_dist:
                     best_dist = d
                     best_j = j

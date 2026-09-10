@@ -274,8 +274,8 @@ class LeagueConfig(SQLModel, table=True):
 class PairingConfig(SQLModel, table=True):
     """Pairing weighting configuration for one club's system. One row per
     (club_id, system_id). Weights combine the soft matchmaking factors
-    (mirror faction, rematch history, vibe, experience, eta, scenario,
-    points) into a single score for ranking candidate opponents — see
+    (mirror faction, same faction category, rematch history, vibe,
+    experience, eta, scenario, points) into a single score for ranking candidate opponents — see
     pairings_engine._pair_dist(). Defaults approximate the original
     lexicographic priority order (mirror > rematch > vibe > experience >
     eta > scenario > points) but are not a byte-exact reproduction of it.
@@ -292,6 +292,15 @@ class PairingConfig(SQLModel, table=True):
     # matter, not the absolute range). Defaults approximate the original
     # priority order at 1/10th the earlier 0-100-scale values.
     weight_mirror: float = 5.0
+    # How hard to avoid pairing two factions from the SAME authored category
+    # (Middle Earth's Good/Evil, Bolt Action's Axis/Allies). Only has any
+    # effect on a system that defines faction_groups; for the flat-list
+    # systems the flag is always 0 and the weight is inert.
+    #
+    # Defaulted below vibe (1.5) on purpose. Good-vs-Good is a thematic
+    # disappointment; Casual-vs-Competitive is a bad evening. The nudge should
+    # not outrank what kind of game someone asked for.
+    weight_faction_group: float = 1.0
     weight_rematch: float = 3.0
     weight_vibe: float = 1.5
     weight_experience: float = 0.8
