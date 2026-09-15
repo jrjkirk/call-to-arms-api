@@ -68,7 +68,7 @@ from database import (
     resolve_request_club_id, scoped,
 )
 from identity import (
-    DISCORD, ProviderProfile, bump_session_version, create_user_for_profile,
+    AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, create_user_for_profile,
     display_name_for, find_user_for_profile, identity_for, record_sign_in,
 )
 from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
@@ -767,6 +767,57 @@ def create_profile(
     db.commit()
     db.refresh(player)
     return {"ok": True, "player_id": player.id}
+
+
+@router.get("/account")
+def account(
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Everything the account page shows: the account, the ways into it, and
+    the player it owns at each club.
+
+    Only the signed-in account's own data. `can_add` lists the sign-in methods
+    the app offers that this account doesn't have yet, which is what drives the
+    "add another way to sign in" nudge; it is empty while Discord is the only
+    method.
+    """
+    identities = db.exec(
+        select(UserIdentity).where(UserIdentity.user_id == user.id)
+        .order_by(UserIdentity.provider, UserIdentity.is_primary.desc(), UserIdentity.created_at)
+    ).all()
+    rows = db.exec(
+        select(Player, Club).join(Club, Club.id == Player.club_id)
+        .where(Player.user_id == user.id)
+        .order_by(Club.name)
+    ).all()
+    have = {i.provider for i in identities}
+    return {
+        "user": {**_user_out(user), "created_at": user.created_at},
+        "identities": [
+            {
+                "id": i.id,
+                "provider": i.provider,
+                "name": i.name,
+                "avatar_url": i.avatar_url,
+                "email": i.email,
+                "is_primary": i.is_primary,
+                "created_at": i.created_at,
+                "last_used_at": i.last_used_at,
+            }
+            for i in identities
+        ],
+        "players": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "active": p.active,
+                "club": {"id": c.id, "slug": c.slug, "name": c.name},
+            }
+            for p, c in rows
+        ],
+        "can_add": [p for p in AVAILABLE_PROVIDERS if p not in have],
+    }
 
 
 @router.post("/logout")

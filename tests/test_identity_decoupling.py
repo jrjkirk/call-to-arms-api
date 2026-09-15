@@ -284,6 +284,32 @@ with Session(database.engine) as db:
     check("and the mirror is written", owner and owner.discord_id == "d-legacy")
 
 
+print("\n10. /auth/account (Slab 2) shows only the signed-in account's own data")
+client.cookies.clear()
+check("needs a session", client.get("/auth/account").status_code == 401)
+with Session(database.engine) as db:
+    admin = db.get(User, 1)
+    db.add(Club(id=7, name="Away Club", slug="away"))
+    db.add(Player(id=70, name="Joel Away", club_id=7, user_id=1, active=False))
+    db.add(Player(id=71, name="Someone Else", club_id=7, user_id=2))
+    db.commit()
+    session_v = admin.session_version or 0
+client.cookies.set("cta_session", auth._make_session_cookie(1, session_v))
+acct = client.get("/auth/account").json()
+check("the account, in the explicit shape", acct["user"]["id"] == 1 and "session_version" not in acct["user"])
+provs = [(i["provider"], i["name"], i["is_primary"]) for i in acct["identities"]]
+check("both Discord identities, primary first",
+      [p[2] for p in provs] == [True, False] and all(p[0] == "discord" for p in provs), str(provs))
+check("its own players at every club, archived ones included",
+      sorted((p["name"], p["active"], p["club"]["slug"]) for p in acct["players"]) == [("Joel Away", False, "away")],
+      str(acct["players"]))
+check("nothing to add while Discord is the only sign-in method", acct["can_add"] == [])
+auth.AVAILABLE_PROVIDERS = ("discord", "google")
+check("the nudge appears by itself once another method exists",
+      client.get("/auth/account").json()["can_add"] == ["google"])
+auth.AVAILABLE_PROVIDERS = ("discord",)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED")

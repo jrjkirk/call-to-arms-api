@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0 and 1 BUILT, not migrated or deployed (2026-09-15). Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0 and 1 LIVE (2026-09-15). Slab 2 BUILT, not deployed. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -261,11 +261,16 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
    `USER_REFERENCES` (checked against live metadata, so a new column can't be silently
    orphaned). No schema change. Known cases once Slab 0 is live: Shaun (users 26, 60?, 69),
    and the 6 accounts owning no player. Link/unlink (Slab 6) calls it.
-2. **`/account` page** (frontend, greenfield). Needs: 0. Identities on the account, display
-   name, player profiles per club, sign out everywhere. **Plus the nudge (way out 1 of the
-   C/D conflict):** every account with only a Discord identity is prompted to add Google or
-   an email while signed in, which is what makes the §8 C prompt reach Discord regulars.
-   The nudge button goes live when 4 or 5 does.
+2. **`/account` page** (frontend, greenfield). Needs: 0. BUILT: `GET /auth/account` (the
+   account, its identities, its player at each club, `can_add`) and web `/account`
+   (sign-in methods with the primary marked "Tagged in posts" when there is more than one,
+   player profiles per club with archived shown, sign out everywhere with a confirm step),
+   linked from the account menu. **The nudge (way out 1 of the C/D conflict)** renders when
+   `can_add` is non-empty, i.e. when `identity.AVAILABLE_PROVIDERS` lists a method the account
+   lacks. Discord is the only entry, so it is hidden with no flag to flip. Its button goes to
+   `/auth/<provider>/link`: **a provider must not join `AVAILABLE_PROVIDERS` until that route
+   exists** (4/5 add the provider, 6 adds linking; add it to the list in 6, or give 4/5 their
+   own link route). Display name is shown, not yet editable (Slab 3).
 3. **Display name you own.** Needs: 0, 2. Edit `users.display_name` on `/account`; sweep the
    greeting/picker sites (§5) to show `display_name` with the Discord handle beside it where
    admins need to recognise someone.

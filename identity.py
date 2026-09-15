@@ -24,6 +24,14 @@ from models import User, UserIdentity
 
 DISCORD = "discord"
 
+# The sign-in methods the app offers right now. /account nudges a Discord-only
+# account to add one of the others (ACCOUNT_OVERHAUL.md §8, the C/D conflict),
+# so the nudge appears by itself when Google or email is added here, and not
+# before: there is nothing to add yet. The nudge's button goes to
+# /auth/<provider>/link, so a provider joins this list only once that route
+# exists (Slabs 4-6).
+AVAILABLE_PROVIDERS: tuple[str, ...] = (DISCORD,)
+
 
 @dataclass
 class ProviderProfile:
