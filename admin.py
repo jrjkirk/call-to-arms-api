@@ -350,6 +350,10 @@ def admin_players(
     if not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Super-admin access required.")
     players = db.exec(scoped(Player, user.club_id).order_by(Player.name)).all()
+    owner_ids = {p.user_id for p in players if p.user_id is not None}
+    owners = {
+        u.id: u for u in db.exec(select(User).where(User.id.in_(owner_ids))).all()
+    } if owner_ids else {}
     return [
         {
             "id": p.id,
@@ -362,10 +366,38 @@ def admin_players(
             # affects a real person who is logged in right now, while an
             # unclaimed row is just a roster entry nobody has taken.
             "claimed": p.user_id is not None,
+            # The name the owning account chose for itself, if any, so an admin
+            # can see it beside the roster name and reset it if it's abusive.
+            "account_name": owners[p.user_id].display_name if p.user_id in owners else None,
             "admin_notes": p.admin_notes,
         }
         for p in players
     ]
+
+
+@router.post("/players/{player_id}/reset-account-name")
+def reset_player_account_name(
+    player_id: int,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_session),
+):
+    """Clear the name the account owning this player chose, so it goes by its
+    Discord handle again. For a name that shouldn't be there; the player's
+    roster name is edited through PATCH /admin/players/{id} as always.
+    """
+    player = db.get(Player, player_id)
+    if player is None or player.club_id != user.club_id:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    owner = db.get(User, player.user_id) if player.user_id else None
+    if owner is None:
+        raise HTTPException(status_code=404, detail="No account is linked to this player.")
+    old = owner.display_name
+    owner.display_name = None
+    db.add(owner)
+    log_audit(db, user, "account.name.reset", "user", owner.id,
+              f"{old!r} on player {player.name!r} ({player.id})")
+    db.commit()
+    return {"ok": True, "name": display_name_for(owner)}
 
 
 
@@ -5220,6 +5252,24 @@ def list_audit_log(
     ]
 
 
+@router.post("/platform/users/{user_id}/reset-name")
+def platform_reset_user_name(
+    user_id: int,
+    user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_session),
+):
+    """Clear any account's chosen name, from the cross-club user search."""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    old = target.display_name
+    target.display_name = None
+    db.add(target)
+    log_audit(db, user, "account.name.reset", "user", target.id, repr(old))
+    db.commit()
+    return {"ok": True, "name": display_name_for(target)}
+
+
 @router.get("/platform/users/search")
 def search_users(
     q: str,
@@ -5256,7 +5306,7 @@ def search_users(
     for u, c in rows:
         p = db.get(Player, u.player_id) if u.player_id else None
         result.append({
-            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u),
+            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u), "display_name": u.display_name,
             "player_name": p.name if p else None,
             "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
             "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
@@ -5266,7 +5316,7 @@ def search_users(
             continue
         matched_ids.add(u.id)
         result.append({
-            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u),
+            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u), "display_name": u.display_name,
             "player_name": p.name,
             "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
             "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,

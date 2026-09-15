@@ -23,6 +23,7 @@ from typing import Iterable, Optional
 from sqlmodel import Session, select
 
 from models import User, UserIdentity
+from name_moderation import BLOCKED_MESSAGE, is_blocked
 
 DISCORD = "discord"
 
@@ -251,6 +252,8 @@ def clean_display_name(raw: Optional[str]) -> Optional[str]:
         raise ValueError("That name has characters we can't show.")
     if len(name) > DISPLAY_NAME_MAX:
         raise ValueError(f"Keep it to {DISPLAY_NAME_MAX} characters or fewer.")
+    if is_blocked(name):
+        raise ValueError(BLOCKED_MESSAGE)
     return name
 
 

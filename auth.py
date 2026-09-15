@@ -64,9 +64,10 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import (
-    active_player_id_for, get_session, resolve_active_club_id,
+    active_player_id_for, get_session, log_audit, resolve_active_club_id,
     resolve_request_club_id, scoped,
 )
+from name_moderation import BLOCKED_MESSAGE, is_blocked
 from identity import (
     AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, clean_display_name,
     create_user_for_profile,
@@ -750,6 +751,10 @@ def create_profile(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Name cannot be blank")
+    if is_blocked(name):
+        # The roster name is posted to the club's Discord, so it gets the same
+        # check as an account name (name_moderation.py).
+        raise HTTPException(status_code=422, detail=BLOCKED_MESSAGE)
 
     player = Player(
         name=name,
@@ -840,10 +845,15 @@ def update_account(
     blank clears it, and the account goes by its Discord handle again.
     """
     try:
-        user.display_name = clean_display_name(body.display_name)
+        new_name = clean_display_name(body.display_name)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    old_name = user.display_name
+    user.display_name = new_name
     db.add(user)
+    if new_name != old_name:
+        # So an admin can see who a name belonged to, and when it changed.
+        log_audit(db, user, "account.name", "user", user.id, f"{old_name!r} -> {new_name!r}")
     db.commit()
     db.refresh(user)
     return {"ok": True, "user": _user_out(user)}

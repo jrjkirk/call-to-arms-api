@@ -284,6 +284,17 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
    `name`; admin pickers use `$lib/accountName.ts` `accountLabel` (roster or chosen name, with
    the Discord handle beside it when different). The profile page's Discord chip still shows
    the Discord handle: it is labelled as Discord.
+   **Name moderation (added 2026-09-15, Joel's choice of word check + admin reset):**
+   `name_moderation.is_blocked` against `name_blocklist.txt` (whole words after undoing
+   look-alikes, spacing and stretched letters; a tiny `[substring]` section for words no real
+   name contains). Applied to the account name, the roster name at profile creation, guest (+1)
+   names and tournament entry names. Club admin renames are NOT checked: they are the fix for a
+   false positive. Account name changes are audit-logged (`account.name`); a club super-admin
+   resets one from Players & blocks › Edit player (`POST /admin/players/{id}/reset-account-name`),
+   a platform admin from user search (`POST /admin/platform/users/{id}/reset-name`), both
+   logged as `account.name.reset`. The edit-player field formerly labelled "Display Name" is now
+   "Roster name", since "display name" now means the account's. An AI check was offered and
+   held in reserve.
 4. **Google sign-in.** Needs: 0, 2, 3. Standard OIDC, one module. Also the §5 copy sweep and
    the privacy page, in the same release. Implements Decision C's "offer to link" on a
    verified-email match.
