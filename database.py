@@ -473,9 +473,9 @@ def active_player_id_for(db: Session, user: User, club_id: int) -> Optional[int]
 
       Archive a player who has a linked Discord account, and this returns None.
       /auth/me then reports "no player at this club" and the frontend shows the
-      claim-or-create flow. They can't claim their own row back — claim
-      candidates are `active == True AND user_id IS NULL`, and claim_player
-      404s on an inactive row — so the only door open is create_profile, whose
+      claim-or-create flow. They couldn't claim their own row back — claim
+      candidates were `active == True AND user_id IS NULL`, and claim_player
+      404'd on an inactive row (both since relaxed, 15/09/2026) — so the only door open was create_profile, whose
       guard called THIS function and so also saw nothing. Result: a second
       Player row, no signup history, no level, no league record, and a
       "🎉 A NEW CHALLENGER APPROACHES!" post for a player of two years.

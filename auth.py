@@ -462,9 +462,12 @@ def me(
     candidates = []
     if my_player_id is None:
         # Only players at the active club that nobody owns yet are claimable.
+        # Archived rows included: the roster was cleared of everyone with no
+        # linked account (15/09/2026), and a returning player who can't see
+        # their row creates a second one and loses their history.
         candidates = db.exec(
             scoped(Player, active_club)
-            .where(Player.active == True, Player.user_id.is_(None))
+            .where(Player.user_id.is_(None))
             .order_by(Player.name)
         ).all()
 
@@ -546,7 +549,7 @@ def complete_signup(
     if my_player_id is None:
         candidates = db.exec(
             scoped(Player, club.id)
-            .where(Player.active == True, Player.user_id.is_(None))
+            .where(Player.user_id.is_(None))
             .order_by(Player.name)
         ).all()
 
@@ -615,12 +618,15 @@ def claim_player(
     _reject_if_already_linked(db, user, club_id)
 
     player = db.get(Player, player_id)
-    if player is None or not player.active or player.club_id != club_id:
+    if player is None or player.club_id != club_id:
         raise HTTPException(status_code=404, detail="Player not found")
     if player.user_id is not None:
         raise HTTPException(status_code=400, detail="That player is already claimed by another user")
 
+    # Claiming an archived row is someone coming back, so it goes back on the
+    # roster. Unclaimed rows are archived by default (see me() above).
     player.user_id = user.id
+    player.active = True
     db.add(player)
     # Expand-phase dual-write: keep the legacy User.player_id link in sync for
     # the user's home club, so not-yet-converted code paths (signups/main/admin
