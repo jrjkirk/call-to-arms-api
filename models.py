@@ -1238,6 +1238,36 @@ class UserIdentity(SQLModel, table=True):
     last_used_at: Optional[datetime] = None
 
 
+class LoginToken(SQLModel, table=True):
+    """One emailed sign-in or confirmation link (account overhaul Slab 5).
+
+    Only a SHA-256 of the token is stored, so a read of this table can't be
+    turned into a sign-in. Single use (used_at) and short-lived (expires_at).
+
+    Doubles as the rate-limit log: how many links an address, or a browser's
+    IP, has asked for recently is a count of rows here (email_login.py). The IP
+    is kept only as a keyed hash, enough to count by and nothing more.
+
+    purpose "sign_in": signing in or signing up with an email address.
+    purpose "link": adding this address to user_id's account from /account;
+    it only completes in a browser signed in to that same account.
+    """
+    __tablename__ = "login_tokens"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    token_hash: str = Field(unique=True, index=True)
+    email: str = Field(index=True)
+    purpose: str
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    origin: str
+    next_path: Optional[str] = None
+    ip_hash: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    expires_at: datetime
+    used_at: Optional[datetime] = None
+
+
 class ClubRequest(SQLModel, table=True):
     """A "please add my club" submission from the logged-out hero page.
     Not itself a Club row — approving a request is a platform-admin

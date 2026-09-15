@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0-3 LIVE (2026-09-15). Slab 4 (Google) BUILT, not deployed; needs Google OAuth credentials. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0-4 LIVE (2026-09-15; Google invisible until its OAuth secrets are set). Slab 5 (email links) BUILT, not deployed; needs migrations/create_login_tokens.py first. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -317,9 +317,30 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
      stub Google in both modes.
    - **This slab now also contains Google linking**, which the plan had in Slab 6. Slab 6 is left
      with unlinking, linking Discord, and merge-on-conflict.
-5. **Email magic link.** Needs: 0, 2, and new rate limiting. `login_tokens` table, single-use
-   short-expiry hashed tokens, per-address and per-IP limits. No passwords. This is also the
-   recovery path; recovery bumps `session_version`. Security-sensitive: review properly.
+5. **Email magic link.** Needs: 0, 2, and new rate limiting. BUILT (`email_login.py`,
+   `tests/test_email_sign_in.py`). `EMAIL_SIGNIN` = `off` (default: the Resend secrets already
+   exist for other mail, so secrets can't be the switch) / `link` / `open`, same staging as Google.
+   - `login_tokens` table (hand-run `migrations/create_login_tokens.py`, run BEFORE deploy):
+     SHA-256 of a 32-byte token, single use, 15 minutes. Also the rate-limit log: 5 links an
+     address and 20 an IP per hour, counted from its own rows, so no second store and limits
+     survive restarts. The IP is `Fly-Client-IP` (see below), kept only as an HMAC.
+   - The emailed link opens web `/signin/email`, which needs a **Continue** press to POST the
+     token: mail scanners open every link and would otherwise spend it. That page strips the
+     token from the address bar on load and sends no Referer.
+   - `POST /auth/email/start` answers identically whether or not the address has an account.
+   - Adding an address from /account (`POST /auth/email/link`, purpose `link`) completes only in
+     a browser signed in to the account that asked, checked before the token is spent, so a
+     victim can't be made to confirm their address onto someone else's account.
+   - Links only point at a validated calltoarms.app origin (or `FRONTEND_URL`).
+   - A new email account has no name from anywhere; its first roster name becomes its account
+     name. Decision C's offer applies (verified email already on an account).
+   - **Not done, deliberately:** an email sign-in does not bump `session_version`. It is an
+     ordinary sign-in as much as recovery, and bumping would sign everyone out of every other
+     device each time they used it. "Sign out everywhere" on /account is the recovery lever.
+   - **Found on the way:** `request.client.host` behind Fly is Fly's proxy (172.16.x), not the
+     visitor, so `venue_api._throttle_guest`'s per-IP guest-booking limit is really one limit
+     shared by every guest. Left alone; fix by reading `Fly-Client-IP`.
+   - `login_tokens` rows are never deleted. Harmless at this volume; prune old rows if it grows.
 6. **Link / unlink.** Needs: 0, 1, 2, and at least one of 4/5. (Google linking shipped in 4.) From a signed-in session on
    `/account`. Can't unlink your last identity. Linking an identity already on another
    account runs the Slab 1 merge after proving both. Unlinking Discord clears the mirror

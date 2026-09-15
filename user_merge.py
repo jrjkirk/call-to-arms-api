@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from sqlmodel import SQLModel, Session, select
 
 from models import (
-    AdminRole, AuditLogEntry, ClubRequest, Player, Tournament, TournamentEntry,
+    AdminRole, AuditLogEntry, ClubRequest, LoginToken, Player, Tournament, TournamentEntry,
     TournamentGame, User, UserIdentity, VenueBooking, VenueEvent, VenueStaff,
 )
 
@@ -56,6 +56,8 @@ USER_REFERENCES: list[tuple[type[SQLModel], str, str]] = [
     (AuditLogEntry, "actor_user_id", "move"),
     (ClubRequest, "requester_user_id", "move"),
     (ClubRequest, "reviewed_by_user_id", "move"),
+    # A pending "add this email" link follows the account it was asked for.
+    (LoginToken, "user_id", "move"),
 ]
 
 # Columns that look like user references by name but aren't.

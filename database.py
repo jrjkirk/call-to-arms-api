@@ -30,6 +30,8 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
+    "login_tokens",     # emailed sign-in / confirm-email links (hashed, single
+                        # use, 15 minutes) and the rate-limit log for them
     "user_identities",  # sign-in identities per account (Discord today); the
                         # authority on which Discord ID a user has, created at
                         # sign-in and account provisioning

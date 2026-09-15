@@ -59,7 +59,7 @@ from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -68,12 +68,15 @@ from database import (
     resolve_request_club_id, scoped,
 )
 from identity import (
-    DISCORD, GOOGLE, ProviderProfile, account_with_verified_email, attach_identity,
+    DISCORD, EMAIL, GOOGLE, ProviderProfile, account_with_verified_email, attach_identity,
     bump_session_version, clean_display_name, find_identity,
     create_user_for_profile,
     display_name_for, find_user_for_profile, identity_for, record_sign_in,
 )
 from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
+import email_login
+from emailer import UndeliverableRecipient
+from observability import capture
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
@@ -107,17 +110,34 @@ GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 
+# Email links (Slab 5). Same stages as Google, plus "off", which is the default:
+# the Resend secrets this needs are already set for other mail, so presence of
+# secrets can't be what switches it on.
+EMAIL_SIGNIN = os.environ.get("EMAIL_SIGNIN", "off")
+
+
+def _email_configured() -> bool:
+    return bool(os.environ.get("RESEND_API_KEY") and os.environ.get("EMAIL_FROM"))
+
 
 def linkable_providers() -> list[str]:
     """Sign-in methods a signed-in account can add from /account."""
-    return [GOOGLE] if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET else []
+    providers = []
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+        providers.append(GOOGLE)
+    if EMAIL_SIGNIN in ("link", "open") and _email_configured():
+        providers.append(EMAIL)
+    return providers
 
 
 def sign_in_providers() -> list[str]:
     """Sign-in methods offered on the sign-in screens, in order."""
     providers = [DISCORD]
-    if GOOGLE in linkable_providers() and GOOGLE_SIGNIN == "open":
+    linkable = linkable_providers()
+    if GOOGLE in linkable and GOOGLE_SIGNIN == "open":
         providers.append(GOOGLE)
+    if EMAIL in linkable and EMAIL_SIGNIN == "open":
+        providers.append(EMAIL)
     return providers
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -596,6 +616,140 @@ def _finish_link(db: Session, user: User, profile: ProviderProfile, origin: str)
     return _link_done(origin, f"linked={profile.provider}")
 
 
+def _request_origin(request: Request) -> str:
+    """The calltoarms.app origin a fetch came from, for building links back to
+    it. Origin header first (fetches carry it), then Referer, then the default
+    frontend. Anything not on calltoarms.app falls back, as in _safe_return_to."""
+    origin = request.headers.get("origin")
+    if origin:
+        parsed = urlparse(origin)
+        if parsed.scheme == "https" and parsed.hostname and _ALLOWED_RETURN_HOST_RE.match(parsed.hostname):
+            return f"{parsed.scheme}://{parsed.netloc}"
+    return _safe_return_to(request)
+
+
+class EmailStartBody(BaseModel):
+    email: str
+    next: Optional[str] = None
+
+
+_EMAIL_SENT = {
+    "ok": True,
+    # The same words whether or not the address has an account, so this can't
+    # be used to find out who plays here.
+    "detail": "If that address can be used, a sign-in link is on its way. It works for 15 minutes.",
+}
+
+
+def _send_or_explain(email: str, purpose: str, url: str) -> None:
+    try:
+        email_login.send_link(email, purpose, url)
+    except UndeliverableRecipient:
+        # A mistyped address. Saying so would reveal nothing about accounts,
+        # but it would differ from the success answer, so stay quiet.
+        pass
+    except RuntimeError as e:
+        capture(e, where="email sign-in link")
+        raise HTTPException(status_code=503, detail="We couldn't send email just now. Please try again shortly.")
+
+
+@router.post("/email/start")
+def email_start(body: EmailStartBody, request: Request, db: Session = Depends(get_session)):
+    """Email a sign-in link. Only while EMAIL_SIGNIN is "open"."""
+    if EMAIL not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Email sign-in isn't available.")
+    email = email_login.normalise_email(body.email)
+    if email is None:
+        raise HTTPException(status_code=422, detail="That doesn't look like an email address.")
+    origin = _request_origin(request)
+    try:
+        token = email_login.issue(db, email=email, purpose=email_login.SIGN_IN, origin=origin,
+                                  ip=email_login.client_ip(request), next_path=_safe_next_path(body.next))
+    except email_login.RateLimited:
+        raise HTTPException(status_code=429, detail="That's a lot of sign-in links. Please wait a while and try again.")
+    db.commit()
+    _send_or_explain(email, email_login.SIGN_IN, email_login.link_url(origin, token))
+    return _EMAIL_SENT
+
+
+class EmailLinkBody(BaseModel):
+    email: str
+
+
+@router.post("/email/link")
+def email_link(
+    body: EmailLinkBody,
+    request: Request,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Email a link that adds this address to the signed-in account."""
+    if EMAIL not in linkable_providers():
+        raise HTTPException(status_code=404, detail="Adding an email isn't available.")
+    email = email_login.normalise_email(body.email)
+    if email is None:
+        raise HTTPException(status_code=422, detail="That doesn't look like an email address.")
+    origin = _request_origin(request)
+    try:
+        token = email_login.issue(db, email=email, purpose=email_login.LINK, origin=origin,
+                                  ip=email_login.client_ip(request), user_id=user.id)
+    except email_login.RateLimited:
+        raise HTTPException(status_code=429, detail="That's a lot of links. Please wait a while and try again.")
+    db.commit()
+    _send_or_explain(email, email_login.LINK, email_login.link_url(origin, token))
+    return {"ok": True, "detail": "Check that inbox for a link to confirm it. It works for 15 minutes."}
+
+
+class EmailVerifyBody(BaseModel):
+    token: str
+
+
+@router.post("/email/verify")
+def email_verify(
+    body: EmailVerifyBody,
+    session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
+    db: Session = Depends(get_session),
+):
+    """The Continue button on the page an emailed link opens. Spends the token
+    and answers {"redirect": url}, setting whatever cookie a sign-in sets."""
+    try:
+        row = email_login.peek(db, body.token)
+    except email_login.InvalidToken:
+        raise HTTPException(status_code=410, detail="That link has expired or been used. Ask for a new one.")
+
+    profile = ProviderProfile(provider=EMAIL, subject=row.email, email=row.email, email_verified=True)
+
+    if row.purpose == email_login.LINK:
+        # Checked BEFORE spending, so opening the link on the wrong device
+        # doesn't waste it.
+        user = _session_user(db, session_cookie)
+        if user is None or user.id != row.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Open this link in the browser where you're signed in to the account you're adding it to.",
+            )
+        email_login.spend(db, row)
+        existing = find_identity(db, EMAIL, row.email)
+        if existing is not None and existing.user_id != user.id:
+            db.commit()
+            return {"redirect": f"{row.origin}/account?link_error=taken&provider=email"}
+        attach_identity(db, user, profile)
+        if existing is None:
+            log_audit(db, user, "identity.link", "user", user.id, f"email {row.email}")
+        db.commit()
+        return {"redirect": f"{row.origin}/account?linked=email"}
+
+    if EMAIL not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Email sign-in isn't available.")
+    email_login.spend(db, row)
+    db.flush()
+    redirect = _finish_sign_in(db, profile, row.origin, row.next_path)
+    out = JSONResponse({"redirect": redirect.headers["location"]})
+    for header in redirect.headers.getlist("set-cookie"):
+        out.headers.append("set-cookie", header)
+    return out
+
+
 @router.get("/discord/callback")
 async def discord_callback(
     code: str,
@@ -976,6 +1130,15 @@ def create_profile(
         user_id=user.id,
     )
     db.add(player)
+    if user.display_name is None and user.discord_name is None:
+        # An account made with an email link has no name from anywhere, so the
+        # name it just gave the roster becomes its account name, which it can
+        # change on /account. Without this the app would greet it as "Player".
+        try:
+            user.display_name = clean_display_name(name[:32])
+        except ValueError:
+            pass
+        db.add(user)
     db.flush()  # populate player.id before the legacy back-link
 
     # Expand-phase dual-write (see claim_player) — home club only.
