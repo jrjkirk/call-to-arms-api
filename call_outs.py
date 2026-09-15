@@ -23,6 +23,7 @@ from sqlmodel import Session, SQLModel, select
 from database import active_player_id_for, get_session, name_with_mention, scoped
 from models import CallOut, Club, User
 from auth import active_club_id, require_user
+from system_overrides import effective_system
 from signups import (
     _get_system_config,
     _require_system_enabled,
@@ -176,6 +177,8 @@ def create_call_out(
     config = _get_system_config(db, body.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    # As this club runs it, so points follow the club's own answer.
+    config = effective_system(db, club_id, config)
     _require_system_enabled(db, club_id, body.system)
 
     player = _require_linked_player(user, db, club_id)

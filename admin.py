@@ -32,7 +32,7 @@ from auth import (
     valid_scopes,
 )
 import discord_guild
-from database import scoped, posting_enabled, posting_key, POSTING_KINDS, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url, club_app_url
+from database import name_with_mention, scoped, posting_enabled, posting_key, POSTING_KINDS, system_setting_slug as _slug, get_setting as _get_setting, upsert_setting as _upsert_setting, log_audit, resolve_active_club_id, resolve_webhook_url, club_app_url
 from league import (
     VALID_GAME_TYPES,
     VALID_PAINTING,
@@ -54,6 +54,9 @@ from services import player_titles, set_player_titles
 import call_to_arms_content as cta_content
 from pairings_engine import generate, _get_pairing_config, summarize_pairings
 from system_overrides import OVERRIDABLE_FIELDS as OVERRIDABLE_SYSTEM_FIELDS
+from system_overrides import effective_system
+import week_pairings
+from experience import summary as experience_summary
 from systems import (
     factions_for,
     icon_folder_for,
@@ -72,6 +75,9 @@ from signups import (
     _get_system_config,
     _require_system_enabled,
     _validate_week,
+    _build_bye_discord_message,
+    _get_all_byes,
+    _post_webhook,
     signup_cap,
 )
 import club_emails
@@ -1645,7 +1651,7 @@ def pairings_preview(
     all_rows = list(prearranged) + proposed_dicts
     signups_by_id = _collect_signups_for_rows(all_rows, db, user.club_id)
 
-    config = _get_system_config(db, body.system)
+    config = effective_system(db, user.club_id, _get_system_config(db, body.system))
     uses_points = config.uses_points if config else (body.system != "Kill Team")
     display = _pairing_rows_to_display(prearranged, signups_by_id, uses_points) + \
               _dicts_to_display(proposed_dicts, signups_by_id, uses_points)
@@ -1705,7 +1711,7 @@ def pairings_generate(
     _resync_venue_floor(db, user.club_id, body.system, body.week)
 
     signups_by_id = _collect_signups_for_rows(new_pairings, db, user.club_id)
-    config = _get_system_config(db, body.system)
+    config = effective_system(db, user.club_id, _get_system_config(db, body.system))
     uses_points = config.uses_points if config else (body.system != "Kill Team")
     display = _pairing_rows_to_display(new_pairings, signups_by_id, uses_points)
     summary = summarize_pairings(
@@ -1739,7 +1745,7 @@ def pairings_get(
     published = gate.published if gate else False
 
     signups_by_id = _collect_signups_for_rows(rows, db, user.club_id)
-    config = _get_system_config(db, system)
+    config = effective_system(db, user.club_id, _get_system_config(db, system))
     uses_points = config.uses_points if config else (system != "Kill Team")
     display = _pairing_rows_to_display(rows, signups_by_id, uses_points)
     summary = summarize_pairings(db, system, week, user.club_id, _pairs_of(rows)) if rows else None
@@ -1804,8 +1810,32 @@ def pairings_save(
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """Write grid edits back to Pairing rows and their underlying Signup rows."""
+    """Write grid edits back to Pairing rows and their underlying Signup rows.
+
+    Moving players between rows keeps every signup in exactly one place:
+    - a player moved into a game has any BYE they were sitting on removed, so
+      filling a BYE with someone else's waiting player is a single save;
+    - a player moved out of a row and into nothing gets a BYE;
+    - a player who would end up in two games is refused with a 409, and so is
+      a player set against themselves or one not signed up for this week.
+    Nothing is written unless the whole save is valid. Until 2026-09-15 none of
+    this was checked, so a player could be double-booked or silently removed
+    from the week.
+    """
     _require_system_scope(body.system, user, db)
+
+    week_signups = {
+        su.id: su
+        for su in db.exec(
+            scoped(Signup, user.club_id)
+            .where(Signup.week == body.week)
+            .where(Signup.system == body.system)
+        ).all()
+    }
+    moved_in: set[int] = set()
+    moved_out: set[int] = set()
+    # signup id -> ids of the rows this save moves them INTO
+    placed_into: dict[int, set[int]] = {}
 
     changed = 0
     for row in body.rows:
@@ -1815,10 +1845,30 @@ def pairings_save(
         if p.week != body.week or p.system != body.system or p.club_id != user.club_id:
             continue
 
-        if row.a_signup_id is not None:
-            p.a_signup_id = row.a_signup_id
-        if row.b_signup_id is not None:
-            p.b_signup_id = row.b_signup_id
+        old_ids = {sid for sid in (p.a_signup_id, p.b_signup_id) if sid is not None}
+        new_a = row.a_signup_id if row.a_signup_id is not None else p.a_signup_id
+        new_b = row.b_signup_id if row.b_signup_id is not None else p.b_signup_id
+        # Only a CHANGED slot is validated: the grid sends every row back, and
+        # an untouched row left pointing at a deleted signup must not block an
+        # unrelated edit.
+        for new_id, old_id in ((new_a, p.a_signup_id), (new_b, p.b_signup_id)):
+            if new_id != old_id and new_id not in week_signups:
+                raise HTTPException(
+                    status_code=422,
+                    detail="That player is not signed up for this week.",
+                )
+        if new_b is not None and new_a == new_b:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{week_signups[new_a].player_name if new_a in week_signups else 'A player'} cannot play themselves.",
+            )
+        p.a_signup_id = new_a
+        p.b_signup_id = new_b
+        new_ids = {sid for sid in (new_a, new_b) if sid is not None}
+        moved_in |= new_ids - old_ids
+        moved_out |= old_ids - new_ids
+        for sid in new_ids - old_ids:
+            placed_into.setdefault(sid, set()).add(p.id)
 
         a_su = db.get(Signup, p.a_signup_id) if p.a_signup_id else None
         b_su = db.get(Signup, p.b_signup_id) if p.b_signup_id else None
@@ -1877,7 +1927,41 @@ def pairings_save(
         db.add(p)
         changed += 1
 
+    if moved_in or moved_out:
+        db.flush()
+        rows = week_pairings.week_rows(db, user.club_id, body.system, body.week)
+
+        def rows_with(sid: int) -> list:
+            return [r for r in rows if sid in (r.a_signup_id, r.b_signup_id)]
+
+        for sid in sorted(moved_in):
+            mine = rows_with(sid)
+            into = placed_into.get(sid, set())
+            name = week_signups[sid].player_name
+            if len([r for r in mine if r.id in into]) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{name} has been put in more than one pairing. Pick one.",
+                )
+            already = [r for r in mine if r.id not in into]
+            if any(r.b_signup_id is not None for r in already):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{name} is already in another game. Take them out of it first.",
+                )
+            # What is left in `already` is BYEs they were sitting on, which the
+            # move replaces.
+            for r in already:
+                db.delete(r)
+                rows = [x for x in rows if x.id != r.id]
+        db.flush()
+        for sid in sorted(moved_out):
+            if sid in week_signups and not rows_with(sid):
+                rows.append(week_pairings.add_bye(db, user.club_id, body.system, body.week, week_signups[sid]))
+
     db.commit()
+    if moved_in or moved_out:
+        _resync_venue_floor(db, user.club_id, body.system, body.week)
     return {"changed": changed}
 
 
@@ -1887,23 +1971,66 @@ def pairings_delete(
     user: User = Depends(_require_any_admin),
     db: Session = Depends(get_session),
 ):
-    """Delete specific pairings by ID, scoped to this week/system."""
+    """Delete specific pairings by ID, scoped to this week/system.
+
+    A player whose signup still exists and who is left in no pairing at all
+    gets a BYE, so they stay visible and can be re-arranged. Until 2026-09-15
+    deleting a game here left both players with no game, no BYE and no place
+    on the unpaired list.
+
+    Deleting a BYE is refused when it is that player's only place in the week:
+    it would put them back into exactly that state. Removing someone from the
+    week is a force drop in the signups list, which also deletes their signup.
+    A pairing whose signups no longer exist (left behind by the old drop code)
+    can always be deleted.
+    """
     _require_system_scope(body.system, user, db)
 
-    deleted = 0
+    targets: list[Pairing] = []
     for pid in body.ids:
         p = db.get(Pairing, pid)
         if p is None:
             continue
         if p.week != body.week or p.system != body.system or p.club_id != user.club_id:
             continue
-        db.delete(p)
-        deleted += 1
+        if p not in targets:
+            targets.append(p)
+    if not targets:
+        return {"deleted": 0}
 
-    if deleted:
-        db.commit()
-        _resync_venue_floor(db, user.club_id, body.system, body.week)
-    return {"deleted": deleted}
+    target_ids = {p.id for p in targets}
+    remaining = {
+        sid
+        for r in week_pairings.week_rows(db, user.club_id, body.system, body.week)
+        if r.id not in target_ids
+        for sid in (r.a_signup_id, r.b_signup_id)
+        if sid is not None
+    }
+    affected = {sid for p in targets for sid in (p.a_signup_id, p.b_signup_id) if sid is not None}
+    live = {
+        su.id: su
+        for su in db.exec(scoped(Signup, user.club_id).where(Signup.id.in_(affected))).all()
+    } if affected else {}
+    stranded = sorted(sid for sid in affected if sid in live and sid not in remaining)
+
+    for p in targets:
+        if p.b_signup_id is None and p.a_signup_id in stranded:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{live[p.a_signup_id].player_name} would be left with no game and no BYE. "
+                    f"To take them out of this week, force drop their signup in the signups list."
+                ),
+            )
+
+    for p in targets:
+        db.delete(p)
+    db.flush()
+    for sid in stranded:
+        week_pairings.add_bye(db, user.club_id, body.system, body.week, live[sid])
+    db.commit()
+    _resync_venue_floor(db, user.club_id, body.system, body.week)
+    return {"deleted": len(targets)}
 
 
 @router.post("/pairings/post-discord")
@@ -1973,10 +2100,14 @@ def _system_config(db: Session, club_id: int, system: str) -> dict:
     so a club's own vibe customization is honored here too.
 
     show_standby now comes from the SystemConfig.uses_standby catalogue
-    capability (backfilled to The Old World, its original only home)."""
+    capability (backfilled to The Old World, its original only home).
+
+    Every field is read as this club runs the system (EffectiveSystem), so the
+    editor offers the same fields as the signup form the club's players see."""
     config = _get_system_config(db, system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    config = effective_system(db, club_id, config)
     vibe_options, _default_vibe = _effective_vibe_config(db, club_id, config)
     return {
         "show_points": config.uses_points,
@@ -2049,6 +2180,8 @@ def admin_signup_patch(
     config = _get_system_config(db, su.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    # As this club runs the system, the same rules the signup form applies.
+    config = effective_system(db, user.club_id, config)
     uses_points, uses_scenarios, allows_demo = config.uses_points, config.uses_scenarios, config.allows_demo
     vibe_options, default_vibe = _effective_vibe_config(db, user.club_id, config)
 
@@ -2072,7 +2205,7 @@ def admin_signup_patch(
         su.vibe = body.vibe if body.vibe in vibe_options else default_vibe
 
     if "standby_ok" in provided:
-        su.standby_ok = bool(body.standby_ok) if body.standby_ok is not None else False
+        su.standby_ok = bool(body.standby_ok) if (config.uses_standby and body.standby_ok is not None) else False
 
     if "scenario" in provided:
         if not uses_scenarios:
@@ -2116,11 +2249,24 @@ def admin_signup_create(
     already has a signup for this week/system so the admin uses PATCH instead.
     Discord signup webhook is NOT fired (avoid spurious 'X signed up' posts for
     admin corrections).
-    Per-system defaults and normalisation match the regular POST /signups exactly.
+    Per-system defaults and normalisation match the regular POST /signups exactly,
+    read as this club runs the system.
+
+    Experience is DERIVED from games played, exactly as on POST /signups, and
+    the request's `experience` is ignored. It used to be taken from the form,
+    whose default was "New", so a veteran added by an admin was matched and
+    shown as a newcomer. An admin can still correct it afterwards with PATCH.
+
+    If the week already has pairings, the player is seated in them at once (a
+    game against someone sitting out if there is a good match, a BYE
+    otherwise), as a late signup is. When that gives a waiting player a game in
+    a published week, the channel is told, because that player's night has
+    changed.
     """
     config = _get_system_config(db, body.system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    config = effective_system(db, user.club_id, config)
 
     _require_system_scope(body.system, user, db)
     _require_system_enabled(db, user.club_id, body.system)
@@ -2150,7 +2296,7 @@ def admin_signup_create(
     if faction in (None, "", "— None —"):
         faction = None
 
-    experience = body.experience if body.experience in EXPERIENCE_OPTIONS else "New"
+    experience = experience_summary(db, user.club_id, player.id, body.system)["tier"]
     eta = (body.eta or "").strip() or None
 
     vibe = body.vibe if body.vibe in vibe_options else default_vibe
@@ -2182,6 +2328,35 @@ def admin_signup_create(
     db.add(su)
     db.commit()
     db.refresh(su)
+
+    # The signup is already committed; a failure seating it is reported rather
+    # than returned as an error for a row that does exist.
+    partner = None
+    seated = False
+    try:
+        if week_pairings.is_paired(db, user.club_id, body.system, week):
+            partner = week_pairings.seat(db, user.club_id, body.system, week, su)
+            db.commit()
+            seated = True
+    except Exception as e:
+        db.rollback()
+        partner = None
+        capture(e, kind="admin_signup_seat", club_id=user.club_id, system=body.system)
+    db.refresh(su)
+    if seated:
+        if partner is not None and week_pairings.is_published(db, user.club_id, body.system, week):
+            _post_webhook(
+                db, user.club_id, body.system,
+                _build_bye_discord_message(
+                    db,
+                    header=f"➕ {name_with_mention(db, su.player_name, su.player_id)} has been added to this week's session.",
+                    moved=[(su, partner)],
+                    all_byes=_get_all_byes(db, body.system, week, user.club_id),
+                    app_url=APP_PUBLIC_URL,
+                ),
+            )
+        _resync_venue_floor(db, user.club_id, body.system, week)
+        db.refresh(su)
     return _signup_row(su)
 
 
@@ -2193,10 +2368,17 @@ def admin_signup_delete(
 ):
     """Force-drop a signup, bypassing the PublishState check that blocks player self-drops.
 
-    Mirrors the regular drop logic: any prearranged=True Pairing referencing this
-    signup is deleted (the other player's signup is untouched and re-enters the pool).
-    Discord drop webhook is NOT fired (avoid spurious 'X dropped' posts for admin
-    corrections).
+    Takes the player out of every pairing they are in, the same way a player
+    dropping themselves does (see week_pairings.release). Once the week has
+    pairings their opponent is seated again straight away; before that, a
+    prearranged opponent returns to the pool. Until 2026-09-15 only
+    prearranged pairings were removed, so a generated game was left pointing
+    at a deleted signup and, after publish, the opponent was stranded with no
+    BYE and no word.
+
+    The plain "X dropped" webhook is NOT fired (avoid spurious posts for admin
+    corrections). The one exception is a published week where removing the
+    player changed someone else's game: that player needs to hear it.
     """
     su = db.get(Signup, signup_id)
     if su is None or su.club_id != user.club_id:
@@ -2204,18 +2386,29 @@ def admin_signup_delete(
 
     _require_system_scope(su.system, user, db)
 
-    prearranged = db.exec(
-        scoped(Pairing, user.club_id)
-        .where(Pairing.week == su.week)
-        .where(Pairing.system == su.system)
-        .where(Pairing.prearranged == True)
-        .where((Pairing.a_signup_id == signup_id) | (Pairing.b_signup_id == signup_id))
-    ).all()
-    for p in prearranged:
-        db.delete(p)
+    system, week = su.system, su.week
+    name, player_id = su.player_name, su.player_id
+    published = week_pairings.is_published(db, user.club_id, system, week)
+    paired = published or week_pairings.is_paired(db, user.club_id, system, week)
+
+    moved = week_pairings.release(db, user.club_id, system, week, {signup_id}, reseat=paired)
 
     db.delete(su)
     db.commit()
+
+    if published and moved:
+        _post_webhook(
+            db, user.club_id, system,
+            _build_bye_discord_message(
+                db,
+                header=f"❌ {name_with_mention(db, name, player_id)} has been removed from this week's session.",
+                moved=moved,
+                all_byes=_get_all_byes(db, system, week, user.club_id),
+                app_url=APP_PUBLIC_URL,
+            ),
+        )
+    if paired:
+        _resync_venue_floor(db, user.club_id, system, week)
     return {"ok": True}
 
 
@@ -2652,6 +2845,9 @@ def get_pairing_config(
     config = _get_system_config(db, system)
     if config is None:
         raise HTTPException(status_code=422, detail="Unknown system.")
+    # As this club runs it, so a scenarios or points slider shows exactly when
+    # the matcher will actually use it.
+    config = effective_system(db, user.club_id, config)
     cfg = _get_pairing_config(db, user.club_id, config.id)
     return {
         "uses_scenarios": config.uses_scenarios,

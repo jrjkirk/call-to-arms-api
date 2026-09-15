@@ -131,46 +131,63 @@ def previous_pairs_recent(
 def previous_bye_player_ids(
     session: Session, system: str, current_week: str, club_id: int
 ) -> set[int]:
+    """Players whose most recent session before `current_week` was a BYE.
+
+    "Most recent session" is the player's own: the latest earlier week in
+    which they had any pairing row, a game or a BYE. A player who sat out,
+    stayed away for a month and came back would otherwise sit out twice in a
+    row from where they are standing.
+
+    Until 2026-09-15 this returned every player who had EVER had a BYE,
+    including in weeks after `current_week`, which made the consecutive-BYE
+    protection meaningless: half the club qualified.
+
+    A week in which a player has both a BYE row and a game counts as a game.
+    They played.
+    """
     try:
-        datetime.strptime(current_week, "%d/%m/%Y")
+        current_dt = datetime.strptime(current_week, "%d/%m/%Y")
     except ValueError:
         return set()
 
     pairings = session.exec(
         scoped(Pairing, club_id)
         .where(Pairing.system == system)
-        .where(Pairing.b_signup_id.is_(None))
         .where(Pairing.week != current_week)
     ).all()
 
     if not pairings:
         return set()
 
-    # Track most recent BYE week per signup_id
-    latest_bye: dict[int, datetime] = {}
+    signup_ids = {p.a_signup_id for p in pairings} | {
+        p.b_signup_id for p in pairings if p.b_signup_id
+    }
+    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(signup_ids))).all()
+    signups_by_id = {s.id: s for s in rows}
+
+    # player_id -> (week of their latest earlier session, was it a BYE)
+    latest: dict[int, tuple[datetime, bool]] = {}
     for pr in pairings:
         try:
             pr_week_dt = datetime.strptime(pr.week, "%d/%m/%Y")
         except ValueError:
             continue
-        sid = pr.a_signup_id
-        if sid not in latest_bye or pr_week_dt > latest_bye[sid]:
-            latest_bye[sid] = pr_week_dt
-
-    if not latest_bye:
-        return set()
-
-    rows = session.exec(scoped(Signup, club_id).where(Signup.id.in_(latest_bye.keys()))).all()
-    signups_by_id = {s.id: s for s in rows}
-
-    result: set[int] = set()
-    for sid in latest_bye:
-        su = signups_by_id.get(sid)
-        if su is None or su.player_id is None:
+        if pr_week_dt >= current_dt:
             continue
-        result.add(su.player_id)
+        is_bye = pr.b_signup_id is None
+        for sid in (pr.a_signup_id, pr.b_signup_id):
+            if sid is None:
+                continue
+            su = signups_by_id.get(sid)
+            if su is None or su.player_id is None:
+                continue
+            seen = latest.get(su.player_id)
+            if seen is None or pr_week_dt > seen[0]:
+                latest[su.player_id] = (pr_week_dt, is_bye)
+            elif pr_week_dt == seen[0] and not is_bye:
+                latest[su.player_id] = (pr_week_dt, False)
 
-    return result
+    return {pid for pid, (_, was_bye) in latest.items() if was_bye}
 
 
 def last_opponent_pairs(
@@ -450,27 +467,36 @@ def _pair_dist(
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def generate(
-    session: Session,
-    week: str,
-    system: str,
-    allow_repeats_when_needed: bool = True,
-    *,
-    persist: bool,
-    club_id: int,
-) -> list:
-    """Generate pairings.
+@dataclass
+class _MatchContext:
+    """Everything the distance function needs besides the two players.
 
-    persist=True  → writes Pairing rows, commits, returns list[Pairing].
-    persist=False → dry run, returns list[dict] with no DB writes.
+    Loaded in one place so that generate() and pick_waiting_partner() cannot
+    judge the same two players differently.
     """
+    config: object
+    pconfig: PairingConfig
+    vibe_specs: list
+    group_of: dict
+    seen_recent: set
+    seen_extended: set
+    blocks: set
+    last_opp_pairs: set
+    bye_player_ids: set
+
+
+def _load_match_context(
+    session: Session, week: str, system: str, club_id: int
+) -> Optional[_MatchContext]:
+    """The matcher's view of this club's system and history for `week`, or
+    None if the system is not in the catalogue."""
     # Catalogue-driven behavior. The SystemConfig row is the single source of
     # truth for per-system rules (scenarios, points, intro pre-pass, history
     # windows); every real system has a catalogue row, so a missing one is an
     # error rather than a reason to fall back to hardcoded values.
     config: SystemConfig = _get_system_config(session, system)
     if config is None:
-        raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
+        return None
     # The system as THIS club runs it, not as the platform catalogue describes
     # it. An override that reaches the signup form but not the matcher is worse
     # than no override at all: a club that turns scenarios off would get a form
@@ -486,6 +512,82 @@ def generate(
     # Faction categories, for the "don't put Good against Good" nudge. Empty
     # dict for every flat-list system, which is most of them.
     group_of = _faction_group_index(config)
+
+    # Recent / extended play history windows. Per-club PairingConfig
+    # override wins when set; otherwise the platform SystemConfig default.
+    recent_w = pconfig.recent_weeks if pconfig.recent_weeks is not None else config.recent_weeks
+    extended_w = pconfig.extended_weeks if pconfig.extended_weeks is not None else config.extended_weeks
+
+    # The week being paired is excluded from its own history. Generate deletes
+    # this week's generated rows before it runs, but Preview does not, so
+    # without the exclusion a preview taken after generating treated the
+    # week's own games as rematches and showed different pairings from the
+    # ones Generate would make. Prearranged rows are the only ones that survive
+    # into Generate, and their players are not in the pool, so this changes
+    # nothing Generate does.
+    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id, exclude_week=week)
+    seen_extended = previous_pairs_recent(session, system, week, extended_w, club_id, exclude_week=week)
+
+    # Blocks
+    #
+    # A block is club-wide (system_id NULL) or belongs to one system. Both are
+    # hard filters and behave identically once loaded; the only question is
+    # whether this run should see it at all.
+    #
+    # Written as a filter on rows already fetched rather than in the query so
+    # that a club that has never scoped a block builds the exact same `blocks`
+    # set it always did — the property that made this safe to add to a frozen
+    # engine. Blocks are per club and few; there is nothing to gain by pushing
+    # it into SQL.
+    block_rows = session.exec(scoped(PairingBlock, club_id)).all()
+    blocks: set = {
+        tuple(sorted([b.player_a_id, b.player_b_id]))
+        for b in block_rows
+        if b.system_id is None or b.system_id == config.id
+    }
+
+    last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
+    bye_player_ids = previous_bye_player_ids(session, system, week, club_id)
+
+    return _MatchContext(
+        config=config,
+        pconfig=pconfig,
+        vibe_specs=vibe_specs,
+        group_of=group_of,
+        seen_recent=seen_recent,
+        seen_extended=seen_extended,
+        blocks=blocks,
+        last_opp_pairs=last_opp_pairs,
+        bye_player_ids=bye_player_ids,
+    )
+
+
+def generate(
+    session: Session,
+    week: str,
+    system: str,
+    allow_repeats_when_needed: bool = True,
+    *,
+    persist: bool,
+    club_id: int,
+) -> list:
+    """Generate pairings.
+
+    persist=True  → writes Pairing rows, commits, returns list[Pairing].
+    persist=False → dry run, returns list[dict] with no DB writes.
+    """
+    ctx = _load_match_context(session, week, system, club_id)
+    if ctx is None:
+        raise HTTPException(status_code=422, detail=f"System not in catalogue: {system}")
+    config = ctx.config
+    pconfig = ctx.pconfig
+    vibe_specs = ctx.vibe_specs
+    group_of = ctx.group_of
+    seen_recent = ctx.seen_recent
+    seen_extended = ctx.seen_extended
+    blocks = ctx.blocks
+    last_opp_pairs = ctx.last_opp_pairs
+    bye_player_ids = ctx.bye_player_ids
 
     # 1. Prearranged signup ids — excluded from matching pool
     prearranged_rows = session.exec(
@@ -571,8 +673,8 @@ def generate(
     # read `0 if standby_ok else 1`, which put them at the front: they got first
     # pick of partners and were never the one left over, so the BYE went to
     # someone who had not offered to sit out. The BYE itself is now chosen
-    # explicitly in step 7; the back of the list is where a player stranded by
-    # blocks or history ends up, and that should be a volunteer too.
+    # explicitly in step 6; the back of the list is where a player stranded by
+    # play history ends up, and that should be a volunteer too.
     candidates.sort(
         key=lambda ms: (
             0 if (ms.row.vibe or "").strip().lower() == "intro" else 1,
@@ -582,39 +684,11 @@ def generate(
         )
     )
 
-    # 5. Recent / extended play history windows. Per-club PairingConfig
-    #    override wins when set; otherwise the platform SystemConfig default.
-    recent_w = pconfig.recent_weeks if pconfig.recent_weeks is not None else config.recent_weeks
-    extended_w = pconfig.extended_weeks if pconfig.extended_weeks is not None else config.extended_weeks
-
-    seen_recent = previous_pairs_recent(session, system, week, recent_w, club_id)
-    seen_extended = previous_pairs_recent(session, system, week, extended_w, club_id)
-
+    # 5. Play history, blocks and previous BYEs came from _load_match_context.
     def has_played(x: MatcherSignup, y: MatcherSignup) -> bool:
         return tuple(sorted([x.key, y.key])) in seen_recent
 
-    # 6. Load blocks
-    #
-    # A block is club-wide (system_id NULL) or belongs to one system. Both are
-    # hard filters and behave identically once loaded; the only question is
-    # whether this run should see it at all.
-    #
-    # Written as a filter on rows already fetched rather than in the query so
-    # that a club that has never scoped a block builds the exact same `blocks`
-    # set it always did — the property that made this safe to add to a frozen
-    # engine. Blocks are per club and few; there is nothing to gain by pushing
-    # it into SQL.
-    block_rows = session.exec(scoped(PairingBlock, club_id)).all()
-    blocks: set = {
-        tuple(sorted([b.player_a_id, b.player_b_id]))
-        for b in block_rows
-        if b.system_id is None or b.system_id == config.id
-    }
-
-    last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
-    bye_player_ids = previous_bye_player_ids(session, system, week, club_id)
-
-    # 7. Who sits out, when someone has to
+    # 6. Who sits out, when someone has to
     #
     # An odd pool means one BYE. If anyone ticked standby, that BYE is theirs:
     # the volunteer is taken out of the pool before matching, so nobody can
@@ -638,7 +712,7 @@ def generate(
             )
             candidates = [ms for ms in candidates if ms is not standby_bye]
 
-    # 8. Greedy matching
+    # 7. Greedy matching
     def best_partner(ms: MatcherSignup, pool: list) -> Optional[MatcherSignup]:
         best_j: Optional[int] = None
         best_dist: Optional[tuple] = None
@@ -690,14 +764,57 @@ def generate(
         matches.append((ms, other))
 
     if standby_bye is not None:
-        # Someone blocks or history left without a legal partner can still have
-        # the volunteer, rather than both of them sitting out.
+        # Someone play history left without a legal partner (possible only when
+        # allow_repeats_when_needed is False) can still have the volunteer,
+        # rather than both of them sitting out.
         for n, (ms, other) in enumerate(matches):
             if other is None and best_partner(ms, [standby_bye]) is not None:
                 matches[n] = (ms, standby_bye)
                 break
         else:
             matches.append((standby_bye, None))
+
+    # 8. No BYE two sessions running, where any alternative exists
+    #
+    # The BYE the greedy fallback hands out is simply whoever is left over, and
+    # nothing stopped that being the player who sat out last time. Until
+    # 2026-09-15 the only protection was a second pass that already ran for
+    # everyone, so in practice there was none.
+    #
+    # A player left over who sat out last session swaps into an existing game
+    # instead, and the player they replace takes the BYE. The swap is only made
+    # if the new game is no worse than the old one on the hard tiers (format,
+    # last opponent, block, intro), so it never buys a BYE fix with a blocked
+    # pairing or a newcomer losing their teacher. Among the swaps allowed, the
+    # closest new game wins. A volunteer on standby is never swapped out of
+    # their BYE: they asked for it.
+    def dist(x: MatcherSignup, y: MatcherSignup) -> tuple:
+        return _pair_dist(x, y, system, seen_recent, seen_extended, blocks,
+                          last_opp_pairs, config, pconfig, vibe_specs, group_of)
+
+    def sat_out_last_time(x: MatcherSignup) -> bool:
+        return x.row.player_id is not None and x.row.player_id in bye_player_ids
+
+    for n in range(len(matches)):
+        sitter, partner = matches[n]
+        if partner is not None or sitter.row.standby_ok or not sat_out_last_time(sitter):
+            continue
+        best = None
+        for g, (x, y) in enumerate(matches):
+            if y is None:
+                continue
+            for stays, leaves in ((x, y), (y, x)):
+                if sat_out_last_time(leaves):
+                    continue
+                new_d = dist(sitter, stays)
+                if new_d[:4] > dist(x, y)[:4]:
+                    continue
+                if best is None or new_d < best[0]:
+                    best = (new_d, g, stays, leaves)
+        if best is not None:
+            _, g, stays, leaves = best
+            matches[g] = (stays, sitter)
+            matches[n] = (leaves, None)
 
     out: list = []
     for ms, other in matches:
@@ -753,6 +870,60 @@ def generate(
         session.commit()
 
     return out
+
+
+def pick_waiting_partner(
+    session: Session,
+    week: str,
+    system: str,
+    club_id: int,
+    signup: Signup,
+    waiting: list,
+) -> Optional[Signup]:
+    """Which player already sitting out on a BYE should play `signup`, or None.
+
+    Used once pairings exist, when someone arrives without a game: a late
+    signup, or a player whose opponent has just dropped. Pairing them with a
+    player already waiting turns two BYEs into one game rather than leaving
+    two people sitting out side by side.
+
+    Judged by the same distance function as generate(), over the same history,
+    so the choice is the one the matcher would make. Two things rule a player
+    out entirely rather than just ranking them lower, because an automatic
+    change nobody reviewed must not produce a game an admin would have
+    refused: an exclusive-vibe mismatch (a game nobody can play) and an admin
+    block. Guests are never paired automatically on either side, since a guest
+    came as someone's +1 and may not stay without them.
+    """
+    if signup.player_id is None:
+        return None
+    ctx = _load_match_context(session, week, system, club_id)
+    if ctx is None:
+        return None
+
+    def as_matcher(su: Signup) -> MatcherSignup:
+        return MatcherSignup(
+            row=su,
+            key=_normalize_name(su.player_name).lower(),
+            preference=build_match_preference(su),
+        )
+
+    me = as_matcher(signup)
+    best: Optional[tuple] = None
+    for su in waiting:
+        if su.player_id is None or su.player_id == signup.player_id or su.id == signup.id:
+            continue
+        other = as_matcher(su)
+        if other.key == me.key:
+            continue
+        d = _pair_dist(me, other, system, ctx.seen_recent, ctx.seen_extended, ctx.blocks,
+                       ctx.last_opp_pairs, ctx.config, ctx.pconfig, ctx.vibe_specs, ctx.group_of)
+        format_pen, _, block_pen = d[0], d[1], d[2]
+        if format_pen or block_pen:
+            continue
+        if best is None or d < best[0]:
+            best = (d, su)
+    return best[1] if best is not None else None
 
 
 def summarize_pairings(

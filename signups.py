@@ -1,11 +1,14 @@
 """Signup endpoints: the Call to Arms form.
 
-Semantics are a faithful port of the Streamlit app:
+Semantics started as a faithful port of the Streamlit app:
 - One effective signup per player/week/system. Submitting again updates the
   newest existing row and deletes any older duplicates.
-- Dropping out is blocked once pairings are published for that week/system.
-- Dropping out also deletes any PREARRANGED pairing involving the dropper
-  (the opponent's signup stays, so they get re-pooled next pairing run).
+- Dropping out removes the dropper from every pairing they are in. Once the
+  week has pairings (published, or generated), their opponent is seated again
+  at once; before that, a prearranged opponent returns to the pool for the
+  next pairing run. See week_pairings.py.
+- A signup arriving once the week has pairings is seated straight away, the
+  same way.
 - Discord webhooks fire on brand-new signups and on drops, per-system,
   and silently no-op when the club has no webhook configured for that
   system (no cross-club fallback — see resolve_webhook_url).
@@ -29,6 +32,7 @@ from auth import active_club_id, admin_scopes, require_user
 from system_overrides import effective_system
 from systems import SYSTEM_RULES
 from observability import capture
+import week_pairings
 
 router = APIRouter(prefix="/signups", tags=["signups"])
 
@@ -655,9 +659,10 @@ def _get_all_byes(db: Session, system: str, week: str, club_id: int) -> list[dic
 def _build_bye_discord_message(
     db: Session,
     header: str,
-    newly_displaced_names: list[str],
     all_byes: list[dict],
     app_url: str,
+    newly_displaced_names: list[str] = (),
+    moved: list = (),
 ) -> str:
     """Build a consistent Discord message for swap/drop events.
 
@@ -665,10 +670,31 @@ def _build_bye_discord_message(
     `**Name** (<@id>)` format as the signup posts — this is the one message
     that specifically needs to reach the affected player, not just the
     channel.
+
+    `moved` is (player, new opponent or None) for everyone re-seated by
+    week_pairings.release. A new opponent means two players who would both
+    have been sitting out now play each other, and both need telling; None
+    means a new BYE, flagged as new in the list below.
     """
+    new_bye_ids = {su.id for su, partner in moved if partner is None}
+    for bye in all_byes:
+        if bye["signup_id"] in new_bye_ids or bye["player_name"] in newly_displaced_names:
+            bye["is_new"] = True
+
+    lines = [header]
+    games = [(su, partner) for su, partner in moved if partner is not None]
+    if games:
+        lines.append("")
+        for su, partner in games:
+            lines.append(
+                f"🤝 {name_with_mention(db, su.player_name, su.player_id)} now plays "
+                f"{name_with_mention(db, partner.player_name, partner.player_id)}, who was sitting out."
+            )
+
     if not all_byes:
-        return f"{header}\n\n➡️ {app_url}" if app_url else header
-    lines = [header, "", "⚠️ The following players are now without an opponent this week:"]
+        text = "\n".join(lines)
+        return f"{text}\n\n➡️ {app_url}" if app_url else text
+    lines += ["", "⚠️ The following players are now without an opponent this week:"]
     for bye in all_byes:
         suffix = " (existing bye)" if not bye["is_new"] else ""
         who = name_with_mention(db, bye["player_name"], bye.get("player_id"))
@@ -886,6 +912,31 @@ def submit_signup(
                 )
     if existing:
         su = existing[0]
+        dup_ids = {dup.id for dup in existing[1:]}
+        if dup_ids:
+            # An older duplicate can be the row a pairing points at. Deleting it
+            # would leave that pairing pointing at nothing, so the first such
+            # reference moves onto the row being kept (unless the kept row is
+            # already placed), and any other row the duplicates are in goes,
+            # with its opponent seated again.
+            rows = week_pairings.week_rows(db, club_id, body.system, week)
+            kept_placed = any(su.id in (r.a_signup_id, r.b_signup_id) for r in rows)
+            for r in rows:
+                if kept_placed:
+                    break
+                if r.a_signup_id in dup_ids:
+                    r.a_signup_id = su.id
+                    db.add(r)
+                    kept_placed = True
+                elif r.b_signup_id in dup_ids:
+                    r.b_signup_id = su.id
+                    db.add(r)
+                    kept_placed = True
+            if any(r.a_signup_id in dup_ids or r.b_signup_id in dup_ids for r in rows):
+                week_pairings.release(
+                    db, club_id, body.system, week, dup_ids,
+                    reseat=week_pairings.is_paired(db, club_id, body.system, week),
+                )
         for dup in existing[1:]:
             db.delete(dup)
         su.player_name = player.name
@@ -914,10 +965,59 @@ def submit_signup(
     db.commit()
     db.refresh(su)
 
+    # A new signup in a week that already has pairings gets a place in them
+    # now: a game against someone sitting out if there is a good match, a BYE
+    # otherwise. Without this they had no row at all, so they appeared nowhere,
+    # not even on the unpaired list.
+    #
+    # The signup itself is already committed, so a failure here must not turn
+    # into an error for the player: it is reported, and the week is left as it
+    # would have been before this existed.
+    seated_late = False
+    late_partner: Optional[Signup] = None
+    if created:
+        try:
+            if week_pairings.is_paired(db, club_id, body.system, week):
+                late_partner = week_pairings.seat(db, club_id, body.system, week, su)
+                db.commit()
+                seated_late = True
+        except Exception as e:
+            db.rollback()
+            late_partner = None
+            capture(e, kind="late_signup_seat", club_id=club_id, system=body.system)
+        db.refresh(su)
+
     if created:
         _post_discord_signup(db, player.name, faction, vibe, body.system, week, club_id, player_id=player.id, first_ever=first_ever)
 
+    if seated_late:
+        if week_pairings.is_published(db, club_id, body.system, week):
+            _post_late_signup_seated(db, club_id, body.system, su, late_partner)
+        _resync_venue_floor(db, club_id, body.system, week)
+        # The floor plan may have committed, which expires `su`; load it again
+        # while the session is certainly open.
+        db.refresh(su)
+
     return {"ok": True, "created": created, "signup": su}
+
+
+def _post_late_signup_seated(
+    db: Session, club_id: int, system: str, su: Signup, partner: Optional[Signup]
+) -> None:
+    """Tell the channel where a signup that arrived after pairings went out
+    has landed. Only called once pairings are published: before that the
+    pairings are not public, and saying who plays whom would leak them."""
+    who = name_with_mention(db, su.player_name, su.player_id)
+    if partner is not None:
+        content = (
+            f"🤝 {who} signed up after pairings went out and now plays "
+            f"{name_with_mention(db, partner.player_name, partner.player_id)}, who was sitting out."
+        )
+    else:
+        content = f"⏳ {who} signed up after pairings went out and is waiting for an opponent."
+        if APP_PUBLIC_URL:
+            content += f"\n\nHead to the app to arrange a game: {APP_PUBLIC_URL}"
+    _post_webhook(db, club_id, system, content)
 
 
 def _resync_venue_floor(db: Session, club_id: int, system: str, week: str) -> None:
@@ -946,78 +1046,6 @@ def drop_signup(
     player = _require_linked_player(user, db, club_id)
     week = _validate_week(week)
 
-    gate = db.exec(
-        scoped(PublishState, club_id)
-        .where(PublishState.week == week)
-        .where(PublishState.system == system)
-    ).first()
-
-    if gate and gate.published:
-        # Post-publish drop: reroute opponent to a BYE pairing, delete our pairing + signup
-        rows = db.exec(
-            scoped(Signup, club_id)
-            .where(Signup.week == week)
-            .where(Signup.system == system)
-            .where(Signup.player_id == player.id)
-        ).all()
-        if not rows:
-            return {"ok": True, "dropped": False}
-
-        my_ids = {s.id for s in rows}
-
-        pairing = db.exec(
-            scoped(Pairing, club_id)
-            .where(Pairing.week == week)
-            .where(Pairing.system == system)
-            .where((Pairing.a_signup_id.in_(my_ids)) | (Pairing.b_signup_id.in_(my_ids)))
-        ).first()
-
-        opponent_name: Optional[str] = None
-        if pairing:
-            if pairing.b_signup_id is not None:
-                opponent_signup_id = (
-                    pairing.b_signup_id if pairing.a_signup_id in my_ids
-                    else pairing.a_signup_id
-                )
-                opponent_signup = db.get(Signup, opponent_signup_id)
-                if opponent_signup:
-                    opponent_name = opponent_signup.player_name
-                    db.add(Pairing(
-                        week=week, system=system,
-                        a_signup_id=opponent_signup_id, b_signup_id=None,
-                        status="pending", prearranged=False,
-                        a_faction=opponent_signup.faction, b_faction=None,
-                        club_id=club_id,
-                    ))
-            db.delete(pairing)
-
-        for s in rows:
-            db.delete(s)
-
-        db.commit()
-
-        all_byes = _get_all_byes(db, system, week, club_id)
-        newly_displaced_names = [opponent_name] if opponent_name else []
-        for bye in all_byes:
-            if bye["player_name"] in newly_displaced_names:
-                bye["is_new"] = True
-        content = _build_bye_discord_message(
-            db,
-            header=f"❌ {name_with_mention(db, player.name, player.id)} has dropped out of this week's session.",
-            newly_displaced_names=newly_displaced_names,
-            all_byes=all_byes,
-            app_url=APP_PUBLIC_URL,
-        )
-        _post_webhook(db, club_id, system, content)
-
-        # The venue laid this week out from the pairings, and one of them has
-        # just been deleted. Without this the dropped game's table stays
-        # occupied by a game nobody is playing, so the venue can't sell it.
-        _resync_venue_floor(db, club_id, system, week)
-
-        return {"ok": True, "dropped": True, "published": True}
-
-    # Pre-publish drop path (unchanged)
     rows = db.exec(
         scoped(Signup, club_id)
         .where(Signup.week == week)
@@ -1031,24 +1059,42 @@ def drop_signup(
     ref_faction, ref_vibe = ref.faction, ref.vibe
     my_ids = {s.id for s in rows}
 
-    # Delete any prearranged pairing involving the dropper; opponent's signup stays
-    prearranged = db.exec(
-        scoped(Pairing, club_id)
-        .where(Pairing.week == week)
-        .where(Pairing.system == system)
-        .where(Pairing.prearranged == True)
-        .where((Pairing.a_signup_id.in_(my_ids)) | (Pairing.b_signup_id.in_(my_ids)))
-    ).all()
-    for p in prearranged:
-        db.delete(p)
+    # Decided BEFORE anything is deleted: the dropper's own row may be the only
+    # generated one, and removing it must not make the week look unpaired.
+    published = week_pairings.is_published(db, club_id, system, week)
+    paired = published or week_pairings.is_paired(db, club_id, system, week)
+
+    # Every row the dropper is in goes, generated or prearranged. Once the week
+    # is paired their opponent is seated again straight away, against someone
+    # already sitting out if there is a good match, otherwise on a BYE. Before
+    # that, a prearranged opponent just returns to the pool for Generate.
+    moved = week_pairings.release(db, club_id, system, week, my_ids, reseat=paired)
 
     for s in rows:
         db.delete(s)
 
     db.commit()
 
-    _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id, player_id=player.id)
+    if published:
+        content = _build_bye_discord_message(
+            db,
+            header=f"❌ {name_with_mention(db, player.name, player.id)} has dropped out of this week's session.",
+            moved=moved,
+            all_byes=_get_all_byes(db, system, week, club_id),
+            app_url=APP_PUBLIC_URL,
+        )
+        _post_webhook(db, club_id, system, content)
+    else:
+        _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id, player_id=player.id)
 
+    if paired:
+        # The venue laid this week out from the pairings, and one of them has
+        # just been deleted. Without this the dropped game's table stays
+        # occupied by a game nobody is playing, so the venue can't sell it.
+        _resync_venue_floor(db, club_id, system, week)
+
+    if published:
+        return {"ok": True, "dropped": True, "published": True}
     return {"ok": True, "dropped": True}
 
 

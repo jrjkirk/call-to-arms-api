@@ -16,7 +16,9 @@ Counted on demand rather than kept in a column. At this club's scale it's one
 indexed join, and a derived value can't drift out of step with the pairings it
 comes from — no sweep to run, nothing to rebuild if a pairing is deleted.
 """
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import bindparam, text
 from sqlmodel import Session, select
@@ -74,6 +76,14 @@ def counts_for_players(
 
     Counting in SQL keeps it to one indexed aggregate. Byes are excluded
     (b_signup_id IS NULL) — nobody plays a bye.
+
+    A game counts once it is official: its week is published, or its session
+    date has passed. Until 2026-09-15 every pairing row counted, so pressing
+    Generate on a week nobody had seen yet moved players' experience and level
+    straight away, and a regenerated preview could move them again. The date
+    half matters as much as the publish half: 44 games in 14 older weeks were
+    played without the week ever being published, and dropping them would have
+    quietly taken games off real players.
     """
     ids = [pid for pid in {p for p in player_ids} if pid is not None]
     if not ids:
@@ -82,7 +92,7 @@ def counts_for_players(
     rows = db.exec(
         text(
             """
-            SELECT s.player_id, count(*) AS games
+            SELECT s.player_id, pr.week, count(*) AS games
             FROM pairings pr
             JOIN signups s
               ON s.id = pr.a_signup_id OR s.id = pr.b_signup_id
@@ -92,12 +102,40 @@ def counts_for_players(
               AND s.club_id = :club_id
               AND s.system = :system
               AND s.player_id IN :ids
-            GROUP BY s.player_id
+            GROUP BY s.player_id, pr.week
             """
         ).bindparams(bindparam("ids", expanding=True)),
         params={"club_id": club_id, "system": system, "ids": ids},
     ).all()
-    counted = {pid: n for pid, n in rows}
+
+    published = {
+        week
+        for (week,) in db.exec(
+            text(
+                """
+                SELECT week FROM publish_state
+                WHERE club_id = :club_id AND system = :system AND published = :published
+                """
+            ),
+            params={"club_id": club_id, "system": system, "published": True},
+        ).all()
+    }
+    today = datetime.now(ZoneInfo("Europe/London")).date()
+
+    def official(week: str) -> bool:
+        if week in published:
+            return True
+        try:
+            return datetime.strptime(week, "%d/%m/%Y").date() < today
+        except (TypeError, ValueError):
+            # A week string nothing can read was never something a player could
+            # see coming, so it keeps counting exactly as it always has.
+            return True
+
+    counted: dict[int, int] = {}
+    for pid, week, n in rows:
+        if official(week):
+            counted[pid] = counted.get(pid, 0) + n
     return {pid: counted.get(pid, 0) for pid in ids}
 
 

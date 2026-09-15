@@ -34,6 +34,7 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `league.py` | Rankings, results endpoints |
 | `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |
 | `pairings_engine.py` | Pairing generation engine — faithful port of the original Streamlit matcher |
+| `week_pairings.py` | Keeps a paired week whole: every signup in exactly one pairing row. Every path that adds/removes a signup or moves a player between rows goes through it |
 | `scheduler.py` | In-process tick loop for the six periodic jobs. **Off unless `SCHEDULER_ENABLED` is set** — local `.env` points at a real DB with real webhooks |
 
 ## Directory layout
@@ -224,6 +225,10 @@ Key invariants:
 - **Vibes carry a behaviour** (`soft` / `wildcard` / `exclusive`), stored per club-system in `ClubSystem.vibe_options` as either plain strings (the old shape, meaning soft, with "Open" implying wildcard) or `{name, behaviour}` objects. `vibes.py` reads both. Club names are no longer restricted to `CANONICAL_VIBES`; the platform catalogue still is.
 - T&T / 3-way grouping intentionally removed (club never uses it)
 - Odd numbers produce a single BYE. **If anyone ticked standby, a volunteer takes it**, chosen before matching (one who did not sit out last session first, then the latest to sign up) and removed from the pool. Sorting volunteers to the back is not enough on its own, because greedy matching lets an earlier player pick a volunteer as a partner. With no volunteers the BYE falls to the greedy fallback. Until 2026-09-15 the sort put volunteers at the FRONT, so they were never the one left over. Pinned by `tests/test_standby_bye.py`.
+- **No BYE two sessions running, where any alternative exists.** "Sat out last session" is the player's OWN most recent earlier week with any row (`previous_bye_player_ids`); a week with both a BYE row and a game counts as a game. After matching, a left-over non-volunteer who sat out last time swaps into a game if the new game is no worse on the hard tiers (format, last opponent, block, intro). Until 2026-09-15 that function returned everyone who had EVER had a BYE, future weeks included, and the only guard was a second pass that already ran for everyone.
+- **A week's own pairings are excluded from its history** (`exclude_week=week`), so Preview after Generate shows what Generate makes.
+- **Once a week is paired, every signup sits in exactly one row** (see `week_pairings.py`). "Paired" = published, or any non-prearranged row exists. Drops (self or admin) re-seat the opponent; late signups (player or admin) are seated; a re-seated player takes a compatible player already on a BYE (never across an exclusive vibe or a block, never a guest) before getting a BYE of their own. Grid delete gives stranded players a BYE and refuses deleting someone's only BYE; grid save refuses double-booking. Pinned by `tests/test_week_pairings.py`, which checks the rule after every scenario.
+- **Experience and levels count a game once it is official**: its week is published, or its session date has passed. Not published alone: 44 older games were played in weeks that were never published.
 - Cron/scheduling is out of scope; the engine is invoked only by admin HTTP endpoints
 
 Admin pairings endpoints (all in `admin.py`, all require caller to hold the system scope):
@@ -231,8 +236,8 @@ Admin pairings endpoints (all in `admin.py`, all require caller to hold the syst
 - `POST /admin/pairings/generate` — delete pending non-prearranged, generate + persist
 - `GET /admin/pairings?system=&week=` — fetch saved rows + publish state
 - `POST /admin/pairings/publish` — upsert PublishState
-- `POST /admin/pairings/save` — grid save-back (writes faction/vibe/eta/pts to Signup rows too)
-- `DELETE /admin/pairings` — delete specific pairing IDs
+- `POST /admin/pairings/save` — grid save-back (writes faction/vibe/eta/pts to Signup rows too); moving players keeps the week whole (409 on double-booking)
+- `DELETE /admin/pairings` — delete specific pairing IDs; stranded players get a BYE, deleting someone's only BYE is a 409
 - `POST /admin/pairings/post-discord` — plain-text post to system Discord webhook
 - `GET /admin/pairings/signup-list?system=&week=` — de-duped signup list for grid dropdowns
 
