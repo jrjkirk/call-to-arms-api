@@ -113,8 +113,8 @@ with Session(database.engine) as db:
 check("the same link doesn't work twice", client_for(1).post("/auth/email/verify", json={"token": tok}).status_code == 410)
 client_for(2).post("/auth/email/link", json={"email": "joel@example.com"})
 r = client_for(2).post("/auth/email/verify", json={"token": token_from(SENT[-1][2])})
-check("confirming an address already on another account is refused with a reason",
-      r.json().get("redirect") == "https://home.calltoarms.app/account?link_error=taken&provider=email", r.text[:150])
+check("confirming an address already on another account offers a merge instead of moving it",
+      r.json().get("redirect") == "https://home.calltoarms.app/account?merge=pending&provider=email", r.text[:150])
 
 
 print("\n3. EMAIL_SIGNIN=open: signing in")

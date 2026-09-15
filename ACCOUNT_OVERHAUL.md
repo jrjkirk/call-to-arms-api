@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0-4 LIVE (2026-09-15; Google invisible until its OAuth secrets are set). Slab 5 (email links) BUILT, not deployed; needs migrations/create_login_tokens.py first. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0-5 LIVE (2026-09-15; Google invisible until its OAuth secrets are set, email off until EMAIL_SIGNIN is set). Slab 6 (link/unlink/merge) BUILT, not deployed; no migration. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -341,7 +341,24 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
      visitor, so `venue_api._throttle_guest`'s per-IP guest-booking limit is really one limit
      shared by every guest. Left alone; fix by reading `Fly-Client-IP`.
    - `login_tokens` rows are never deleted. Harmless at this volume; prune old rows if it grows.
-6. **Link / unlink.** Needs: 0, 1, 2, and at least one of 4/5. (Google linking shipped in 4.) From a signed-in session on
+6. **Link / unlink.** Needs: 0, 1, 2, and at least one of 4/5. (Google linking shipped in 4.)
+   BUILT (`tests/test_link_unlink.py`):
+   - `GET /auth/discord/link`: add a Discord account from /account, including a SECOND one.
+     `POST /auth/identities/{id}/primary` chooses which Discord account posts tag and the gate
+     checks. Together: the fix for `KNOWN_ISSUES.md` #1 (link the account that's in the server,
+     make it primary). Discord adds whichever account is logged in to discord.com in that
+     browser (`prompt=consent` doesn't offer a picker), which /account says.
+   - `DELETE /auth/identities/{id}`: never the last one. Promotes the next identity from the
+     same provider if the removed one was primary; with no Discord left the mirror is cleared and
+     the account keeps the name it went by as `display_name`. Bumps `session_version` (any
+     session may have come in through it) and re-issues this browser's cookie.
+   - Merge on conflict: linking an identity that belongs to another account now OFFERS a merge
+     (for Discord, Google and email alike), because completing that provider's sign-in while
+     signed in here proves both. A signed `cta_merge` cookie (keep, drop, keep's session version,
+     10-minute expiry) backs `GET /auth/merge` (preview, including `plan_merge` problems) and
+     `POST /auth/merge/confirm` (Slab 1 `merge_users`, audit `account.merge`) /
+     `POST /auth/merge/cancel`. The account doing the linking is the one kept.
+   - Audit: `identity.unlink`, `identity.primary`, `account.merge`. From a signed-in session on
    `/account`. Can't unlink your last identity. Linking an identity already on another
    account runs the Slab 1 merge after proving both. Unlinking Discord clears the mirror
    column and bumps `session_version`.

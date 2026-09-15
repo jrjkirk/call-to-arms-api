@@ -127,8 +127,8 @@ check("/account has nothing left to add", client_for(1).get("/auth/account").jso
 with Session(database.engine) as db:
     link_other = auth._link_cookie_value(db.get(User, 2))
 r = callback(client_for(2), "joel", link_other)
-check("someone else linking the same Google account is refused with a reason",
-      r.headers.get("location") == "https://home.calltoarms.app/account?link_error=taken&provider=google",
+check("someone else linking the same Google account is offered a merge, not given it",
+      r.headers.get("location") == "https://home.calltoarms.app/account?merge=pending&provider=google",
       r.headers.get("location"))
 with Session(database.engine) as db:
     check("and it stays where it was", db.exec(select(UserIdentity).where(UserIdentity.provider_user_id == "g-joel")).first().user_id == 1)

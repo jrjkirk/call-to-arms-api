@@ -56,8 +56,17 @@ that **`monitor` mode will not produce it**, because `require_discord_member`
 short-circuits on any player with `discord_verified_at` set and every existing
 player was grandfathered.
 
-**Code.** `database.discord_mentions_for_player_ids` / `database.name_with_mention`,
-`signups.require_discord_member`, `discord_guild.is_guild_member`.
+**Update, 2026-09-15: players can now fix this themselves.** Since the account
+overhaul (Slab 6), an account can hold more than one Discord account. On /account,
+"Add another Discord account" links the one that's in the club's server, and
+"Use for posts" makes it the one mentions and the gate use, while the account they
+log in with keeps working. No admin data change and no broken login, which was the
+reason this was left alone. The graceful display fix above (tag only confirmed
+members) is still worth doing once the bot is in a server.
+
+**Code.** `identity.discord_ids_for_users` (the primary Discord identity) feeds
+`database.discord_mentions_for_player_ids` / `database.name_with_mention` and
+`signups.require_discord_member`; `discord_guild.is_guild_member`.
 
 ---
 

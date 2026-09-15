@@ -75,6 +75,7 @@ from identity import (
 )
 from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
 import email_login
+import user_merge
 from emailer import UndeliverableRecipient
 from observability import capture
 
@@ -123,6 +124,8 @@ def _email_configured() -> bool:
 def linkable_providers() -> list[str]:
     """Sign-in methods a signed-in account can add from /account."""
     providers = []
+    if DISCORD_CLIENT_ID:
+        providers.append(DISCORD)
     if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
         providers.append(GOOGLE)
     if EMAIL_SIGNIN in ("link", "open") and _email_configured():
@@ -602,18 +605,67 @@ def _link_done(origin: str, query: str) -> RedirectResponse:
     return response
 
 
-def _finish_link(db: Session, user: User, profile: ProviderProfile, origin: str) -> RedirectResponse:
-    """Attach `profile` to the signed-in `user`, unless it already belongs to a
-    different account: joining two accounts is a merge, and a merge needs both
-    sides proven (Slab 6), so that is refused with a reason."""
+def _link_outcome(db: Session, user: User, profile: ProviderProfile) -> tuple[str, Optional[str]]:
+    """Attach `profile` to the signed-in `user`. Returns (query string for
+    /account, merge cookie value or None).
+
+    If the identity already belongs to a DIFFERENT account, the person has now
+    proven they hold both: they are signed in to this one, and they just
+    completed the other's sign-in. So instead of refusing, they are offered a
+    merge (Slab 6), which they confirm on /account after seeing what moves.
+    """
     existing = find_identity(db, profile.provider, profile.subject)
     if existing is not None and existing.user_id != user.id:
-        return _link_done(origin, f"link_error=taken&provider={profile.provider}")
+        return f"merge=pending&provider={profile.provider}", _merge_cookie_value(user, existing.user_id)
     attach_identity(db, user, profile)
     if existing is None:
         log_audit(db, user, "identity.link", "user", user.id, f"{profile.provider} {profile.email or profile.subject}")
     db.commit()
-    return _link_done(origin, f"linked={profile.provider}")
+    return f"linked={profile.provider}", None
+
+
+def _finish_link(db: Session, user: User, profile: ProviderProfile, origin: str) -> RedirectResponse:
+    query, merge_cookie = _link_outcome(db, user, profile)
+    response = _link_done(origin, query)
+    if merge_cookie:
+        _set_merge_cookie(response, merge_cookie)
+    return response
+
+
+MERGE_OFFER_SECONDS = 600
+
+
+def _merge_cookie_value(user: User, drop_id: int) -> str:
+    """Signed (keep, drop, keep's session version, expiry). Only the account
+    that proved both can confirm, and only for ten minutes."""
+    expires = int(datetime.utcnow().timestamp()) + MERGE_OFFER_SECONDS
+    body = f"merge:{user.id}:{drop_id}:{user.session_version or 0}:{expires}"
+    return f"{body}.{_sign(body)}"
+
+
+def _set_merge_cookie(response: Response, value: str) -> None:
+    response.set_cookie("cta_merge", value, max_age=MERGE_OFFER_SECONDS,
+                        httponly=True, samesite="lax", secure=True)
+
+
+def _merge_offer(db: Session, raw: Optional[str], user: User) -> Optional[int]:
+    """The account id `user` may merge in, from a genuine unexpired offer
+    made to this same account and session, else None."""
+    if not raw or "." not in raw:
+        return None
+    body, sig = raw.rsplit(".", 1)
+    if not hmac.compare_digest(sig, _sign(body)):
+        return None
+    try:
+        _, keep, drop, ver, expires = body.split(":")
+        keep, drop, ver, expires = int(keep), int(drop), int(ver), int(expires)
+    except ValueError:
+        return None
+    if keep != user.id or ver != (user.session_version or 0):
+        return None
+    if expires < int(datetime.utcnow().timestamp()):
+        return None
+    return drop if db.get(User, drop) is not None else None
 
 
 def _request_origin(request: Request) -> str:
@@ -729,15 +781,13 @@ def email_verify(
                 detail="Open this link in the browser where you're signed in to the account you're adding it to.",
             )
         email_login.spend(db, row)
-        existing = find_identity(db, EMAIL, row.email)
-        if existing is not None and existing.user_id != user.id:
-            db.commit()
-            return {"redirect": f"{row.origin}/account?link_error=taken&provider=email"}
-        attach_identity(db, user, profile)
-        if existing is None:
-            log_audit(db, user, "identity.link", "user", user.id, f"email {row.email}")
+        db.flush()
+        query, merge_cookie = _link_outcome(db, user, profile)
         db.commit()
-        return {"redirect": f"{row.origin}/account?linked=email"}
+        out = JSONResponse({"redirect": f"{row.origin}/account?{query}"})
+        if merge_cookie:
+            _set_merge_cookie(out, merge_cookie)
+        return out
 
     if EMAIL not in sign_in_providers():
         raise HTTPException(status_code=404, detail="Email sign-in isn't available.")
@@ -750,19 +800,65 @@ def email_verify(
     return out
 
 
+@router.get("/discord/link")
+def discord_link(request: Request, user: Optional[User] = Depends(current_user)):
+    """Add a Discord account to the signed-in account (from /account),
+    including a second one: the Discord account that's actually in a club's
+    server, for someone who signs in with another (KNOWN_ISSUES.md #1)."""
+    origin = _safe_return_to(request)
+    if not DISCORD_CLIENT_ID:
+        return RedirectResponse(f"{origin}/account?link_error=unavailable")
+    if user is None:
+        return RedirectResponse(f"{origin}/account")
+    state = secrets.token_urlsafe(24)
+    auth_url = f"{DISCORD_API}/oauth2/authorize?" + urlencode({
+        "client_id": DISCORD_CLIENT_ID,
+        "response_type": "code",
+        "scope": SCOPES,
+        "redirect_uri": f"{BACKEND_URL}/auth/discord/callback",
+        "state": state,
+        # Shows Discord's authorise screen rather than skipping it. It does NOT
+        # let them pick a different Discord account: Discord uses whichever is
+        # logged in to discord.com in this browser, so adding a second one means
+        # logging in to that one there first (/account says so).
+        "prompt": "consent",
+    })
+    response = _oauth_redirect(auth_url, state, origin, "/account")
+    response.set_cookie("cta_oauth_link", _link_cookie_value(user), max_age=300,
+                        httponly=True, samesite="lax", secure=True)
+    return response
+
+
 @router.get("/discord/callback")
 async def discord_callback(
-    code: str,
     state: str,
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
     cta_oauth_state: Optional[str] = Cookie(default=None),
     cta_oauth_return_to: Optional[str] = Cookie(default=None),
     cta_oauth_next: Optional[str] = Cookie(default=None),
+    cta_oauth_link: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_session),
 ):
-    """Step 2: Discord redirected back with a ?code= — exchange it for a user."""
+    """Step 2: Discord redirected back with a ?code= — exchange it for a user,
+    or finish adding a Discord account to one."""
     if not cta_oauth_state or cta_oauth_state != state:
         raise HTTPException(status_code=400, detail="OAuth state mismatch")
+    origin = cta_oauth_return_to or FRONTEND_URL
 
+    if cta_oauth_link:
+        linker = _link_user(db, cta_oauth_link, session_cookie)
+        if error or not code:
+            return _link_done(origin, "link_error=cancelled")
+        if linker is None:
+            return _link_done(origin, "link_error=signed_out")
+        return _finish_link(db, linker, await _discord_profile(code), origin)
+
+    if error or not code:
+        response = RedirectResponse(origin + _safe_next_path(cta_oauth_next))
+        _clear_oauth_cookies(response)
+        return response
     profile = await _discord_profile(code)
     return _finish_sign_in(db, profile, cta_oauth_return_to, cta_oauth_next)
 
@@ -1232,6 +1328,150 @@ def update_account(
     db.commit()
     db.refresh(user)
     return {"ok": True, "user": _user_out(user)}
+
+
+def _identity_of(db: Session, user: User, identity_id: int) -> UserIdentity:
+    ident = db.get(UserIdentity, identity_id)
+    if ident is None or ident.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Sign-in method not found.")
+    return ident
+
+
+def _sync_discord_mirror(db: Session, user: User) -> None:
+    """Point users.discord_id/discord_name/avatar_url at the account's primary
+    Discord identity, or clear them if it has none. Keeps the name the account
+    went by: someone losing their only Discord keeps it as their chosen name."""
+    primary = identity_for(db, user.id, DISCORD)
+    if primary is not None:
+        user.discord_id = primary.provider_user_id
+        user.discord_name = primary.name
+        user.avatar_url = primary.avatar_url
+    else:
+        if user.display_name is None and user.discord_name:
+            user.display_name = clean_display_name(user.discord_name[:32])
+        user.discord_id = None
+        user.discord_name = None
+        user.avatar_url = next(
+            (i.avatar_url for i in db.exec(select(UserIdentity).where(UserIdentity.user_id == user.id)).all()
+             if i.avatar_url), None)
+    db.add(user)
+
+
+@router.delete("/identities/{identity_id}")
+def remove_identity(
+    identity_id: int,
+    response: Response,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Remove a way of signing in. Never the last one. Ends every other session
+    the account has, since any of them may have come in through the method
+    being removed, and keeps this browser signed in with a fresh cookie."""
+    ident = _identity_of(db, user, identity_id)
+    remaining = [i for i in db.exec(select(UserIdentity).where(UserIdentity.user_id == user.id)).all()
+                 if i.id != ident.id]
+    if not remaining:
+        raise HTTPException(status_code=409, detail="That's your only way to sign in, so it can't be removed.")
+    provider, was_primary = ident.provider, ident.is_primary
+    label = f"{provider} {ident.email or ident.name or ident.provider_user_id}"
+    db.delete(ident)
+    db.flush()
+    if was_primary:
+        successor = next((i for i in sorted(remaining, key=lambda i: i.created_at) if i.provider == provider), None)
+        if successor is not None:
+            successor.is_primary = True
+            db.add(successor)
+            db.flush()
+    if provider == DISCORD:
+        _sync_discord_mirror(db, user)
+    bump_session_version(db, user)
+    log_audit(db, user, "identity.unlink", "user", user.id, label)
+    db.commit()
+    db.refresh(user)
+    _set_session_cookie(response, user)
+    return {"ok": True}
+
+
+@router.post("/identities/{identity_id}/primary")
+def make_identity_primary(
+    identity_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Choose which of the account's accounts from one provider counts. For
+    Discord that is the one club posts tag and the membership gate checks."""
+    ident = _identity_of(db, user, identity_id)
+    if not ident.is_primary:
+        for other in db.exec(select(UserIdentity).where(UserIdentity.user_id == user.id)
+                             .where(UserIdentity.provider == ident.provider)).all():
+            if other.is_primary:
+                other.is_primary = False
+                db.add(other)
+        db.flush()
+        ident.is_primary = True
+        db.add(ident)
+        db.flush()
+        if ident.provider == DISCORD:
+            _sync_discord_mirror(db, user)
+        log_audit(db, user, "identity.primary", "user", user.id, f"{ident.provider} {ident.name or ident.provider_user_id}")
+        db.commit()
+    return {"ok": True}
+
+
+@router.get("/merge")
+def merge_preview(
+    user: User = Depends(require_user),
+    cta_merge: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_session),
+):
+    """What merging the offered account into this one would do, and whether it
+    can be done."""
+    drop_id = _merge_offer(db, cta_merge, user)
+    if drop_id is None:
+        raise HTTPException(status_code=404, detail="No merge to confirm. It may have expired.")
+    other = db.get(User, drop_id)
+    plan = user_merge.plan_merge(db, user.id, drop_id)
+    players = db.exec(select(Player, Club).join(Club, Club.id == Player.club_id)
+                      .where(Player.user_id == drop_id)).all()
+    idents = db.exec(select(UserIdentity).where(UserIdentity.user_id == drop_id)).all()
+    return {
+        "other": {
+            "name": display_name_for(other),
+            "created_at": other.created_at,
+            "identities": [{"provider": i.provider, "name": i.name, "email": i.email} for i in idents],
+            "players": [{"name": p.name, "club": c.name} for p, c in players],
+        },
+        "problems": plan.problems,
+    }
+
+
+@router.post("/merge/confirm")
+def merge_confirm(
+    response: Response,
+    user: User = Depends(require_user),
+    cta_merge: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_session),
+):
+    """Fold the offered account into this one (user_merge.merge_users)."""
+    drop_id = _merge_offer(db, cta_merge, user)
+    if drop_id is None:
+        raise HTTPException(status_code=404, detail="No merge to confirm. It may have expired.")
+    dropped_name = display_name_for(db.get(User, drop_id))
+    try:
+        user_merge.merge_users(db, user.id, drop_id)
+    except user_merge.MergeRefused as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="; ".join(e.problems))
+    log_audit(db, user, "account.merge", "user", user.id, f"merged user {drop_id} ({dropped_name!r})")
+    db.commit()
+    response.delete_cookie("cta_merge")
+    return {"ok": True}
+
+
+@router.post("/merge/cancel")
+def merge_cancel(response: Response):
+    response.delete_cookie("cta_merge")
+    return {"ok": True}
 
 
 @router.post("/logout")
