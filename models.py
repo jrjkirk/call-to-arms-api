@@ -6,7 +6,7 @@ strictly reading from these tables until later in the migration.
 """
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import Column, JSON, UniqueConstraint
+from sqlalchemy import Column, Index, JSON, UniqueConstraint, text as sa_text
 from sqlmodel import SQLModel, Field
 
 
@@ -322,14 +322,28 @@ class PairingConfig(SQLModel, table=True):
 
 
 class User(SQLModel, table=True):
-    """An authenticated user. Links a Discord identity to a player_id (after claim)."""
+    """An account. Signs in through one or more UserIdentity rows (Discord
+    today) and owns one Player per club it plays at."""
     __tablename__ = "users"
     __table_args__ = {"extend_existing": True}
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    discord_id: str = Field(unique=True, index=True)
-    discord_name: str
+    # Mirror of this account's Discord identity, kept for the expand phase so
+    # the ~110 call sites reading it keep working. user_identities is the
+    # authority: read the Discord ID through identity.discord_ids_for_users,
+    # and clear this column whenever the Discord identity goes. NULL for an
+    # account with no Discord (2026-09-15, account overhaul Slab 0).
+    discord_id: Optional[str] = Field(default=None, unique=True, index=True)
+    # The Discord handle, refreshed from Discord on every Discord sign-in.
+    # Means "their Discord handle", never "the name they chose": that is
+    # display_name, which no provider writes.
+    discord_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    display_name: Optional[str] = None
+    # Every session cookie carries the version it was issued at. Bumping this
+    # ends every session the account has (recovery, unlink, sign out
+    # everywhere). 0 is the cookie format that predates it, unchanged.
+    session_version: int = Field(default=0)
     player_id: Optional[int] = Field(default=None, index=True)
     is_super_admin: bool = Field(default=False)
     is_platform_admin: bool = Field(default=False)
@@ -1185,6 +1199,45 @@ class AuditLogEntry(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class UserIdentity(SQLModel, table=True):
+    """One way into an account: a Discord, Google or email identity.
+
+    The authority on which Discord account belongs to which user, for sign-in,
+    @-mentions and the guild gate alike, so the three can never disagree (see
+    ACCOUNT_OVERHAUL.md §2b.3 and KNOWN_ISSUES.md #1).
+
+    An account may hold several identities from one provider (Shaun has two
+    Discord accounts, and both should sign him in), but exactly one per
+    provider is `is_primary`. The primary Discord identity is THE Discord
+    account for mentions and the guild gate, and the one users.discord_id
+    mirrors, so "which Discord account is this person" still has one answer.
+
+    `name`, `avatar_url` and `email` are what the provider last told us, and
+    are refreshed at each sign-in. Nothing the user chooses lives here.
+    `email_verified` is the provider's claim; linking and recovery must not
+    trust an address without it.
+    """
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_identity_provider_subject"),
+        Index("uq_identity_primary", "user_id", "provider", unique=True,
+              postgresql_where=sa_text("is_primary"), sqlite_where=sa_text("is_primary")),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    provider: str  # "discord" | "google" | "email"
+    provider_user_id: str
+    is_primary: bool = Field(default=False)
+    email: Optional[str] = None
+    email_verified: bool = Field(default=False)
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_used_at: Optional[datetime] = None
+
+
 class ClubRequest(SQLModel, table=True):
     """A "please add my club" submission from the logged-out hero page.
     Not itself a Club row — approving a request is a platform-admin
@@ -1217,7 +1270,8 @@ class ClubRequest(SQLModel, table=True):
     # checked. Requesting now requires a Discord sign-in, so a request carries a
     # real account you can look up. Nullable because rows predating this exist.
     #
-    # discord_id is the identity, NOT requester_user_id: a brand-new organiser
+    # The sign-in identity (identity_provider/identity_subject below; discord_id
+    # before 2026-09-15) is who asked, NOT requester_user_id: a brand-new organiser
     # has no User row yet and cannot get one, because users.club_id is NOT NULL
     # and their club is the thing that doesn't exist. The sign-in stops at the
     # signed cta_pending_signup cookie and this column carries it forward, so
@@ -1225,6 +1279,11 @@ class ClubRequest(SQLModel, table=True):
     discord_id: Optional[str] = Field(default=None, index=True)
     discord_name: Optional[str] = None
     requester_user_id: Optional[int] = Field(default=None, index=True)
+    # The provider-neutral identity (2026-09-15). What duplicate detection and
+    # provisioning key on, so a request can come from any sign-in method.
+    # discord_id/discord_name above stay, dual-written, for the reviewer's view.
+    identity_provider: Optional[str] = None
+    identity_subject: Optional[str] = Field(default=None, index=True)
 
     # --- What provisioning needs (2026-09-06) ---------------------------
     # Each of these used to be an email exchange before a club could be set up.

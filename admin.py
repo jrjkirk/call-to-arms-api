@@ -44,6 +44,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
+from identity import DISCORD, ProviderProfile, create_user_for_profile, find_user_for_profile
 from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlayerDiscordVerification, PlayerExperienceAdjustment, PlayerLevelAnnouncement, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from observability import capture
@@ -5260,6 +5261,21 @@ def search_users(
     return result[:50]
 
 
+def _club_request_profile(req: ClubRequest) -> Optional[ProviderProfile]:
+    """Who asked for this club, as a sign-in identity provisioning can make an
+    account for. Falls back to discord_id for a request written before
+    identity_provider/identity_subject existed. None for the anonymous
+    requests that predate sign-in being required."""
+    if req.identity_provider and req.identity_subject:
+        provider, subject = req.identity_provider, req.identity_subject
+    elif req.discord_id:
+        provider, subject = DISCORD, req.discord_id
+    else:
+        return None
+    name = req.discord_name if provider == DISCORD else None
+    return ProviderProfile(provider=provider, subject=subject, name=name or req.requester_name)
+
+
 def _suggest_slug(name: str) -> str:
     """Best-effort hostname-safe slug from a club name, to prefill the provision
     form. The platform admin still confirms/edits it — it becomes the club's
@@ -5492,18 +5508,17 @@ def provision_club_request(
     # existence. When they next log in, discord_callback finds an existing user
     # and drops them straight into their own admin.
     appointed = None
-    if body.appoint_super_admin and req.discord_id:
-        target = db.exec(select(User).where(User.discord_id == req.discord_id)).first()
+    requester = _club_request_profile(req)
+    if body.appoint_super_admin and requester is not None:
+        target = find_user_for_profile(db, requester)
         if target is None:
-            target = User(
-                discord_id=req.discord_id,
-                discord_name=req.discord_name or req.requester_name,
+            target = create_user_for_profile(
+                db, requester,
                 player_id=None,
                 club_id=club.id,
                 home_club_id=club.id,
                 is_super_admin=True,
             )
-            db.add(target)
         else:
             # An existing player who is starting a club. Their club_id has to
             # move, because club-scoped admin authority is `is_super_admin AND

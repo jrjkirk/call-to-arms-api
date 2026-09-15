@@ -18,6 +18,7 @@ from sqlalchemy import event
 from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 
+from identity import discord_ids_for_users
 from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, Player, ScheduledJobRun, User
 
 T = TypeVar("T")
@@ -29,6 +30,9 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
+    "user_identities",  # sign-in identities per account (Discord today); the
+                        # authority on which Discord ID a user has, created at
+                        # sign-in and account provisioning
     "signups",        # Call to Arms form: insert/update/delete own signup; also pairing grid save-back
     "pairings",       # drop-out flow + admin pairing generation/editing/deletion
     "publish_state",  # admin publish/unpublish pairings
@@ -267,8 +271,9 @@ def discord_mentions_for_player_ids(
     user_ids = {p.user_id for p in players}
     if not user_ids:
         return {}
-    users = db.exec(select(User).where(User.id.in_(user_ids))).all()
-    discord_by_user_id = {u.id: u.discord_id for u in users if u.discord_id}
+    # user_identities is the authority on a user's Discord account, shared with
+    # sign-in and the guild gate (ACCOUNT_OVERHAUL.md §7, Slab 0).
+    discord_by_user_id = discord_ids_for_users(db, user_ids)
     return {
         p.id: f"<@{discord_by_user_id[p.user_id]}>"
         for p in players

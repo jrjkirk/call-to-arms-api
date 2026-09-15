@@ -638,8 +638,8 @@ def club_request_identity(identity: Optional[dict] = Depends(requester_identity)
     to show the sign-in button instead.
     """
     if identity is None:
-        return {"signed_in": False, "discord_name": None}
-    return {"signed_in": True, "discord_name": identity["discord_name"]}
+        return {"signed_in": False, "name": None, "discord_name": None}
+    return {"signed_in": True, "name": identity["name"], "discord_name": identity["discord_name"]}
 
 
 @app.post("/club-requests", status_code=201)
@@ -689,12 +689,19 @@ def create_club_request(
     systems = [s.strip() for s in (body.systems or []) if s and s.strip()]
     details = _clean_system_details(body.system_details, systems)
 
-    # One pending request per Discord account. Someone clicking submit twice, or
+    # One pending request per sign-in identity. Someone clicking submit twice, or
     # having second thoughts about the wording, shouldn't leave two rows for a
-    # reviewer to reconcile.
+    # reviewer to reconcile. A Discord identity also matches on discord_id, for a
+    # request written before identity_provider/identity_subject existed.
+    same_identity = (
+        (ClubRequest.identity_provider == identity["provider"])
+        & (ClubRequest.identity_subject == identity["subject"])
+    )
+    if identity["discord_id"]:
+        same_identity = same_identity | (ClubRequest.discord_id == identity["discord_id"])
     duplicate = session.exec(
         select(ClubRequest)
-        .where(ClubRequest.discord_id == identity["discord_id"])
+        .where(same_identity)
         .where(ClubRequest.status == "pending")
     ).first()
     if duplicate is not None:
@@ -711,6 +718,8 @@ def create_club_request(
         notes=(body.notes or "").strip() or None,
         discord_id=identity["discord_id"],
         discord_name=identity["discord_name"],
+        identity_provider=identity["provider"],
+        identity_subject=identity["subject"],
         requester_user_id=identity["user_id"],
         region=region,
         preferred_slug=(body.preferred_slug or "").strip().lower() or None,

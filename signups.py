@@ -22,6 +22,7 @@ from database import active_player_id_for, posting_enabled, get_session, sibling
 from models import Signup, Pairing, PublishState, Player, User, SystemConfig, ClubSystem, TableBookingConfig, Club, PlayerDiscordVerification, PlayerExperienceAdjustment
 import vibes
 import discord_guild
+from identity import discord_id_for_user
 from experience import summary as experience_summary
 from levels import progress as level_progress
 from auth import active_club_id, admin_scopes, require_user
@@ -375,11 +376,14 @@ def require_discord_member(
     # players. An admin vouching for someone must never be blocked by this.
     if player.user_id is None:
         return
-    account = db.get(User, player.user_id)
-    if account is None or not account.discord_id:
+    # Decision A (ACCOUNT_OVERHAUL.md §8): an account with no Discord linked is
+    # let through. Read from user_identities, the same source as sign-in, so
+    # an unlinked Discord account stops counting here the moment it's unlinked.
+    discord_id = discord_id_for_user(db, player.user_id)
+    if not discord_id:
         return
 
-    member = discord_guild.is_guild_member(guild_id, account.discord_id)
+    member = discord_guild.is_guild_member(guild_id, discord_id)
 
     if member is True:
         _record_verification(db, player.id, guild_id)

@@ -9,12 +9,21 @@ Flow:
   3. /auth/me               -- frontend uses this to ask "who am I logged in as?"
   4. /auth/logout           -- clear the cookie
 
-Sessions are stateless: the cookie value is `{user_id}.{hmac-signature}`.
-We trust the cookie iff the signature verifies with our SESSION_SECRET.
+Sessions are signed, and revocable per account: the cookie value is
+`{user_id}.{hmac}` or `{user_id}:{session_version}.{hmac}`. We trust it iff the
+signature verifies with SESSION_SECRET AND the version still matches the
+user's session_version. Version 0 is the original format, byte for byte, so
+introducing versions logged nobody out. Bumping the version (identity.
+bump_session_version) ends every session that account has.
+
+PROVIDERS NOTE (account overhaul Slab 0, 2026-09-15): a provider's callback
+only turns its code into an identity.ProviderProfile. Everything after that,
+finding or deferring the account, the cookie, and where to send them, is
+_finish_sign_in and is shared by every provider. See ACCOUNT_OVERHAUL.md.
 
 COOKIE NOTE: cta_session, cta_oauth_state, cta_oauth_return_to,
-cta_oauth_next and cta_pending_signup all currently use samesite="lax" +
-secure=True. Lax is enough because the API is served from
+cta_oauth_next and cta_pending_signup all use samesite="lax" + secure=True
+(the three cta_oauth_* cookies lacked secure until 2026-09-15). Lax is enough because the API is served from
 api.calltoarms.app, which is same-site with every club subdomain — the
 session cookie rides along on the frontend's credentialed fetches. Moving
 the API to a different registrable domain would silently log everyone out
@@ -58,7 +67,11 @@ from database import (
     active_player_id_for, get_session, resolve_active_club_id,
     resolve_request_club_id, scoped,
 )
-from models import Club, ClubSystem, SystemConfig, User, Player, AdminRole
+from identity import (
+    DISCORD, ProviderProfile, bump_session_version, create_user_for_profile,
+    display_name_for, find_user_for_profile, identity_for, record_sign_in,
+)
+from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
@@ -93,43 +106,83 @@ def _sign(value: str) -> str:
     ).hexdigest()
 
 
-def _make_session_cookie(user_id: int) -> str:
-    """Return 'user_id.signature' which the browser stores as the session cookie."""
-    body = str(user_id)
+SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+
+
+def _make_session_cookie(user_id: int, version: int = 0) -> str:
+    """The signed session cookie value. Version 0 keeps the original
+    'user_id.signature' shape exactly."""
+    body = str(user_id) if not version else f"{user_id}:{version}"
     return f"{body}.{_sign(body)}"
 
 
-def _verify_session_cookie(raw: str) -> Optional[int]:
-    """If the cookie is valid and untampered, return the user_id. Otherwise None."""
+def _parse_session_cookie(raw: Optional[str]) -> Optional[tuple[int, int]]:
+    """(user_id, version) if the cookie is untampered, else None. Says nothing
+    about whether that version is still current; _session_user checks that."""
     if not raw or "." not in raw:
         return None
     body, sig = raw.rsplit(".", 1)
     if not hmac.compare_digest(sig, _sign(body)):
         return None
+    uid, _, ver = body.partition(":")
     try:
-        return int(body)
+        return int(uid), int(ver) if ver else 0
     except ValueError:
         return None
 
 
-def _make_pending_signup_cookie(discord_id: str, discord_name: str, avatar_url: Optional[str]) -> str:
+def _verify_session_cookie(raw: str) -> Optional[int]:
+    """If the cookie is valid and untampered, return the user_id. Otherwise None.
+    Signature only: use _session_user for anything that trusts the session."""
+    parsed = _parse_session_cookie(raw)
+    return parsed[0] if parsed else None
+
+
+def _session_user(db: Session, raw: Optional[str]) -> Optional[User]:
+    """The account a session cookie signs in, or None if it is missing,
+    tampered with, or from before the account's sessions were ended."""
+    parsed = _parse_session_cookie(raw)
+    if parsed is None:
+        return None
+    user = db.get(User, parsed[0])
+    if user is None or parsed[1] != (user.session_version or 0):
+        return None
+    return user
+
+
+def _set_session_cookie(response: Response, user: User) -> None:
+    response.set_cookie(
+        "cta_session",
+        _make_session_cookie(user.id, user.session_version or 0),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=True,
+    )
+
+
+def _make_pending_profile_cookie(profile: ProviderProfile) -> str:
     """Same 'body.signature' shape as the session cookie, but the body is a
-    base64-encoded JSON payload carrying the Discord identity for a
-    brand-new user (see discord_callback's new-user branch) — enough to
-    create the real User row later in complete-signup without re-hitting
-    Discord's API."""
-    payload = json.dumps({
-        "discord_id": discord_id,
-        "discord_name": discord_name,
-        "avatar_url": avatar_url,
-    })
-    body = base64.urlsafe_b64encode(payload.encode()).decode()
+    base64-encoded JSON payload carrying the identity of someone signed in
+    with a provider who has no account yet (see _finish_sign_in's new-person
+    branch): enough to create the account in complete-signup without asking
+    the provider again."""
+    body = base64.urlsafe_b64encode(json.dumps(profile.to_payload()).encode()).decode()
     return f"{body}.{_sign(body)}"
 
 
-def _verify_pending_signup_cookie(raw: Optional[str]) -> Optional[dict]:
-    """If the cookie is valid and untampered, return the decoded payload dict.
-    Otherwise None (missing, signature mismatch, or malformed body)."""
+def _make_pending_signup_cookie(discord_id: str, discord_name: str, avatar_url: Optional[str]) -> str:
+    """A pending cookie for a Discord identity. Kept for the tests and for any
+    caller that only has Discord's fields."""
+    return _make_pending_profile_cookie(ProviderProfile(
+        provider=DISCORD, subject=discord_id, name=discord_name, avatar_url=avatar_url,
+    ))
+
+
+def _verify_pending_signup_cookie(raw: Optional[str]) -> Optional[ProviderProfile]:
+    """If the cookie is valid and untampered, return the identity it carries.
+    Otherwise None (missing, signature mismatch, or malformed body). Accepts
+    the Discord-only payload that predates providers."""
     if not raw or "." not in raw:
         return None
     body, sig = raw.rsplit(".", 1)
@@ -139,9 +192,9 @@ def _verify_pending_signup_cookie(raw: Optional[str]) -> Optional[dict]:
         payload = json.loads(base64.urlsafe_b64decode(body.encode()).decode())
     except Exception:
         return None
-    if not isinstance(payload, dict) or not payload.get("discord_id"):
+    if not isinstance(payload, dict):
         return None
-    return payload
+    return ProviderProfile.from_payload(payload)
 
 
 def _safe_return_to(request: Request) -> str:
@@ -168,7 +221,7 @@ def requester_identity(
     cta_pending_signup: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_session),
 ) -> Optional[dict]:
-    """The Discord identity behind a request, from EITHER a real session or a
+    """The sign-in identity behind a request, from EITHER a real session or a
     half-finished sign-in. None if neither is present.
 
     Two sources because of a bootstrap problem: a club organiser signing up to
@@ -176,27 +229,46 @@ def requester_identity(
     NULL and the club they are asking for is the one that does not exist yet.
     Their sign-in legitimately stops at the signed, short-lived
     cta_pending_signup cookie — the same one /join reads — and that is a real,
-    verified Discord identity even though no account exists behind it.
+    verified identity even though no account exists behind it.
 
-    Returns {discord_id, discord_name, user_id|None}. Callers that need an
-    actual account should keep using require_user instead.
+    Returns {provider, subject, name, discord_id, discord_name, user_id}.
+    discord_id/discord_name are None unless the identity is Discord (they are
+    what the reviewer sees on a club request). For a real session the identity
+    is the account's Discord one if it has one, else its first identity.
+    Callers that need an actual account should keep using require_user.
     """
     if session_cookie:
-        user_id = _verify_session_cookie(session_cookie)
-        if user_id is not None:
-            user = db.get(User, user_id)
-            if user is not None:
-                return {
-                    "discord_id": user.discord_id,
-                    "discord_name": user.discord_name,
-                    "user_id": user.id,
-                }
+        user = _session_user(db, session_cookie)
+        if user is not None:
+            ident = identity_for(db, user.id, DISCORD)
+            if ident is None:
+                ident = db.exec(
+                    select(UserIdentity).where(UserIdentity.user_id == user.id)
+                    .order_by(UserIdentity.id)
+                ).first()
+            if ident is not None:
+                provider, subject = ident.provider, ident.provider_user_id
+            else:
+                # Not yet backfilled: the mirror is all there is.
+                provider, subject = DISCORD, user.discord_id
+            return {
+                "provider": provider,
+                "subject": subject,
+                "name": display_name_for(user),
+                "discord_id": subject if provider == DISCORD else None,
+                "discord_name": user.discord_name if provider == DISCORD else None,
+                "user_id": user.id,
+            }
 
     pending = _verify_pending_signup_cookie(cta_pending_signup)
     if pending is not None:
+        is_discord = pending.provider == DISCORD
         return {
-            "discord_id": pending["discord_id"],
-            "discord_name": pending["discord_name"],
+            "provider": pending.provider,
+            "subject": pending.subject,
+            "name": pending.name,
+            "discord_id": pending.subject if is_discord else None,
+            "discord_name": pending.name if is_discord else None,
             "user_id": None,
         }
     return None
@@ -206,13 +278,9 @@ def current_user(
     session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
     db: Session = Depends(get_session),
 ) -> Optional[User]:
-    """Resolve the current user from the session cookie, or None if not logged in."""
-    if not session_cookie:
-        return None
-    user_id = _verify_session_cookie(session_cookie)
-    if user_id is None:
-        return None
-    return db.get(User, user_id)
+    """Resolve the current user from the session cookie, or None if not logged
+    in (or that account's sessions have since been ended)."""
+    return _session_user(db, session_cookie)
 
 
 def require_user(user: Optional[User] = Depends(current_user)) -> User:
@@ -315,9 +383,9 @@ def discord_login(request: Request, next: Optional[str] = None):
     auth_url = f"{DISCORD_API}/oauth2/authorize?{urlencode(params)}"
 
     response = RedirectResponse(auth_url)
-    response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax")
-    response.set_cookie("cta_oauth_return_to", origin, max_age=300, httponly=True, samesite="lax")
-    response.set_cookie("cta_oauth_next", next_path, max_age=300, httponly=True, samesite="lax")
+    response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax", secure=True)
+    response.set_cookie("cta_oauth_return_to", origin, max_age=300, httponly=True, samesite="lax", secure=True)
+    response.set_cookie("cta_oauth_next", next_path, max_age=300, httponly=True, samesite="lax", secure=True)
     return response
 
 
@@ -334,6 +402,13 @@ async def discord_callback(
     if not cta_oauth_state or cta_oauth_state != state:
         raise HTTPException(status_code=400, detail="OAuth state mismatch")
 
+    profile = await _discord_profile(code)
+    return _finish_sign_in(db, profile, cta_oauth_return_to, cta_oauth_next)
+
+
+async def _discord_profile(code: str) -> ProviderProfile:
+    """Turn Discord's authorisation code into who they are. The only part of
+    signing in that is Discord's; everything after is _finish_sign_in."""
     redirect_uri = f"{BACKEND_URL}/auth/discord/callback"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -363,22 +438,35 @@ async def discord_callback(
         discord_user = user_resp.json()
 
     discord_id = discord_user["id"]
-    discord_name = discord_user.get("global_name") or discord_user.get("username", "Unknown")
     avatar_hash = discord_user.get("avatar")
-    avatar_url = (
-        f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.png"
-        if avatar_hash else None
+    return ProviderProfile(
+        provider=DISCORD,
+        subject=discord_id,
+        name=discord_user.get("global_name") or discord_user.get("username", "Unknown"),
+        avatar_url=(
+            f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.png"
+            if avatar_hash else None
+        ),
     )
 
-    existing = db.exec(select(User).where(User.discord_id == discord_id)).first()
-    origin = cta_oauth_return_to or FRONTEND_URL
+
+def _finish_sign_in(
+    db: Session,
+    profile: ProviderProfile,
+    return_to_cookie: Optional[str],
+    next_cookie: Optional[str],
+) -> RedirectResponse:
+    """The provider-neutral half of every sign-in: find the account, or defer
+    creating one, then send them where they were going."""
+    existing = find_user_for_profile(db, profile)
+    origin = return_to_cookie or FRONTEND_URL
     # Re-validated rather than trusted: the cookie is ours and HttpOnly, but a
     # path that reaches a redirect deserves the same check on the way out as it
     # got on the way in.
-    next_path = _safe_next_path(cta_oauth_next)
+    next_path = _safe_next_path(next_cookie)
 
     if existing is None:
-        # Brand-new Discord identity — defer creating the User row until
+        # Brand-new identity — defer creating the User row until
         # they pick a club (users.club_id is NOT NULL and never reopened;
         # see complete-signup). Carry the identity in a short-lived signed
         # cookie and send them to the frontend's club-picker.
@@ -405,38 +493,52 @@ async def discord_callback(
             response = RedirectResponse(join_url)
         response.set_cookie(
             "cta_pending_signup",
-            _make_pending_signup_cookie(discord_id, discord_name, avatar_url),
+            _make_pending_profile_cookie(profile),
             max_age=600,  # 10 minutes: enough to pick a club, short enough not to linger
             httponly=True,
             samesite="lax",
             secure=True,
         )
-        response.delete_cookie("cta_oauth_state")
-        response.delete_cookie("cta_oauth_return_to")
-        response.delete_cookie("cta_oauth_next")
+        _clear_oauth_cookies(response)
+        # find_user_for_profile may have healed a mirror-only account's identity
+        # row; nothing else was written, but don't leave it half-done.
+        db.commit()
         return response
 
-    existing.discord_name = discord_name
-    existing.avatar_url = avatar_url
-    existing.last_login_at = datetime.utcnow()
-    db.add(existing)
+    # Only provider-owned fields change on a returning sign-in; see
+    # identity.record_sign_in. display_name is the user's and is never touched.
+    record_sign_in(db, existing, profile)
     db.commit()
     db.refresh(existing)
 
-    cookie_value = _make_session_cookie(existing.id)
     response = RedirectResponse(origin + next_path)
-    response.set_cookie(
-        "cta_session",
-        cookie_value,
-        max_age=60 * 60 * 24 * 30,  # 30 days
-        httponly=True,
-        samesite="lax",
-        secure=True,
-    )
+    _set_session_cookie(response, existing)
+    _clear_oauth_cookies(response)
+    return response
+
+
+def _clear_oauth_cookies(response: Response) -> None:
     response.delete_cookie("cta_oauth_state")
     response.delete_cookie("cta_oauth_return_to")
     response.delete_cookie("cta_oauth_next")
-    return response
+
+
+def _user_out(user: User) -> dict:
+    """The account as the browser sees it. Explicit, so a column added to
+    users (an email, a token, session_version) never reaches the browser just
+    by existing — /auth/me used to return the raw row."""
+    return {
+        "id": user.id,
+        "name": display_name_for(user),
+        "display_name": user.display_name,
+        "discord_name": user.discord_name,
+        "avatar_url": user.avatar_url,
+        "player_id": user.player_id,
+        "club_id": user.club_id,
+        "home_club_id": user.home_club_id,
+        "is_super_admin": user.is_super_admin,
+        "is_platform_admin": user.is_platform_admin,
+    }
 
 
 @router.get("/me")
@@ -484,7 +586,7 @@ def me(
 
     return {
         "authenticated": True,
-        "user": user,
+        "user": _user_out(user),
         "player": linked_player,
         "has_club": has_club,
         "active_club": (
@@ -508,11 +610,11 @@ def complete_signup(
     cta_pending_signup: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_session),
 ):
-    """Step 3 for a brand-new Discord identity: the frontend's club-picker
+    """Step 3 for a brand-new identity: the frontend's club-picker
     submits the chosen club, and the deferred User row (see
-    discord_callback's new-user branch) is created for real here.
+    _finish_sign_in's new-person branch) is created for real here.
 
-    Race-safe: if a User row for this discord_id already exists by the
+    Race-safe: if an account for this identity already exists by the
     time this runs (double-submit, two tabs), don't create a duplicate —
     just log into the existing row, same idempotent spirit as
     admin.py's grant_role.
@@ -521,25 +623,20 @@ def complete_signup(
     if pending is None:
         raise HTTPException(status_code=400, detail="No valid pending signup found. Please log in again.")
 
-    discord_id = pending["discord_id"]
-
     club = db.get(Club, body.club_id)
     if club is None or not club.active:
         raise HTTPException(status_code=404, detail="Club not found.")
 
-    user = db.exec(select(User).where(User.discord_id == discord_id)).first()
+    user = find_user_for_profile(db, pending)
     if user is None:
-        user = User(
-            discord_id=discord_id,
-            discord_name=pending["discord_name"],
-            avatar_url=pending.get("avatar_url"),
+        user = create_user_for_profile(
+            db, pending,
             player_id=None,
             club_id=club.id,
             home_club_id=club.id,  # the club they picked is their soft home
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+    db.commit()
+    db.refresh(user)
 
     # Brand-new identity: active club == the club they just picked (== home).
     my_player_id = active_player_id_for(db, user, club.id)
@@ -553,19 +650,12 @@ def complete_signup(
             .order_by(Player.name)
         ).all()
 
-    response.set_cookie(
-        "cta_session",
-        _make_session_cookie(user.id),
-        max_age=60 * 60 * 24 * 30,  # 30 days
-        httponly=True,
-        samesite="lax",
-        secure=True,
-    )
+    _set_session_cookie(response, user)
     response.delete_cookie("cta_pending_signup")
 
     return {
         "authenticated": True,
-        "user": user,
+        "user": _user_out(user),
         "player": linked_player,
         "claim_candidates": [
             {"id": p.id, "name": p.name, "default_faction": p.default_faction}
@@ -683,6 +773,25 @@ def create_profile(
 def logout(response: Response):
     """Clear the session cookie. Returns JSON because the frontend calls this
     via fetch(); a redirect response would just confuse the fetch."""
+    response.delete_cookie(
+        "cta_session",
+        httponly=True,
+        samesite="lax",
+        secure=True,
+    )
+    return {"ok": True}
+
+
+@router.post("/logout-everywhere")
+def logout_everywhere(
+    response: Response,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """End every session this account has, on every device, including this
+    one. The primitive recovery and unlinking are built on."""
+    bump_session_version(db, user)
+    db.commit()
     response.delete_cookie(
         "cta_session",
         httponly=True,

@@ -14,7 +14,10 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
   - We don't manage migrations here — schema source of truth is the Streamlit app (for now)
   - SQLModel models in `models.py` mirror the Supabase schema exactly
 - **Auth:** Discord OAuth2, stateless HMAC session cookie (`cta_session`)
-  - `SameSite=None; Secure` — cross-site from vercel.app → fly.dev
+  - `SameSite=Lax; Secure` — the API is served from api.calltoarms.app, same-site with every
+    club subdomain. See the COOKIE NOTE in `auth.py`'s docstring before changing it.
+  - **Planned overhaul:** non-Discord sign-in + account management. Read
+    `ACCOUNT_OVERHAUL.md` before touching auth, `users`, or display names.
 
 ## File map
 
@@ -24,6 +27,8 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `database.py` | Engine, `get_session` dependency, `WRITE_ALLOWED_TABLES` guard |
 | `models.py` | SQLModel table definitions |
 | `auth.py` | Discord OAuth, session cookie helpers, `require_user` / `current_user` deps, auth endpoints |
+| `identity.py` | Accounts vs sign-in identities (`user_identities`). The only place to ask "which account is this sign-in" or "which Discord ID does this user have" |
+| `user_merge.py` | Merge two accounts. `USER_REFERENCES` must list every column holding a users.id, or merges refuse |
 | `signups.py` | Signup CRUD endpoints |
 | `players.py` | Player read endpoints |
 | `league.py` | Rankings, results endpoints |
@@ -221,6 +226,27 @@ Admin pairings endpoints (all in `admin.py`, all require caller to hold the syst
 - `DELETE /admin/pairings` — delete specific pairing IDs
 - `POST /admin/pairings/post-discord` — plain-text post to system Discord webhook
 - `GET /admin/pairings/signup-list?system=&week=` — de-duped signup list for grid dropdowns
+
+## Account overhaul (Slabs 0-1 built, not deployed)
+
+`ACCOUNT_OVERHAUL.md` is the audit and plan for adding Google / email sign-in and real
+account management (own display name, link email, link/unlink Discord, recovery). Read it
+before any work on `auth.py`, `identity.py`, the `users` table, or player renames. It has
+the full Discord-dependency inventory with file:line, the slab dependency chain, and
+Joel's settled decisions (§8).
+
+The things most likely to bite if you skip it:
+- `user_identities` is the authority on a user's Discord ID. Read it through
+  `identity.discord_ids_for_users`, never `users.discord_id` directly (that column is a
+  dual-written mirror, cleared on unlink).
+- `users.discord_name` means **the Discord handle** and is refreshed on every Discord
+  sign-in. The name a user chooses is `users.display_name`, which no provider writes.
+  Never store a user's choice in `discord_name` or `avatar_url`.
+- Sessions are revocable: the cookie carries `users.session_version`. Anything that should
+  end a person's sessions (recovery, unlink) calls `identity.bump_session_version`.
+- `pairings_engine.py` keys players on their normalised **name**, not `player_id`, so
+  renaming a `Player` wipes their last-opponent history and colliding names drop a
+  player from pairings. Self-serve renames touch the matcher invariant above.
 
 ## Known issues
 
