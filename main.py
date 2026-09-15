@@ -887,9 +887,11 @@ def get_player(player_id: int, user: User = Depends(require_user), club_id: int 
 
     # Discord identity
     discord_user = session.get(User, player.user_id) if player.user_id else None
+    # Only an account with a Discord handle gets the Discord chip; one that
+    # signs in with Google alone has nothing to show there.
     discord_info = (
         {"discord_name": discord_user.discord_name, "avatar_url": discord_user.avatar_url}
-        if discord_user else None
+        if discord_user and discord_user.discord_name else None
     )
 
     # Index this player's signups by system and by id for quick lookup

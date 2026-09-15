@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0, 1 and 2 LIVE (2026-09-15). Slab 3 BUILT, not deployed. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0-3 LIVE (2026-09-15). Slab 4 (Google) BUILT, not deployed; needs Google OAuth credentials. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -293,13 +293,34 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
    user search (`POST /admin/platform/users/{id}/reset-name`), both logged as
    `account.name.reset`. The edit-player field formerly labelled "Display Name" is now
    "Roster name". The removed list is still in the repo's history; it was not rewritten.
-4. **Google sign-in.** Needs: 0, 2, 3. Standard OIDC, one module. Also the §5 copy sweep and
-   the privacy page, in the same release. Implements Decision C's "offer to link" on a
-   verified-email match.
+4. **Google sign-in.** Needs: 0, 2, 3. BUILT, in two stages controlled by the API's
+   `GOOGLE_SIGNIN` (a Fly secret, no deploy to switch), and invisible until
+   `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set:
+   - **`link` (default): add Google from /account only.** Built first because, with no
+     Discord emails (Decision D), a "Sign in with Google" button before regulars have linked
+     hands every Discord player who presses it a second, empty account. `GET /auth/google/link`
+     (signed in) sets a signed `cta_oauth_link` cookie (user id + session version); the shared
+     `GET /auth/google/callback` attaches the identity, refusing (`?link_error=taken`) one that
+     belongs to another account (joining two accounts is Slab 6's proven merge). Audit-logged
+     as `identity.link`. `/account` shows the result and the Google row with its email.
+   - **`open`: also a sign-in method.** `/auth/me` returns `sign_in_providers`; web
+     `$lib/signInProviders` + `GoogleSignIn.svelte` add "Sign in with Google" beside Discord on
+     the sign-in prompt, hero, signup, leagues, request-club and join; the header's Sign in goes
+     to a new `/signin` chooser when there is more than one method. A new Google account starts
+     with `display_name` = its Google name and no Discord. Decision C: a new sign-in whose
+     verified email is already verified on an account gets `/join?existing_account=1` and a
+     banner (nothing joined).
+   - No new dependency: the code is exchanged server to server, and the profile read from
+     Google's userinfo endpoint (no ID token to verify). `prompt=select_account`.
+   - Privacy page updated (Google identity data, account name, third parties).
+   - Tests: `tests/test_google_sign_in.py` (Google stubbed). Browser-verified locally with a
+     stub Google in both modes.
+   - **This slab now also contains Google linking**, which the plan had in Slab 6. Slab 6 is left
+     with unlinking, linking Discord, and merge-on-conflict.
 5. **Email magic link.** Needs: 0, 2, and new rate limiting. `login_tokens` table, single-use
    short-expiry hashed tokens, per-address and per-IP limits. No passwords. This is also the
    recovery path; recovery bumps `session_version`. Security-sensitive: review properly.
-6. **Link / unlink.** Needs: 0, 1, 2, and at least one of 4/5. From a signed-in session on
+6. **Link / unlink.** Needs: 0, 1, 2, and at least one of 4/5. (Google linking shipped in 4.) From a signed-in session on
    `/account`. Can't unlink your last identity. Linking an identity already on another
    account runs the Slab 1 merge after proving both. Unlinking Discord clears the mirror
    column and bumps `session_version`.

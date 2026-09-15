@@ -129,6 +129,15 @@ fly secrets set DISCORD_CLIENT_SECRET=<new value> -a call-to-arms-api
 Worth considering a second, separate Discord application for local dev to
 remove this failure mode entirely (not done yet).
 
+## Google OAuth (account overhaul Slab 4)
+
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Fly secrets) switch Google on;
+`GOOGLE_SIGNIN` is `link` (add Google from /account only, the default) or `open`
+(also a sign-in button). Use a **separate Google client for local dev** (redirect
+`http://localhost:8010/auth/google/callback`) from production's
+(`https://api.calltoarms.app/auth/google/callback`), so resetting one secret can't
+break the other the way the shared Discord secret did.
+
 ## ⚠️ WRITE_ALLOWED_TABLES guard
 
 `database.py` registers a SQLAlchemy `before_flush` listener that raises `RuntimeError` for any write to a table not in `WRITE_ALLOWED_TABLES`. This is a safety net while the migration from Streamlit is in progress.

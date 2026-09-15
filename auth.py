@@ -68,7 +68,8 @@ from database import (
     resolve_request_club_id, scoped,
 )
 from identity import (
-    AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, clean_display_name,
+    DISCORD, GOOGLE, ProviderProfile, account_with_verified_email, attach_identity,
+    bump_session_version, clean_display_name, find_identity,
     create_user_for_profile,
     display_name_for, find_user_for_profile, identity_for, record_sign_in,
 )
@@ -87,6 +88,37 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 DISCORD_API = "https://discord.com/api"
 SCOPES = "identify"
+
+# Google (account overhaul Slab 4). Nothing about Google is visible anywhere
+# until GOOGLE_CLIENT_ID is set.
+#
+# GOOGLE_SIGNIN decides how far it reaches:
+#   "link"  Google can only be ADDED to an account someone is already signed in
+#           to, from /account. The default, and where it starts: until regulars
+#           have linked, a "Sign in with Google" button would hand every Discord
+#           player who pressed it a second, empty account (no Discord emails are
+#           held to match them on, Decision D).
+#   "open"  Also a sign-in button on every sign-in screen.
+# Switching is a Fly secret, not a deploy.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_SIGNIN = os.environ.get("GOOGLE_SIGNIN", "link")
+GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+
+
+def linkable_providers() -> list[str]:
+    """Sign-in methods a signed-in account can add from /account."""
+    return [GOOGLE] if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET else []
+
+
+def sign_in_providers() -> list[str]:
+    """Sign-in methods offered on the sign-in screens, in order."""
+    providers = [DISCORD]
+    if GOOGLE in linkable_providers() and GOOGLE_SIGNIN == "open":
+        providers.append(GOOGLE)
+    return providers
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -382,12 +414,186 @@ def discord_login(request: Request, next: Optional[str] = None):
         "state": state,
     }
     auth_url = f"{DISCORD_API}/oauth2/authorize?{urlencode(params)}"
+    response = _oauth_redirect(auth_url, state, origin, next_path)
+    # A Google link abandoned half-way must not follow this sign-in around.
+    response.delete_cookie("cta_oauth_link")
+    return response
 
+
+def _oauth_redirect(auth_url: str, state: str, origin: str, next_path: str) -> RedirectResponse:
+    """Send the browser to a provider, remembering where to come back to."""
     response = RedirectResponse(auth_url)
     response.set_cookie("cta_oauth_state", state, max_age=300, httponly=True, samesite="lax", secure=True)
     response.set_cookie("cta_oauth_return_to", origin, max_age=300, httponly=True, samesite="lax", secure=True)
     response.set_cookie("cta_oauth_next", next_path, max_age=300, httponly=True, samesite="lax", secure=True)
     return response
+
+
+def _google_authorize_url(state: str) -> str:
+    return f"{GOOGLE_AUTHORIZE_URL}?" + urlencode({
+        "client_id": GOOGLE_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": f"{BACKEND_URL}/auth/google/callback",
+        "state": state,
+        # Someone signed in to a work and a personal Google account should get
+        # to pick, rather than have whichever is active chosen for them.
+        "prompt": "select_account",
+    })
+
+
+@router.get("/google/login")
+def google_login(request: Request, next: Optional[str] = None):
+    """Sign in with Google. Only while GOOGLE_SIGNIN is "open"; see its note."""
+    if GOOGLE not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Google sign-in isn't available.")
+    state = secrets.token_urlsafe(24)
+    response = _oauth_redirect(_google_authorize_url(state), state, _safe_return_to(request), _safe_next_path(next))
+    response.delete_cookie("cta_oauth_link")
+    return response
+
+
+def _link_cookie_value(user: User) -> str:
+    body = f"link:{user.id}:{user.session_version or 0}"
+    return f"{body}.{_sign(body)}"
+
+
+def _link_user(db: Session, raw: Optional[str], session_cookie: Optional[str]) -> Optional[User]:
+    """The account a link flow was started from, if the link cookie is genuine
+    and the same account is still signed in on this browser."""
+    if not raw or "." not in raw:
+        return None
+    body, sig = raw.rsplit(".", 1)
+    if not hmac.compare_digest(sig, _sign(body)):
+        return None
+    try:
+        _, uid, ver = body.split(":")
+        uid, ver = int(uid), int(ver)
+    except ValueError:
+        return None
+    user = _session_user(db, session_cookie)
+    if user is None or user.id != uid or (user.session_version or 0) != ver:
+        return None
+    return user
+
+
+@router.get("/google/link")
+def google_link(
+    request: Request,
+    user: Optional[User] = Depends(current_user),
+):
+    """Add Google to the signed-in account (from /account). Comes back to
+    /account with ?linked=google or ?link_error=... either way."""
+    origin = _safe_return_to(request)
+    if GOOGLE not in linkable_providers():
+        return RedirectResponse(f"{origin}/account?link_error=unavailable")
+    if user is None:
+        return RedirectResponse(f"{origin}/account")
+    state = secrets.token_urlsafe(24)
+    response = _oauth_redirect(_google_authorize_url(state), state, origin, "/account")
+    response.set_cookie("cta_oauth_link", _link_cookie_value(user), max_age=300,
+                        httponly=True, samesite="lax", secure=True)
+    return response
+
+
+@router.get("/google/callback")
+async def google_callback(
+    state: str,
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
+    cta_oauth_state: Optional[str] = Cookie(default=None),
+    cta_oauth_return_to: Optional[str] = Cookie(default=None),
+    cta_oauth_next: Optional[str] = Cookie(default=None),
+    cta_oauth_link: Optional[str] = Cookie(default=None),
+    db: Session = Depends(get_session),
+):
+    """Google redirected back. Finishes either a link or a sign-in."""
+    if not cta_oauth_state or cta_oauth_state != state:
+        raise HTTPException(status_code=400, detail="OAuth state mismatch")
+    origin = cta_oauth_return_to or FRONTEND_URL
+
+    if cta_oauth_link:
+        linker = _link_user(db, cta_oauth_link, session_cookie)
+        if error or not code:
+            return _link_done(origin, "link_error=cancelled")
+        if linker is None:
+            return _link_done(origin, "link_error=signed_out")
+        profile = await _google_profile(code)
+        return _finish_link(db, linker, profile, origin)
+
+    if error or not code:
+        # They backed out on Google's screen. Nothing to do but go back.
+        response = RedirectResponse(origin + _safe_next_path(cta_oauth_next))
+        _clear_oauth_cookies(response)
+        return response
+    if GOOGLE not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Google sign-in isn't available.")
+    profile = await _google_profile(code)
+    return _finish_sign_in(db, profile, cta_oauth_return_to, cta_oauth_next)
+
+
+async def _google_profile(code: str) -> ProviderProfile:
+    """Turn Google's authorisation code into who they are.
+
+    The code is exchanged server to server over TLS, so the userinfo response
+    can be trusted as it stands; there is no ID token to verify.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        token_resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": f"{BACKEND_URL}/auth/google/callback",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if token_resp.status_code != 200:
+            raise HTTPException(status_code=400, detail="Google sign-in failed. Please try again.")
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Google sign-in failed. Please try again.")
+        info_resp = await client.get(
+            GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
+        )
+        if info_resp.status_code != 200:
+            raise HTTPException(status_code=400, detail="Google sign-in failed. Please try again.")
+        info = info_resp.json()
+
+    if not info.get("sub"):
+        raise HTTPException(status_code=400, detail="Google sign-in failed. Please try again.")
+    return ProviderProfile(
+        provider=GOOGLE,
+        subject=str(info["sub"]),
+        name=info.get("name") or info.get("given_name"),
+        avatar_url=info.get("picture"),
+        email=info.get("email"),
+        email_verified=bool(info.get("email_verified")),
+    )
+
+
+def _link_done(origin: str, query: str) -> RedirectResponse:
+    response = RedirectResponse(f"{origin}/account?{query}")
+    _clear_oauth_cookies(response)
+    response.delete_cookie("cta_oauth_link")
+    return response
+
+
+def _finish_link(db: Session, user: User, profile: ProviderProfile, origin: str) -> RedirectResponse:
+    """Attach `profile` to the signed-in `user`, unless it already belongs to a
+    different account: joining two accounts is a merge, and a merge needs both
+    sides proven (Slab 6), so that is refused with a reason."""
+    existing = find_identity(db, profile.provider, profile.subject)
+    if existing is not None and existing.user_id != user.id:
+        return _link_done(origin, f"link_error=taken&provider={profile.provider}")
+    attach_identity(db, user, profile)
+    if existing is None:
+        log_audit(db, user, "identity.link", "user", user.id, f"{profile.provider} {profile.email or profile.subject}")
+    db.commit()
+    return _link_done(origin, f"linked={profile.provider}")
 
 
 @router.get("/discord/callback")
@@ -488,9 +694,18 @@ def _finish_sign_in(
         if next_path.startswith(CLUB_REQUEST_PATH):
             response = RedirectResponse(origin + next_path)
         else:
-            join_url = f"{origin}/join"
+            query = {}
             if next_path:
-                join_url += f"?next={quote(next_path, safe='')}"
+                query["next"] = next_path
+            # Decision C: a verified email already on another account is not
+            # joined to it, but the person is told, so they can sign in the way
+            # they usually do and add this from their account instead of
+            # carrying on into a second one.
+            if profile.email_verified and account_with_verified_email(db, profile.email, profile.subject):
+                query["existing_account"] = "1"
+            join_url = f"{origin}/join"
+            if query:
+                join_url += "?" + urlencode(query, quote_via=quote, safe="")
             response = RedirectResponse(join_url)
         response.set_cookie(
             "cta_pending_signup",
@@ -519,6 +734,7 @@ def _finish_sign_in(
 
 
 def _clear_oauth_cookies(response: Response) -> None:
+    response.delete_cookie("cta_oauth_link")
     response.delete_cookie("cta_oauth_state")
     response.delete_cookie("cta_oauth_return_to")
     response.delete_cookie("cta_oauth_next")
@@ -555,7 +771,7 @@ def me(
     single global player. A user with no player *at this club* gets the
     claim/create flow here even if they have a player at another club."""
     if user is None:
-        return {"authenticated": False}
+        return {"authenticated": False, "sign_in_providers": sign_in_providers()}
 
     active_club = resolve_active_club_id(db, user, request.headers.get("origin"))
     my_player_id = active_player_id_for(db, user, active_club)
@@ -587,6 +803,7 @@ def me(
 
     return {
         "authenticated": True,
+        "sign_in_providers": sign_in_providers(),
         "user": _user_out(user),
         "player": linked_player,
         "has_club": has_club,
@@ -817,7 +1034,7 @@ def account(
             }
             for p, c in rows
         ],
-        "can_add": [p for p in AVAILABLE_PROVIDERS if p not in have],
+        "can_add": [p for p in linkable_providers() if p not in have],
     }
 
 

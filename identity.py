@@ -20,19 +20,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from models import User, UserIdentity
 
 DISCORD = "discord"
-
-# The sign-in methods the app offers right now. /account nudges a Discord-only
-# account to add one of the others (ACCOUNT_OVERHAUL.md §8, the C/D conflict),
-# so the nudge appears by itself when Google or email is added here, and not
-# before: there is nothing to add yet. The nudge's button goes to
-# /auth/<provider>/link, so a provider joins this list only once that route
-# exists (Slabs 4-6).
-AVAILABLE_PROVIDERS: tuple[str, ...] = (DISCORD,)
+GOOGLE = "google"
 
 
 @dataclass
@@ -176,16 +170,42 @@ def create_user_for_profile(db: Session, profile: ProviderProfile, **fields) -> 
 
     `fields` carries the rest of the row (club_id, home_club_id, flags).
     """
+    display_name = None
+    if profile.provider != DISCORD and profile.name:
+        # An account with no Discord has no handle to fall back on, so it starts
+        # with the name its provider gave. It is the user's to change from there.
+        try:
+            display_name = clean_display_name(profile.name[:DISPLAY_NAME_MAX])
+        except ValueError:
+            display_name = None
     user = User(
         discord_id=profile.subject if profile.provider == DISCORD else None,
         discord_name=profile.name if profile.provider == DISCORD else None,
         avatar_url=profile.avatar_url,
+        display_name=display_name,
         **fields,
     )
     db.add(user)
     db.flush()
     attach_identity(db, user, profile)
     return user
+
+
+def account_with_verified_email(db: Session, email: Optional[str], exclude_subject: Optional[str] = None) -> Optional[int]:
+    """The account holding an identity with this email, verified by its
+    provider, if there is one. Used only to OFFER linking (Decision C): a
+    provider-asserted email never joins accounts by itself."""
+    if not email:
+        return None
+    q = (
+        select(UserIdentity)
+        .where(UserIdentity.email_verified == True)  # noqa: E712
+        .where(func.lower(UserIdentity.email) == email.strip().lower())
+    )
+    if exclude_subject:
+        q = q.where(UserIdentity.provider_user_id != exclude_subject)
+    row = db.exec(q).first()
+    return row.user_id if row else None
 
 
 def discord_ids_for_users(db: Session, user_ids: Iterable[int]) -> dict[int, str]:

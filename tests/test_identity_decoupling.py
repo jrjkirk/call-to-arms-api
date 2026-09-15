@@ -304,10 +304,10 @@ check("its own players at every club, archived ones included",
       sorted((p["name"], p["active"], p["club"]["slug"]) for p in acct["players"]) == [("Joel Away", False, "away")],
       str(acct["players"]))
 check("nothing to add while Discord is the only sign-in method", acct["can_add"] == [])
-auth.AVAILABLE_PROVIDERS = ("discord", "google")
+auth.GOOGLE_CLIENT_ID, auth.GOOGLE_CLIENT_SECRET = "gid", "gsecret"
 check("the nudge appears by itself once another method exists",
       client.get("/auth/account").json()["can_add"] == ["google"])
-auth.AVAILABLE_PROVIDERS = ("discord",)
+auth.GOOGLE_CLIENT_ID, auth.GOOGLE_CLIENT_SECRET = "", ""
 
 
 print("\n11. A name the user owns (Slab 3)")
