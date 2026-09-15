@@ -223,7 +223,7 @@ Key invariants:
     seed and this file said it never had it.
 - **Vibes carry a behaviour** (`soft` / `wildcard` / `exclusive`), stored per club-system in `ClubSystem.vibe_options` as either plain strings (the old shape, meaning soft, with "Open" implying wildcard) or `{name, behaviour}` objects. `vibes.py` reads both. Club names are no longer restricted to `CANONICAL_VIBES`; the platform catalogue still is.
 - T&T / 3-way grouping intentionally removed (club never uses it)
-- Odd numbers produce a single BYE via the greedy fallback — this is correct behaviour
+- Odd numbers produce a single BYE. **If anyone ticked standby, a volunteer takes it**, chosen before matching (one who did not sit out last session first, then the latest to sign up) and removed from the pool. Sorting volunteers to the back is not enough on its own, because greedy matching lets an earlier player pick a volunteer as a partner. With no volunteers the BYE falls to the greedy fallback. Until 2026-09-15 the sort put volunteers at the FRONT, so they were never the one left over. Pinned by `tests/test_standby_bye.py`.
 - Cron/scheduling is out of scope; the engine is invoked only by admin HTTP endpoints
 
 Admin pairings endpoints (all in `admin.py`, all require caller to hold the system scope):

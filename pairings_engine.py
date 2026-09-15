@@ -13,8 +13,9 @@ PairingConfig (see models.py) — admin-configurable via sliders in the web UI.
 Do NOT reorder or change how last_opp_pen/block_pen dominate — that ordering
 is still load-bearing.
 T&T / 3-way grouping intentionally removed (club never uses it).
-Odd numbers naturally produce a single BYE via the greedy fallback.
-standby_ok=True players sort later in the candidate list (soft BYE preference).
+Odd numbers produce a single BYE. If anyone ticked standby (standby_ok), one of
+them takes it, chosen before matching; otherwise it falls to the greedy fallback.
+standby_ok=True players also sort later in the candidate list.
 Players who received a BYE in their most recent session get an extra pass to find
 any available partner before being assigned a consecutive BYE.
 """
@@ -565,10 +566,17 @@ def generate(
     # through _pair_dist, so blocks, last week's opponent and exclusive vibes
     # apply to them exactly as they do to everyone else — which is the part the
     # pre-pass got wrong.
+    #
+    # Standby players sort to the BACK. From 2026-07-05 until 2026-09-15 this
+    # read `0 if standby_ok else 1`, which put them at the front: they got first
+    # pick of partners and were never the one left over, so the BYE went to
+    # someone who had not offered to sit out. The BYE itself is now chosen
+    # explicitly in step 7; the back of the list is where a player stranded by
+    # blocks or history ends up, and that should be a volunteer too.
     candidates.sort(
         key=lambda ms: (
             0 if (ms.row.vibe or "").strip().lower() == "intro" else 1,
-            0 if ms.row.standby_ok else 1,
+            1 if ms.row.standby_ok else 0,
             ms.preference,
             ms.key,
         )
@@ -606,22 +614,38 @@ def generate(
     last_opp_pairs = last_opponent_pairs(session, system, week, club_id)
     bye_player_ids = previous_bye_player_ids(session, system, week, club_id)
 
-    # 7. Greedy matching
-    used: set[str] = set()
-    out: list = []
+    # 7. Who sits out, when someone has to
+    #
+    # An odd pool means one BYE. If anyone ticked standby, that BYE is theirs:
+    # the volunteer is taken out of the pool before matching, so nobody can
+    # pick them as a partner and the rest pair off evenly. Sorting alone cannot
+    # promise this, because greedy matching lets any earlier player choose a
+    # volunteer as their best partner and leave a non-volunteer over.
+    #
+    # With several volunteers: one who did not sit out last session first, then
+    # whoever signed up LAST, so sitting out goes against the latest arrival.
+    standby_bye: Optional[MatcherSignup] = None
+    if len(candidates) % 2 == 1:
+        volunteers = [ms for ms in candidates if ms.row.standby_ok]
+        if volunteers:
+            standby_bye = max(
+                volunteers,
+                key=lambda ms: (
+                    ms.row.player_id not in bye_player_ids,
+                    ms.row.created_at or datetime.min,
+                    ms.row.id or 0,
+                ),
+            )
+            candidates = [ms for ms in candidates if ms is not standby_bye]
 
-    for i, ms in enumerate(candidates):
-        if ms.key in used:
-            continue
-
+    # 8. Greedy matching
+    def best_partner(ms: MatcherSignup, pool: list) -> Optional[MatcherSignup]:
         best_j: Optional[int] = None
         best_dist: Optional[tuple] = None
 
         # First pass: skip recent repeats and hard-block last opponents
-        for j in range(i + 1, len(candidates)):
-            other = candidates[j]
-            if other.key in used:
-                continue
+        for j in range(len(pool)):
+            other = pool[j]
             if (ms.row.player_id is not None
                     and other.row.player_id is not None
                     and tuple(sorted([ms.row.player_id, other.row.player_id]))
@@ -641,10 +665,8 @@ def generate(
         # Runs if allow_repeats_when_needed=True OR the player had a BYE
         # last session (avoid consecutive BYEs where any alternative exists).
         if best_j is None and (allow_repeats_when_needed or ms.row.player_id in bye_player_ids):
-            for j in range(i + 1, len(candidates)):
-                other = candidates[j]
-                if other.key in used:
-                    continue
+            for j in range(len(pool)):
+                other = pool[j]
                 d = _pair_dist(ms, other, system, seen_recent, seen_extended, blocks,
                            last_opp_pairs, config, pconfig, vibe_specs, group_of)
                 if best_dist is None or d < best_dist:
@@ -653,10 +675,33 @@ def generate(
                     if d == (0, 0, 0):
                         break
 
-        if best_j is not None:
-            other = candidates[best_j]
-            used.add(ms.key)
+        return pool[best_j] if best_j is not None else None
+
+    used: set[str] = set()
+    matches: list[tuple[MatcherSignup, Optional[MatcherSignup]]] = []
+
+    for i, ms in enumerate(candidates):
+        if ms.key in used:
+            continue
+        other = best_partner(ms, [o for o in candidates[i + 1:] if o.key not in used])
+        used.add(ms.key)
+        if other is not None:
             used.add(other.key)
+        matches.append((ms, other))
+
+    if standby_bye is not None:
+        # Someone blocks or history left without a legal partner can still have
+        # the volunteer, rather than both of them sitting out.
+        for n, (ms, other) in enumerate(matches):
+            if other is None and best_partner(ms, [standby_bye]) is not None:
+                matches[n] = (ms, standby_bye)
+                break
+        else:
+            matches.append((standby_bye, None))
+
+    out: list = []
+    for ms, other in matches:
+        if other is not None:
             if persist:
                 p = Pairing(
                     week=week, system=system,
@@ -681,7 +726,6 @@ def generate(
                 })
         else:
             # BYE
-            used.add(ms.key)
             if persist:
                 p = Pairing(
                     week=week, system=system,
