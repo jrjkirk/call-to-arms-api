@@ -44,7 +44,7 @@ from league import (
     _resolve_system_id,
     _season_champion,
 )
-from identity import DISCORD, ProviderProfile, create_user_for_profile, find_user_for_profile
+from identity import DISCORD, ProviderProfile, create_user_for_profile, display_name_for, find_user_for_profile
 from models import AdminRole, AppSetting, AuditLogEntry, Club, ClubEvent, ClubRequest, ClubSetting, ClubSystem, ClubWebhook, LeagueConfig, LeagueRating, LeagueResult, LeagueSeason, Mission, PairingBlock, Pairing, PairingConfig, Player, PlayerDiscordVerification, PlayerExperienceAdjustment, PlayerLevelAnnouncement, PlatformBanner, PublishState, ScheduledJobRun, Signup, SystemConfig, TableBookingConfig, TableBookingNotification, UK_REGIONS, User
 import storage
 from observability import capture
@@ -206,6 +206,7 @@ def list_roles(
         roles.append({
             "user_id": role.user_id,
             "discord_name": role_user.discord_name,
+            "name": display_name_for(role_user),
             "player_name": player_name,
             "scope": role.scope,
         })
@@ -222,6 +223,7 @@ def list_roles(
         super_admins.append({
             "user_id": sa.id,
             "discord_name": sa.discord_name,
+            "name": display_name_for(sa),
             "player_name": player_name,
         })
 
@@ -245,6 +247,7 @@ def grantable_users(
             result.append({
                 "id": u.id,
                 "discord_name": u.discord_name,
+                "name": display_name_for(u),
                 "player_name": p.name,
             })
 
@@ -290,7 +293,7 @@ def grant_role(
 
     if existing is None:
         db.add(AdminRole(user_id=body.user_id, scope=body.scope, club_id=user.club_id))
-        log_audit(db, user, "role.grant", "user", target.id, f"{target.discord_name!r} -> {body.scope!r}")
+        log_audit(db, user, "role.grant", "user", target.id, f"{display_name_for(target)!r} -> {body.scope!r}")
         db.commit()
 
     return {"ok": True}
@@ -312,7 +315,7 @@ def remove_role(
 
     if row is not None:
         target = db.get(User, user_id)
-        target_name = target.discord_name if target else str(user_id)
+        target_name = display_name_for(target) if target else str(user_id)
         db.delete(row)
         log_audit(db, user, "role.revoke", "user", user_id, f"{target_name!r} -> {scope!r}")
         db.commit()
@@ -749,15 +752,18 @@ def system_players(
     # ownership link and the one to trust, User.player_id is the pre-2026-07-25
     # home-club link that is still populated. Taking only one leaves a column
     # of blanks for whichever half of the roster was claimed under the other.
-    discord_by_player: dict[int, str] = {}
+    discord_by_player: dict[int, Optional[str]] = {}
+    account_by_player: dict[int, str] = {}
     owner_ids = {p.user_id for p in players.values() if p.user_id is not None}
     if owner_ids:
         for u in db.exec(select(User).where(User.id.in_(owner_ids))).all():
             for pid, p in players.items():
                 if p.user_id == u.id:
                     discord_by_player[pid] = u.discord_name
+                    account_by_player[pid] = display_name_for(u)
     for u in db.exec(select(User).where(User.player_id.in_(ids))).all():
         discord_by_player.setdefault(u.player_id, u.discord_name)
+        account_by_player.setdefault(u.player_id, display_name_for(u))
 
     # Self-declared games played elsewhere. Already per (club, system), and
     # until now only the player could set it.
@@ -800,6 +806,10 @@ def system_players(
             "player_id": pid,
             "name": p.name,
             "discord_name": discord_by_player.get(pid),
+            # Linked to an account at all, which is not the same as having a
+            # Discord handle once other sign-in methods exist.
+            "linked": pid in account_by_player,
+            "account_name": account_by_player.get(pid),
             "titles": player_titles(p),
             "active": p.active,
             "league_visible": p.league_visible,
@@ -4226,6 +4236,7 @@ def _platform_user_row(u: User) -> dict:
     return {
         "id": u.id,
         "discord_name": u.discord_name,
+        "name": display_name_for(u),
         "club_id": u.club_id,
         "is_super_admin": u.is_super_admin,
     }
@@ -4256,7 +4267,7 @@ def appoint_club_super_admin(
     if not target.is_super_admin:
         target.is_super_admin = True
         db.add(target)
-        log_audit(db, user, "club.super_admin.grant", "user", target.id, f"{target.discord_name!r} on club {club.slug!r}")
+        log_audit(db, user, "club.super_admin.grant", "user", target.id, f"{display_name_for(target)!r} on club {club.slug!r}")
         db.commit()
         db.refresh(target)
 
@@ -4288,6 +4299,7 @@ def list_platform_club_super_admins(
         result.append({
             "user_id": sa.id,
             "discord_name": sa.discord_name,
+            "name": display_name_for(sa),
             "player_name": player_name,
         })
     return result
@@ -4318,6 +4330,7 @@ def list_platform_club_grantable_users(
             result.append({
                 "id": u.id,
                 "discord_name": u.discord_name,
+                "name": display_name_for(u),
                 "player_name": p.name,
             })
 
@@ -4345,7 +4358,7 @@ def remove_club_super_admin(
     if removed:
         target.is_super_admin = False
         db.add(target)
-        log_audit(db, user, "club.super_admin.revoke", "user", target.id, f"{target.discord_name!r} on club {club.slug!r}")
+        log_audit(db, user, "club.super_admin.revoke", "user", target.id, f"{display_name_for(target)!r} on club {club.slug!r}")
         db.commit()
 
     return {"ok": True, "removed": removed}
@@ -5224,7 +5237,7 @@ def search_users(
     rows = db.exec(
         select(User, Club)
         .join(Club, Club.id == User.club_id)
-        .where(User.discord_name.ilike(like))
+        .where(User.discord_name.ilike(like) | User.display_name.ilike(like))
         .order_by(User.discord_name)
         .limit(50)
     ).all()
@@ -5243,7 +5256,7 @@ def search_users(
     for u, c in rows:
         p = db.get(Player, u.player_id) if u.player_id else None
         result.append({
-            "user_id": u.id, "discord_name": u.discord_name,
+            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u),
             "player_name": p.name if p else None,
             "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
             "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
@@ -5253,7 +5266,7 @@ def search_users(
             continue
         matched_ids.add(u.id)
         result.append({
-            "user_id": u.id, "discord_name": u.discord_name,
+            "user_id": u.id, "discord_name": u.discord_name, "name": display_name_for(u),
             "player_name": p.name,
             "club_id": c.id, "club_name": c.name, "club_slug": c.slug,
             "is_super_admin": u.is_super_admin, "is_platform_admin": u.is_platform_admin,
@@ -5376,7 +5389,7 @@ def _review_club_request(request_id: int, new_status: str, user: User, db: Sessi
     req.status = new_status
     req.reviewed_at = datetime.utcnow()
     req.reviewed_by_user_id = user.id
-    req.reviewed_by_name = user.discord_name
+    req.reviewed_by_name = display_name_for(user)
     db.add(req)
     log_audit(
         db, user, f"club_request.{new_status}", "club_request", req.id,
@@ -5549,7 +5562,7 @@ def provision_club_request(
                     raise HTTPException(
                         status_code=409,
                         detail=(
-                            f"{target.discord_name} is the only super-admin of "
+                            f"{display_name_for(target)} is the only super-admin of "
                             f"{previous_name}. Making them super-admin here would move "
                             f"them and leave {previous_name} with nobody who can "
                             "administer it. Appoint someone else there first, or "
@@ -5562,9 +5575,9 @@ def provision_club_request(
             target.is_super_admin = True
             db.add(target)
         db.flush()
-        appointed = {"user_id": target.id, "discord_name": target.discord_name}
+        appointed = {"user_id": target.id, "discord_name": target.discord_name, "name": display_name_for(target)}
         log_audit(db, user, "club.super_admin.grant", "user", target.id,
-                  f"{target.discord_name!r} on club {club.slug!r} (from request {req.id})")
+                  f"{display_name_for(target)!r} on club {club.slug!r} (from request {req.id})")
 
     # --- Turn on the systems they asked for --------------------------------
     # Previously skipped, because schedules are club-specific and nobody had
@@ -5631,7 +5644,7 @@ def provision_club_request(
     req.status = "approved"
     req.reviewed_at = datetime.utcnow()
     req.reviewed_by_user_id = user.id
-    req.reviewed_by_name = user.discord_name
+    req.reviewed_by_name = display_name_for(user)
     req.provisioned_club_id = club.id
     db.add(req)
 

@@ -310,6 +310,49 @@ check("the nudge appears by itself once another method exists",
 auth.AVAILABLE_PROVIDERS = ("discord",)
 
 
+print("\n11. A name the user owns (Slab 3)")
+client.cookies.clear()
+with Session(database.engine) as db:
+    admin = db.get(User, 1)
+    client.cookies.set("cta_session", auth._make_session_cookie(1, admin.session_version or 0))
+r = client.patch("/auth/account", json={"display_name": "  Joel   the   Organiser "})
+check("setting a name succeeds", r.status_code == 200, r.text[:150])
+check("whitespace is tidied", r.json()["user"]["name"] == "Joel the Organiser", r.text[:150])
+check("/auth/me greets by it", client.get("/auth/me").json()["user"]["name"] == "Joel the Organiser")
+check("a name over the limit is refused with a reason",
+      client.patch("/auth/account", json={"display_name": "x" * 33}).status_code == 422)
+check("so is one with invisible characters",
+      client.patch("/auth/account", json={"display_name": "Jo​el"}).status_code == 422)
+check("32 characters is fine", client.patch("/auth/account", json={"display_name": "y" * 32}).status_code == 200)
+client.patch("/auth/account", json={"display_name": "Joel the Organiser"})
+with Session(database.engine) as db:
+    resp = auth._finish_sign_in(db, ProviderProfile(provider="discord", subject="d-admin", name="Discord Changed"), None, None)
+    u = db.get(User, 1)
+    check("a Discord sign-in afterwards leaves it alone",
+          (u.display_name, u.discord_name) == ("Joel the Organiser", "Discord Changed"),
+          str((u.display_name, u.discord_name)))
+    database.log_audit(db, u, "test.action")
+    db.commit()
+    from models import AuditLogEntry
+    last = db.exec(select(AuditLogEntry).order_by(AuditLogEntry.id.desc())).first()
+    check("the audit log records the name they go by", last.actor_name == "Joel the Organiser", last.actor_name)
+with Session(database.engine) as db:
+    u = db.get(User, 1)
+    u.is_super_admin = True
+    db.add(u)
+    db.commit()
+roles = client.get("/admin/roles", headers={"origin": "https://home.calltoarms.app"})
+sas = roles.json().get("super_admins", []) if roles.status_code == 200 else []
+check("admin lists carry the name beside the handle",
+      [(x.get("name"), x.get("discord_name")) for x in sas] == [("Joel the Organiser", "Discord Changed")],
+      roles.text[:200])
+found = client.get("/admin/platform/users/search", params={"q": "Organiser"})
+check("support search finds someone by the name they chose",
+      found.status_code == 200 and any(x["user_id"] == 1 for x in found.json()), found.text[:200])
+r = client.patch("/auth/account", json={"display_name": "   "})
+check("clearing it goes back to the Discord handle", r.json()["user"]["name"] == "Discord Changed", r.text[:150])
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED")

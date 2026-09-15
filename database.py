@@ -18,7 +18,7 @@ from sqlalchemy import event
 from sqlalchemy.sql import Select
 from sqlmodel import Session, create_engine, select
 
-from identity import discord_ids_for_users
+from identity import discord_ids_for_users, display_name_for
 from models import AuditLogEntry, Club, ClubSetting, ClubWebhook, PlatformBanner, Player, ScheduledJobRun, User
 
 T = TypeVar("T")
@@ -712,7 +712,7 @@ def log_audit(
     same transaction as the change it's recording."""
     db.add(AuditLogEntry(
         actor_user_id=actor.id,
-        actor_name=actor.discord_name,
+        actor_name=display_name_for(actor),
         action=action,
         target_type=target_type,
         target_id=target_id,

@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0 and 1 LIVE (2026-09-15). Slab 2 BUILT, not deployed. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0, 1 and 2 LIVE (2026-09-15). Slab 3 BUILT, not deployed. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -271,9 +271,19 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
    `/auth/<provider>/link`: **a provider must not join `AVAILABLE_PROVIDERS` until that route
    exists** (4/5 add the provider, 6 adds linking; add it to the list in 6, or give 4/5 their
    own link route). Display name is shown, not yet editable (Slab 3).
-3. **Display name you own.** Needs: 0, 2. Edit `users.display_name` on `/account`; sweep the
-   greeting/picker sites (§5) to show `display_name` with the Discord handle beside it where
-   admins need to recognise someone.
+3. **Display name you own.** Needs: 0, 2. BUILT: `PATCH /auth/account {display_name}`
+   (`identity.clean_display_name`: whitespace collapsed, 32 max, control/invisible characters
+   refused, blank clears back to the Discord handle); an Edit control on `/account`. API sweep:
+   every admin payload that gave only `discord_name` now also gives the resolved `name`
+   (roles, super-admins, grantable users, platform super-admins/grantable, support search,
+   provisioning's appointed admin, venue staff); the Players tab adds `linked` and
+   `account_name` so "not linked" means no account, not no Discord; audit-log `actor_name`,
+   audit detail strings and `reviewed_by_name` use the resolved name; support search matches
+   `display_name`; tournament entry and venue booking name fallbacks try it before the handle.
+   Web sweep: header, claim banner, claim page, signup "Almost there", request-club greet by
+   `name`; admin pickers use `$lib/accountName.ts` `accountLabel` (roster or chosen name, with
+   the Discord handle beside it when different). The profile page's Discord chip still shows
+   the Discord handle: it is labelled as Discord.
 4. **Google sign-in.** Needs: 0, 2, 3. Standard OIDC, one module. Also the §5 copy sweep and
    the privacy page, in the same release. Implements Decision C's "offer to link" on a
    verified-email match.

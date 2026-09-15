@@ -453,7 +453,7 @@ def create_booking(
     player_id = active_player_id_for(db, user, club_id) if user else None
     player = db.get(Player, player_id) if player_id else None
     name = (body.contact_name or "").strip() or (player.name if player else None) \
-        or (user.discord_name if user else None) or "Guest"
+        or (user.display_name or user.discord_name if user else None) or "Guest"
 
     # Guests follow guest_confirm_mode, members follow confirm_mode. A venue
     # can take members instantly while still eyeballing every stranger.
@@ -1194,6 +1194,7 @@ def list_staff(ctx=Depends(_require_venue_owner), db: Session = Depends(get_sess
             "id": r.id,
             "user_id": r.user_id,
             "discord_name": u.discord_name if u else None,
+            "name": (u.display_name or u.discord_name) if u else None,
             "player_name": p.name if p else None,
         })
     return sorted(out, key=lambda r: (r["player_name"] or r["discord_name"] or ""))

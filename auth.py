@@ -68,7 +68,8 @@ from database import (
     resolve_request_club_id, scoped,
 )
 from identity import (
-    AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, create_user_for_profile,
+    AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, clean_display_name,
+    create_user_for_profile,
     display_name_for, find_user_for_profile, identity_for, record_sign_in,
 )
 from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
@@ -818,6 +819,34 @@ def account(
         ],
         "can_add": [p for p in AVAILABLE_PROVIDERS if p not in have],
     }
+
+
+class AccountPatch(BaseModel):
+    display_name: Optional[str] = None
+
+
+@router.patch("/account")
+def update_account(
+    body: AccountPatch,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Set or clear the name the account goes by (account overhaul Slab 3).
+
+    This is the account's name, shown when the app greets someone and beside
+    their Discord handle in admin lists. It is NOT a club roster name:
+    Player.name stays per club and admin-renamed, because the pairing engine
+    keys players on it (ACCOUNT_OVERHAUL.md §3, Decision B). Sending null or
+    blank clears it, and the account goes by its Discord handle again.
+    """
+    try:
+        user.display_name = clean_display_name(body.display_name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"ok": True, "user": _user_out(user)}
 
 
 @router.post("/logout")

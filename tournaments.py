@@ -534,7 +534,7 @@ def add_entry(
         p = db.get(Player, player_id)
         name = p.name if p else ""
     if not name and user:
-        name = user.discord_name or ""
+        name = user.display_name or user.discord_name or ""
     if not name:
         raise HTTPException(status_code=422, detail="Please give a name.")
 

@@ -14,6 +14,8 @@ gets its row the next time it signs in.
 
 Imports models only, never database, so database.py can use it.
 """
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Optional
@@ -225,6 +227,31 @@ def discord_id_for_user(db: Session, user_id: Optional[int]) -> Optional[str]:
     if not user_id:
         return None
     return discord_ids_for_users(db, [user_id]).get(user_id)
+
+
+DISPLAY_NAME_MAX = 32
+
+
+def clean_display_name(raw: Optional[str]) -> Optional[str]:
+    """A name the user typed, ready to store, or None to clear it (the account
+    then goes by its Discord handle again). Raises ValueError with a message
+    fit to show them.
+
+    Whitespace runs collapse to one space, so "Joel   Kirk" and a name padded
+    with tabs are the same name. Control and invisible formatting characters
+    are refused: they make two names look identical in an admin list while
+    being different strings.
+    """
+    if raw is None:
+        return None
+    name = re.sub(r"\s+", " ", raw).strip()
+    if not name:
+        return None
+    if any(unicodedata.category(ch).startswith("C") for ch in name):
+        raise ValueError("That name has characters we can't show.")
+    if len(name) > DISPLAY_NAME_MAX:
+        raise ValueError(f"Keep it to {DISPLAY_NAME_MAX} characters or fewer.")
+    return name
 
 
 def display_name_for(user: User) -> str:
