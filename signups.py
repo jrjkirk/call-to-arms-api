@@ -23,7 +23,6 @@ from models import Signup, Pairing, PublishState, Player, User, SystemConfig, Cl
 import vibes
 import discord_guild
 from identity import discord_id_for_user
-from name_moderation import BLOCKED_MESSAGE, is_blocked
 from experience import summary as experience_summary
 from levels import progress as level_progress
 from auth import active_club_id, admin_scopes, require_user
@@ -1120,8 +1119,6 @@ def submit_prearranged(
         if not guest_name:
             raise HTTPException(status_code=422, detail="Please enter the guest's name.")
         guest_name = guest_name[:80]
-        if is_blocked(guest_name):
-            raise HTTPException(status_code=422, detail=BLOCKED_MESSAGE)
         pb = None
         pb_player_id = None
         pb_name = guest_name

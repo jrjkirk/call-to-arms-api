@@ -23,7 +23,6 @@ import tournament_schedule as sched
 import tournament_scoring as scoring
 from auth import active_club_id, admin_scopes, current_user, public_club_id, require_user
 from database import active_player_id_for, club_app_url, get_session
-from name_moderation import BLOCKED_MESSAGE, is_blocked
 from models import (
     Club, Player, SystemConfig, Tournament, TournamentEntry, TournamentGame,
     TournamentRound, User, VenueTable,
@@ -531,8 +530,6 @@ def add_entry(
             raise HTTPException(status_code=409, detail="You're already entered.")
 
     name = (body.display_name or "").strip()
-    if name and is_blocked(name):
-        raise HTTPException(status_code=422, detail=BLOCKED_MESSAGE)
     if not name and player_id:
         p = db.get(Player, player_id)
         name = p.name if p else ""

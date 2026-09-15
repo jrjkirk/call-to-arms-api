@@ -1,25 +1,27 @@
-"""Names players type are checked for abusive words, and admins can undo one.
+"""Admins can see and undo a name an account chose.
+
+There is no automatic filter on names (decided 2026-09-15). What stands behind
+a name instead: every change is in the audit log, and a club super-admin or a
+platform admin can reset an account's chosen name, which puts its Discord name
+back.
 
 What these assert:
-  * the usual dodges are caught (look-alike characters, spacing, stretching)
-  * real names that contain a listed word are not (Hancock, Dickens, Scunthorpe)
-  * the check applies to the account name and a new profile's roster name, and
-    not to a club admin renaming a player, which is the fix for a false
-    positive (guest +1 and tournament entry names call the same is_blocked;
-    their endpoints aren't exercised here)
-  * a name change is in the audit log, and a club super-admin or platform
-    admin can reset an account's name
+  * a name change is logged, old and new
+  * a club's player list shows each account's chosen name
+  * a super-admin can reset it for a player at their club, and only there
+  * a player who isn't an admin can't
+  * a platform admin can reset any account's name
 
-Run: PYTHONPATH=. python tests/test_name_moderation.py
+Run: PYTHONPATH=. python tests/test_account_name_admin.py
 """
 import os
 import pathlib
 import sys
 import tempfile
 
-_DB = pathlib.Path(tempfile.mkdtemp()) / "moderation.db"
+_DB = pathlib.Path(tempfile.mkdtemp()) / "account_names.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
-os.environ.setdefault("SESSION_SECRET", "test-secret-for-moderation")
+os.environ.setdefault("SESSION_SECRET", "test-secret-for-account-names")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
@@ -28,7 +30,6 @@ import auth  # noqa: E402
 import database  # noqa: E402
 import main  # noqa: E402
 from models import AuditLogEntry, Club, ClubSystem, Player, SystemConfig, User  # noqa: E402
-from name_moderation import is_blocked  # noqa: E402
 
 FAILURES = []
 
@@ -37,19 +38,6 @@ def check(label, cond, detail=""):
     print(("  PASS  " if cond else "  FAIL  ") + label + ("" if cond else f"  {detail}"))
     if not cond:
         FAILURES.append(label)
-
-
-print("\n1. The word check")
-BLOCKED = ["fuck", "Shit Head", "sh1t", "f.u.c.k", "f u c k", "fuuuuck", "B1TCH", "Mr Wanker",
-           "Nazi Steve", "motherfucker99", "c u n t", "p3n1s", "Wánker", "FuckBoy"]
-ALLOWED = ["Joel Kirk", "Ian T-M", "Dick Smith", "Hancock", "Charles Dickens", "Cockburn",
-           "Sussex Steve", "Scunthorpe United", "Fanny Adams", "Willy Wonka", "Assange",
-           "Matthew Cummings", "Sam Butts", "Classic", "Passion", "Titus", "Therapist",
-           "Snigger", "Hitchcock", "Shitake", "Nigel", "Oliver_Taylor", "Zoë", "Siobhán"]
-missed = [n for n in BLOCKED if not is_blocked(n)]
-wrong = [n for n in ALLOWED if is_blocked(n)]
-check(f"all {len(BLOCKED)} abusive names are caught", not missed, str(missed))
-check(f"none of {len(ALLOWED)} real names are blocked", not wrong, str(wrong))
 
 
 SQLModel.metadata.create_all(database.engine)
@@ -77,23 +65,14 @@ def as_user(uid):
     return c
 
 
-print("\n2. Where it applies")
+print("\n1. A name change is logged")
 pat = as_user(2)
-r = pat.patch("/auth/account", json={"display_name": "Sh1t Lord"})
-check("an abusive account name is refused", r.status_code == 422, r.text[:120])
-check("with a message that doesn't repeat the word", "different name" in r.json().get("detail", ""), r.text[:120])
 r = pat.patch("/auth/account", json={"display_name": "Pat the Painter"})
-check("a normal one is fine", r.status_code == 200, r.text[:120])
-r = as_user(3).post("/auth/create-profile", json={"name": "Wanker"}, headers=H)
-check("an abusive roster name is refused at profile creation", r.status_code == 422, r.text[:120])
-r = as_user(3).post("/auth/create-profile", json={"name": "Charles Dickens"}, headers=H)
-check("a real name that contains a listed word is not", r.status_code == 200, r.text[:120])
+check("setting a name succeeds", r.status_code == 200, r.text[:120])
 boss = as_user(1)
-r = boss.patch("/admin/players/20", json={"name": "Cockburn the Bold"}, headers=H)
-check("a club admin's rename isn't checked, so it can fix a false positive", r.status_code == 200, r.text[:120])
 
 
-print("\n3. The audit log and resetting a name")
+print("\n2. Resetting a name")
 with Session(database.engine) as db:
     logs = [(a.action, a.detail) for a in db.exec(select(AuditLogEntry).where(AuditLogEntry.action == "account.name"))]
 check("the name change is logged, old and new", logs == [("account.name", "None -> 'Pat the Painter'")], str(logs))

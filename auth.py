@@ -67,7 +67,6 @@ from database import (
     active_player_id_for, get_session, log_audit, resolve_active_club_id,
     resolve_request_club_id, scoped,
 )
-from name_moderation import BLOCKED_MESSAGE, is_blocked
 from identity import (
     AVAILABLE_PROVIDERS, DISCORD, ProviderProfile, bump_session_version, clean_display_name,
     create_user_for_profile,
@@ -751,10 +750,6 @@ def create_profile(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Name cannot be blank")
-    if is_blocked(name):
-        # The roster name is posted to the club's Discord, so it gets the same
-        # check as an account name (name_moderation.py).
-        raise HTTPException(status_code=422, detail=BLOCKED_MESSAGE)
 
     player = Player(
         name=name,
