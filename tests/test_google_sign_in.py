@@ -181,6 +181,19 @@ check("her profile page has no empty Discord chip",
       prof.status_code == 200 and prof.json().get("discord") is None, f"{prof.status_code} {prof.text[:150]}")
 
 
+print("\n4b. The club picker can tell how someone arrived, so it can warn them")
+c = client_for()
+check("nothing pending, nothing said", c.get("/auth/pending").json() == {"pending": False, "provider": None, "name": None})
+c.cookies.set("cta_pending_signup", pending)
+check("a deferred Google sign-up says so",
+      c.get("/auth/pending").json() == {"pending": True, "provider": "google", "name": "Gail Google"},
+      c.get("/auth/pending").text)
+d = client_for()
+d.cookies.set("cta_pending_signup", auth._make_pending_signup_cookie("d-someone", "Someone", None))
+check("and a Discord one is named as Discord (no warning needed there)",
+      d.get("/auth/pending").json()["provider"] == "discord")
+
+
 print("\n5. Decision C: a verified email already on an account is offered, never joined")
 GOOGLE["dupe"] = ProviderProfile(provider="google", subject="g-second-joel", name="Joel again",
                                  email="JOEL@example.com", email_verified=True)

@@ -248,7 +248,11 @@ Admin pairings endpoints (all in `admin.py`, all require caller to hold the syst
 - `POST /admin/pairings/generate` — delete pending non-prearranged, generate + persist
 - `GET /admin/pairings?system=&week=` — fetch saved rows + publish state
 - `POST /admin/pairings/publish` — upsert PublishState
-- `POST /admin/pairings/save` — grid save-back (writes faction/vibe/eta/pts to Signup rows too); moving players keeps the week whole (409 on double-booking)
+- `POST /admin/pairings/save` — grid save-back. **Writes only the Pairing row.** A Signup is
+  what the player asked for, and only `PATCH /admin/signups/{id}` may change it; the grid used
+  to write its displayed values (later ETA, lower points, shared vibe, faction) onto both
+  signups, which rewrote both players' signup times whenever an admin nudged a game. Pairings
+  carry `eta`/`points`/`a_vibe`/`b_vibe`, NULL meaning "follow the signups"; moving players keeps the week whole (409 on double-booking)
 - `DELETE /admin/pairings` — delete specific pairing IDs; stranded players get a BYE, deleting someone's only BYE is a 409
 - `POST /admin/pairings/post-discord` — plain-text post to system Discord webhook
 - `GET /admin/pairings/signup-list?system=&week=` — de-duped signup list for grid dropdowns

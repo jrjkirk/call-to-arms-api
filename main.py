@@ -1289,23 +1289,31 @@ def get_pairings(
         a = signups_by_id.get(p.a_signup_id)
         b = signups_by_id.get(p.b_signup_id) if p.b_signup_id else None
 
+        # What the admin agreed for this GAME wins; otherwise it follows the
+        # signups, as it always has. See Pairing's note in models.py: a signup
+        # stays what the player asked for.
         game_type = _public_vibe_display(
-            a.vibe if a else None,
-            b.vibe if b else None,
+            p.a_vibe or (a.vibe if a else None),
+            p.b_vibe or (b.vibe if b else None),
         )
 
         if system_config is not None and not system_config.uses_points:
             points = None
+        elif isinstance(p.points, int):
+            points = str(p.points)
         else:
             pts_vals = [v for v in (a.points if a else None, b.points if b else None) if isinstance(v, int)]
             points = str(min(pts_vals)) if pts_vals else None
 
-        a_eta = a.eta if a else None
-        b_eta = b.eta if b else None
-        if a_eta and b_eta:
-            eta = max(a_eta, b_eta)
+        if p.eta:
+            eta = p.eta
         else:
-            eta = a_eta or b_eta
+            a_eta = a.eta if a else None
+            b_eta = b.eta if b else None
+            if a_eta and b_eta:
+                eta = max(a_eta, b_eta)
+            else:
+                eta = a_eta or b_eta
 
         is_bye = b is None
 
@@ -1313,7 +1321,7 @@ def get_pairings(
             "id": p.id,
             "player_a_name": a.player_name if a else f"A#{p.a_signup_id}",
             "player_a_id": a.player_id if a else None,
-            "player_a_faction": p.a_faction or (a.faction if a else None),
+            "player_a_faction": (p.a_faction or None) if p.a_faction is not None else (a.faction if a else None),
             # Self-reported experience, straight off the signup ("New" / "Some"
             # / "Veteran"). Shown on the pairing card so both players can see
             # at a glance what they're walking into — it already feeds the
@@ -1323,7 +1331,8 @@ def get_pairings(
             "player_a_level": player_levels.get(a.player_id) if a else None,
             "player_b_name": b.player_name if b else None,
             "player_b_id": b.player_id if b else None,
-            "player_b_faction": p.b_faction or (b.faction if b else None) if b else None,
+            "player_b_faction": (((p.b_faction or None) if p.b_faction is not None else (b.faction if b else None))
+                                 if b else None),
             "player_b_experience": b.experience if b else None,
             "player_b_level": player_levels.get(b.player_id) if b else None,
             "is_bye": is_bye,

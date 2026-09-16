@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0-6 LIVE (2026-09-15). Slab 8 (our own accounts, with passwords) BUILT 2026-09-16, not deployed; needs migrations/create_password_signin.py first. Google is invisible until GOOGLE_CLIENT_ID/SECRET are set; email and passwords are off until EMAIL_SIGNIN / PASSWORD_SIGNIN are set. Slab 7 (Apple) still deferred. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0-6 and 8 LIVE (0-6 on 2026-09-15, 8 on 2026-09-16). Every sign-in method beyond Discord is dark until its switch is set: GOOGLE_CLIENT_ID/SECRET (+ GOOGLE_SIGNIN), EMAIL_SIGNIN, PASSWORD_SIGNIN. Apple (was Slab 7) is DROPPED, not deferred. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -406,17 +406,16 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
          production holds today simply gains a date.
        * The account page's Remove now says other devices will be signed out, which is what it
          does.
-     Still true, and deliberate: sessions can only be ended all at once (no per-device list to
-     revoke one phone), because a session is `user_id:version:issued_at` rather than a stored
-     row. A per-device list would be the next step if it is ever wanted.
-7. **Apple — deferred.** £79/yr developer program. Client secret is an ES256 JWT
-   from a `.p8` key, max 6-month expiry → needs a rotation job or it dies silently. Name is
-   only returned on the very first authorisation, ever. `response_mode=form_post` makes the
-   callback a cross-site POST, which will NOT carry `cta_oauth_state` because every auth
-   cookie is `samesite="lax"` → state check breaks; would need SameSite=None on that cookie or
-   state carried outside cookies. The App Store rule requiring Sign in with Apple is for native
-   iOS apps, not a web PWA.
-
+     Deliberate and now settled (Joel, 2026-09-16): sessions are ended for the whole ACCOUNT,
+     never per device, because a session is `user_id:version:issued_at` rather than a stored
+     row. A per-device list is NOT planned; "sign out everywhere" covers the case that matters.
+7. **Apple — DROPPED (2026-09-16), not deferred.** Joel's call: it is not being tracked as
+   future work. Reasons, kept so nobody reopens it by accident: £79/yr developer program; the
+   client secret is an ES256 JWT from a `.p8` key with a six-month maximum, so it needs a
+   rotation job or it dies silently; the name is returned only on the very first authorisation,
+   ever; and `response_mode=form_post` makes the callback a cross-site POST that will not carry
+   `cta_oauth_state`, since every auth cookie is `samesite="lax"`. The App Store rule requiring
+   Sign in with Apple applies to native iOS apps, not a web PWA.
 ---
 
 ## 8. Decisions (settled 2026-09-15)
@@ -436,6 +435,16 @@ the person to prove the other identity from the same session, then link.
 **C/D conflict → nudge on `/account`.** With no Discord emails, C's prompt can't fire for
 Discord-only accounts. Every Discord-only account is nudged to add Google or an email while
 signed in; from then on it is matchable.
+
+**Duplicate accounts are prevented in the flow, not by an announcement (2026-09-16).** Joel
+called this essential, and it is the same failure that gave Ian three player rows. Relying on
+a Discord post would leave it to whoever read it, so: `GET /auth/pending` tells the club picker
+which method a half-finished sign-up used, and `/join` warns any non-Discord arrival BEFORE an
+account exists ("sign in the way you normally do, then add X from your account page"), with a
+button to do that and an "I'm new here" dismiss. `SignInPrompt` also says "Already play at a
+club? Use Discord, the way you always have" above the options, but only when more than one is
+offered. This is what makes it safe to set GOOGLE_SIGNIN / EMAIL_SIGNIN / PASSWORD_SIGNIN to
+"open"; an announcement is now a nicety rather than the safeguard.
 
 **Follow-ups, all yes:** `users.display_name` column (not overloading `discord_name`);
 revocable sessions in Slab 0; one authoritative Discord ID per user (`user_identities`);

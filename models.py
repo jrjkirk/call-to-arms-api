@@ -113,8 +113,25 @@ class Pairing(SQLModel, table=True):
     status: str = "pending"
     table: Optional[str] = None
 
+    # What this GAME is, when an admin has said so in the pairings grid.
+    #
+    # The rule (2026-09-16, after Nick reported it): a Signup row is what the
+    # player asked for and only an admin editing the signup itself may change
+    # it. Editing a pairing must never write back to it. Before this, the grid
+    # wrote its own displayed values onto both signups, so nudging a game's
+    # time rewrote both players' signup times and the signup list above stopped
+    # saying what anybody had asked for.
+    #
+    # NULL means "no override, work it out from the signups" (the later of the
+    # two ETAs, the lower points, the shared vibe), so a later signup edit still
+    # flows through. An empty string on a faction means "explicitly none", which
+    # NULL cannot express once NULL means derive.
     a_faction: Optional[str] = None
     b_faction: Optional[str] = None
+    eta: Optional[str] = None
+    points: Optional[int] = None
+    a_vibe: Optional[str] = None
+    b_vibe: Optional[str] = None
 
     prearranged: bool = Field(default=False)
     club_id: Optional[int] = Field(default=None, foreign_key="clubs.id", index=True)

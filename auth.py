@@ -1128,6 +1128,26 @@ def me(
     }
 
 
+@router.get("/pending")
+def pending_signup(cta_pending_signup: Optional[str] = Cookie(default=None)):
+    """Which sign-in method a half-finished sign-up came through, for the club
+    picker.
+
+    It exists so /join can warn someone arriving by Google, email or a password
+    that a club regular should sign in with Discord and add the new method from
+    their account, rather than starting a second, empty account. That warning
+    can't wait for the email-match offer (Decision C): we hold no Discord
+    emails, so nothing matches for exactly the people most at risk.
+
+    Says only the provider and the name it gave. Nothing here is a secret, and
+    it answers for an unauthenticated browser by design.
+    """
+    pending = _verify_pending_signup_cookie(cta_pending_signup)
+    if pending is None:
+        return {"pending": False, "provider": None, "name": None}
+    return {"pending": True, "provider": pending.provider, "name": pending.name}
+
+
 class CompleteSignupRequest(BaseModel):
     club_id: int
 

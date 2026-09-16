@@ -1042,7 +1042,13 @@ def _public_vibe_display(a_vibe, b_vibe):
     return av or bv or None
 
 
-def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
+def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup],
+              override: Optional[str] = None) -> Optional[str]:
+    """The game's time: what an admin set on the pairing, else the later of the
+    two signup times (both players can make that). See Pairing's note: the
+    signups say what each player asked for and are never rewritten from here."""
+    if override:
+        return override
     a_eta = a_su.eta if a_su else None
     b_eta = b_su.eta if b_su else None
     if a_eta and b_eta:
@@ -1050,9 +1056,12 @@ def _eta_show(a_su: Optional[Signup], b_su: Optional[Signup]) -> Optional[str]:
     return a_eta or b_eta
 
 
-def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup], uses_points: bool) -> Optional[str]:
+def _pts_show(a_su: Optional[Signup], b_su: Optional[Signup], uses_points: bool,
+              override: Optional[int] = None) -> Optional[str]:
     if not uses_points:
         return None
+    if isinstance(override, int):
+        return str(override)
     vals = [su.points for su in (a_su, b_su) if su is not None and isinstance(su.points, int)]
     return str(min(vals)) if vals else None
 
@@ -1067,21 +1076,26 @@ def _build_display_row(
     signups_by_id: dict,
     uses_points: bool,
     player_levels: Optional[dict] = None,
+    eta_override: Optional[str] = None,
+    points_override: Optional[int] = None,
+    a_vibe_override: Optional[str] = None,
+    b_vibe_override: Optional[str] = None,
 ) -> dict:
     a_su = signups_by_id.get(a_signup_id)
     b_su = signups_by_id.get(b_signup_id) if b_signup_id else None
 
     a_name = a_su.player_name if a_su else f"#{a_signup_id}"
-    a_vibe = a_su.vibe if a_su else None
+    a_vibe = a_vibe_override or (a_su.vibe if a_su else None)
 
     b_name = (b_su.player_name if b_su else f"#{b_signup_id}") if b_signup_id else "BYE"
-    b_vibe = b_su.vibe if b_su else None
+    b_vibe = b_vibe_override or (b_su.vibe if b_su else None)
 
     return {
         "id": row_id,
         "a_signup_id": a_signup_id,
         "a_name": a_name,
-        "a_faction": a_faction if a_faction is not None else (a_su.faction if a_su else None),
+        # "" on the pairing is an admin clearing it; NULL means follow the signup.
+        "a_faction": (a_faction or None) if a_faction is not None else (a_su.faction if a_su else None),
         "a_vibe": a_vibe,
         # Self-reported experience ("New" / "Some" / "Veteran"). Carried
         # through to the posted pairings image so the level each player put on
@@ -1093,13 +1107,14 @@ def _build_display_row(
         "a_level": (player_levels or {}).get(a_su.player_id) if a_su else None,
         "b_signup_id": b_signup_id,
         "b_name": b_name,
-        "b_faction": b_faction if (b_signup_id and b_faction is not None) else (b_su.faction if b_su else None),
+        "b_faction": (((b_faction or None) if b_faction is not None else (b_su.faction if b_su else None))
+                      if b_signup_id else None),
         "b_vibe": b_vibe,
         "b_experience": b_su.experience if b_su else None,
         "b_level": (player_levels or {}).get(b_su.player_id) if b_su else None,
         "type": _public_vibe_display(a_vibe, b_vibe),
-        "eta": _eta_show(a_su, b_su),
-        "points": _pts_show(a_su, b_su, uses_points),
+        "eta": _eta_show(a_su, b_su, eta_override),
+        "points": _pts_show(a_su, b_su, uses_points, points_override),
         "prearranged": prearranged,
     }
 
@@ -1138,14 +1153,18 @@ def _pairing_rows_to_display(pairings: list, signups_by_id: dict, uses_points: b
                              player_levels: Optional[dict] = None) -> list:
     result = []
     for p in pairings:
-        a_faction = p.a_faction or (signups_by_id.get(p.a_signup_id, None) and signups_by_id[p.a_signup_id].faction)
-        b_faction = None
-        if p.b_signup_id:
-            b_faction = p.b_faction or (signups_by_id.get(p.b_signup_id, None) and signups_by_id[p.b_signup_id].faction)
+        # Pass the pairing's own value through untouched, including "" for a
+        # faction an admin cleared: _build_display_row decides what NULL and ""
+        # mean. Collapsing "" here showed the signup's faction back to the
+        # admin while the public card correctly showed none.
+        a_faction = p.a_faction
+        b_faction = p.b_faction if p.b_signup_id else None
         result.append(_build_display_row(
             p.id, p.a_signup_id, p.b_signup_id,
             a_faction, b_faction,
             p.prearranged, signups_by_id, uses_points, player_levels,
+            eta_override=p.eta, points_override=p.points,
+            a_vibe_override=p.a_vibe, b_vibe_override=p.b_vibe,
         ))
     return result
 
@@ -1870,9 +1889,6 @@ def pairings_save(
         for sid in new_ids - old_ids:
             placed_into.setdefault(sid, set()).add(p.id)
 
-        a_su = db.get(Signup, p.a_signup_id) if p.a_signup_id else None
-        b_su = db.get(Signup, p.b_signup_id) if p.b_signup_id else None
-
         # Faction — "— None —" sentinel → None
         def _clean_faction(f: Optional[str]) -> Optional[str]:
             if f in (None, "— None —", ""):
@@ -1882,47 +1898,35 @@ def pairings_save(
         a_faction = _clean_faction(row.a_faction)
         b_faction = _clean_faction(row.b_faction)
 
-        p.a_faction = a_faction if p.a_signup_id else None
-        p.b_faction = b_faction if p.b_signup_id else None
+        # Everything below describes the GAME and is written to the pairing.
+        # The signups are what the players asked for and are never written from
+        # here: doing that rewrote both players' signup times whenever an admin
+        # nudged a game (reported 16/09/2026). To change what somebody signed
+        # up with, edit their signup (PATCH /admin/signups/{id}).
+        #
+        # Faction keeps "" for "explicitly none", since NULL now means "follow
+        # the signup".
+        p.a_faction = ("" if a_faction is None else a_faction) if p.a_signup_id else None
+        p.b_faction = ("" if b_faction is None else b_faction) if p.b_signup_id else None
 
-        if a_su:
-            a_su.faction = a_faction
-            db.add(a_su)
-        if b_su:
-            b_su.faction = b_faction
-            db.add(b_su)
-
-        # Vibe — per-side type if non-empty, else shared type
+        # Vibe — per-side type if given, else the shared one. Blank leaves it to
+        # the signups.
         a_type_raw = (row.a_type or "").strip()
         b_type_raw = (row.b_type or "").strip()
         shared_type = (row.type or "").strip()
-        a_vibe = a_type_raw if a_type_raw else (shared_type or None)
-        b_vibe = b_type_raw if b_type_raw else (shared_type or None)
-        if a_su and a_vibe:
-            a_su.vibe = a_vibe
-            db.add(a_su)
-        if b_su and b_vibe:
-            b_su.vibe = b_vibe
-            db.add(b_su)
+        p.a_vibe = (a_type_raw or shared_type or None) if p.a_signup_id else None
+        p.b_vibe = (b_type_raw or shared_type or None) if p.b_signup_id else None
 
-        # ETA and points — written to both present signups
-        eta_val = (row.eta or "").strip() or None
+        # ETA and points. Blank clears the override, so the game follows the
+        # signup times again.
+        p.eta = (row.eta or "").strip() or None
         pts_val: Optional[int] = None
         try:
             if row.points is not None and str(row.points).strip():
                 pts_val = int(row.points)
         except (ValueError, TypeError):
-            pass
-
-        for su in [a_su, b_su]:
-            if su is None:
-                continue
-            if eta_val:
-                su.eta = eta_val
-                db.add(su)
-            if pts_val is not None:
-                su.points = pts_val
-                db.add(su)
+            pts_val = None
+        p.points = pts_val
 
         db.add(p)
         changed += 1
