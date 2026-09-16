@@ -16,6 +16,9 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 - **Auth:** Discord OAuth2, stateless HMAC session cookie (`cta_session`)
   - `SameSite=Lax; Secure` — the API is served from api.calltoarms.app, same-site with every
     club subdomain. See the COOKIE NOTE in `auth.py`'s docstring before changing it.
+  - 30 days, rolling: the cookie carries when it was issued and `/auth/me` re-issues one over
+    a week old, so an active session never lapses. Ending sessions is per ACCOUNT
+    (`users.session_version`), never per device.
   - **Planned overhaul:** non-Discord sign-in + account management. Read
     `ACCOUNT_OVERHAUL.md` before touching auth, `users`, or display names.
 
@@ -138,6 +141,15 @@ remove this failure mode entirely (not done yet).
 `http://localhost:8010/auth/google/callback`) from production's
 (`https://api.calltoarms.app/auth/google/callback`), so resetting one secret can't
 break the other the way the shared Discord secret did.
+
+## Passwords (account overhaul Slab 8)
+
+`PASSWORD_SIGNIN` is off / link / open like the others. Argon2id via `argon2-cffi`
+(the one runtime dependency this overhaul added). Read `passwords.py` before
+touching anything about them: only a hash is ever stored, hashing is capped by a
+semaphore because Argon2 is deliberately memory-hungry and this machine is small,
+and `argon2-cffi-bindings`' cffi is intentionally unpinned (the venv runs 3.14,
+the image 3.11, and their wheels differ).
 
 ## ⚠️ WRITE_ALLOWED_TABLES guard
 

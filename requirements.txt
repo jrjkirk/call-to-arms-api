@@ -23,3 +23,9 @@ watchfiles==1.1.1
 websockets==16.0
 httpx
 python-multipart==0.0.32
+# Argon2id password hashing (passwords.py). cffi and pycparser come with it and
+# are deliberately NOT pinned: this repo's venv runs Python 3.14 and the image
+# runs 3.11, and the versions with wheels differ between them. Pinning the two
+# top-level packages is enough to keep hashing behaviour fixed.
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0

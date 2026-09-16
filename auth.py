@@ -10,11 +10,18 @@ Flow:
   4. /auth/logout           -- clear the cookie
 
 Sessions are signed, and revocable per account: the cookie value is
-`{user_id}.{hmac}` or `{user_id}:{session_version}.{hmac}`. We trust it iff the
+`{user_id}.{hmac}`, `{user_id}:{session_version}.{hmac}` or
+`{user_id}:{session_version}:{issued_at}.{hmac}`. We trust it iff the
 signature verifies with SESSION_SECRET AND the version still matches the
-user's session_version. Version 0 is the original format, byte for byte, so
-introducing versions logged nobody out. Bumping the version (identity.
+user's session_version. The older two shapes still verify, so neither
+addition logged anybody out. Bumping the version (identity.
 bump_session_version) ends every session that account has.
+
+The 30 days ROLL FORWARD: /auth/me re-issues a cookie older than
+SESSION_REFRESH_AFTER, so someone who keeps using the app stays signed in and
+someone who stops is signed out 30 days later. Every page calls /auth/me, so
+that is the natural place for it. Without this the window ran from the last
+sign-in, and a daily user was signed out a month later for no reason.
 
 PROVIDERS NOTE (account overhaul Slab 0, 2026-09-15): a provider's callback
 only turns its code into an identity.ProviderProfile. Everything after that,
@@ -53,7 +60,7 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote, urlencode, urlparse
 
@@ -68,13 +75,17 @@ from database import (
     resolve_request_club_id, scoped,
 )
 from identity import (
-    DISCORD, EMAIL, GOOGLE, ProviderProfile, account_with_verified_email, attach_identity,
+    DISCORD, EMAIL, GOOGLE, PASSWORD, ProviderProfile, account_with_verified_email, attach_identity,
     bump_session_version, clean_display_name, find_identity,
     create_user_for_profile,
     display_name_for, find_user_for_profile, identity_for, record_sign_in,
 )
-from models import Club, ClubSystem, SystemConfig, User, UserIdentity, Player, AdminRole
+from models import (
+    AdminRole, Club, ClubSystem, LoginAttempt, PasswordCredential, Player, SystemConfig,
+    User, UserIdentity,
+)
 import email_login
+import passwords
 import user_merge
 from emailer import UndeliverableRecipient
 from observability import capture
@@ -115,6 +126,14 @@ GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 # the Resend secrets this needs are already set for other mail, so presence of
 # secrets can't be what switches it on.
 EMAIL_SIGNIN = os.environ.get("EMAIL_SIGNIN", "off")
+# Email and password (Slab 8). Same three stages. Needs email working, since
+# signing up confirms the address and a forgotten password is emailed.
+PASSWORD_SIGNIN = os.environ.get("PASSWORD_SIGNIN", "off")
+
+# Failed password attempts allowed before a wait, per address and per IP.
+PASSWORD_FAIL_LIMIT_EMAIL = 10
+PASSWORD_FAIL_LIMIT_IP = 30
+PASSWORD_FAIL_WINDOW = timedelta(minutes=15)
 
 
 def _email_configured() -> bool:
@@ -130,6 +149,8 @@ def linkable_providers() -> list[str]:
         providers.append(GOOGLE)
     if EMAIL_SIGNIN in ("link", "open") and _email_configured():
         providers.append(EMAIL)
+    if PASSWORD_SIGNIN in ("link", "open") and _email_configured():
+        providers.append(PASSWORD)
     return providers
 
 
@@ -141,6 +162,8 @@ def sign_in_providers() -> list[str]:
         providers.append(GOOGLE)
     if EMAIL in linkable and EMAIL_SIGNIN == "open":
         providers.append(EMAIL)
+    if PASSWORD in linkable and PASSWORD_SIGNIN == "open":
+        providers.append(PASSWORD)
     return providers
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -163,28 +186,48 @@ def _sign(value: str) -> str:
 
 
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+# How old a cookie gets before /auth/me hands out a fresh one. Well under
+# SESSION_MAX_AGE, so an active session is never close to expiring.
+SESSION_REFRESH_AFTER = timedelta(days=7)
 
 
-def _make_session_cookie(user_id: int, version: int = 0) -> str:
-    """The signed session cookie value. Version 0 keeps the original
-    'user_id.signature' shape exactly."""
-    body = str(user_id) if not version else f"{user_id}:{version}"
+def _make_session_cookie(user_id: int, version: int = 0, issued_at: Optional[int] = None) -> str:
+    """The signed session cookie value.
+
+    Written as `user_id:version:issued_at`. The two older shapes (`user_id` and
+    `user_id:version`) still verify on the way in, so nothing was logged out
+    when each field arrived; `issued_at` is what lets /auth/me roll the 30 days
+    forward. Passing neither version nor issued_at gives the original shape
+    byte for byte, which the tests lean on.
+    """
+    if issued_at is None and not version:
+        body = str(user_id)
+    elif issued_at is None:
+        body = f"{user_id}:{version}"
+    else:
+        body = f"{user_id}:{version}:{issued_at}"
     return f"{body}.{_sign(body)}"
 
 
-def _parse_session_cookie(raw: Optional[str]) -> Optional[tuple[int, int]]:
-    """(user_id, version) if the cookie is untampered, else None. Says nothing
-    about whether that version is still current; _session_user checks that."""
+def _parse_session_cookie(raw: Optional[str]) -> Optional[tuple[int, int, Optional[int]]]:
+    """(user_id, version, issued_at) if the cookie is untampered, else None.
+    issued_at is None for a cookie from before it was stamped. Says nothing
+    about whether the version is still current; _session_user checks that."""
     if not raw or "." not in raw:
         return None
     body, sig = raw.rsplit(".", 1)
     if not hmac.compare_digest(sig, _sign(body)):
         return None
-    uid, _, ver = body.partition(":")
+    parts = body.split(":")
+    if len(parts) > 3:
+        return None
     try:
-        return int(uid), int(ver) if ver else 0
+        uid = int(parts[0])
+        version = int(parts[1]) if len(parts) > 1 and parts[1] != "" else 0
+        issued = int(parts[2]) if len(parts) > 2 and parts[2] != "" else None
     except ValueError:
         return None
+    return uid, version, issued
 
 
 def _verify_session_cookie(raw: str) -> Optional[int]:
@@ -209,7 +252,8 @@ def _session_user(db: Session, raw: Optional[str]) -> Optional[User]:
 def _set_session_cookie(response: Response, user: User) -> None:
     response.set_cookie(
         "cta_session",
-        _make_session_cookie(user.id, user.session_version or 0),
+        _make_session_cookie(user.id, user.session_version or 0,
+                             int(datetime.utcnow().timestamp())),
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
@@ -789,7 +833,13 @@ def email_verify(
             _set_merge_cookie(out, merge_cookie)
         return out
 
-    if EMAIL not in sign_in_providers():
+    if row.purpose == email_login.PASSWORD_SIGNUP:
+        if PASSWORD not in sign_in_providers():
+            raise HTTPException(status_code=404, detail="Signing up with a password isn't available.")
+        # The address is confirmed, so this becomes a password identity; the
+        # password itself is waiting on the token row for complete-signup.
+        profile = ProviderProfile(provider=PASSWORD, subject=row.email, email=row.email, email_verified=True)
+    elif EMAIL not in sign_in_providers():
         raise HTTPException(status_code=404, detail="Email sign-in isn't available.")
     email_login.spend(db, row)
     db.flush()
@@ -1011,6 +1061,8 @@ def _user_out(user: User) -> dict:
 @router.get("/me")
 def me(
     request: Request,
+    response: Response,
+    session_cookie: Optional[str] = Cookie(default=None, alias="cta_session"),
     user: Optional[User] = Depends(current_user),
     db: Session = Depends(get_session),
 ):
@@ -1022,6 +1074,15 @@ def me(
     claim/create flow here even if they have a player at another club."""
     if user is None:
         return {"authenticated": False, "sign_in_providers": sign_in_providers()}
+
+    # Roll the 30 days forward for someone who is still using the app. Every
+    # page calls this, so an active session is always freshly stamped; one
+    # that stops being used expires on its own. A cookie from before stamping
+    # existed has no date, so it gets one now.
+    parsed = _parse_session_cookie(session_cookie)
+    issued = parsed[2] if parsed else None
+    if issued is None or datetime.utcfromtimestamp(issued) < datetime.utcnow() - SESSION_REFRESH_AFTER:
+        _set_session_cookie(response, user)
 
     active_club = resolve_active_club_id(db, user, request.headers.get("origin"))
     my_player_id = active_player_id_for(db, user, active_club)
@@ -1103,6 +1164,12 @@ def complete_signup(
             club_id=club.id,
             home_club_id=club.id,  # the club they picked is their soft home
         )
+        if pending.provider == PASSWORD:
+            # The hash has been waiting on the confirmation token since they
+            # typed it (email_login.PASSWORD_SIGNUP).
+            secret = email_login.claim_signup_secret(db, pending.subject)
+            if secret:
+                db.add(PasswordCredential(user_id=user.id, hash=secret))
     db.commit()
     db.refresh(user)
 
@@ -1278,6 +1345,7 @@ def account(
                 "name": i.name,
                 "avatar_url": i.avatar_url,
                 "email": i.email,
+                "email_verified": i.email_verified,
                 "is_primary": i.is_primary,
                 "created_at": i.created_at,
                 "last_used_at": i.last_used_at,
@@ -1294,6 +1362,9 @@ def account(
             for p, c in rows
         ],
         "can_add": [p for p in linkable_providers() if p not in have],
+        "has_password": db.exec(
+            select(PasswordCredential).where(PasswordCredential.user_id == user.id)
+        ).first() is not None,
     }
 
 
@@ -1374,6 +1445,10 @@ def remove_identity(
         raise HTTPException(status_code=409, detail="That's your only way to sign in, so it can't be removed.")
     provider, was_primary = ident.provider, ident.is_primary
     label = f"{provider} {ident.email or ident.name or ident.provider_user_id}"
+    if provider == PASSWORD:
+        for credential in db.exec(select(PasswordCredential)
+                                  .where(PasswordCredential.user_id == user.id)).all():
+            db.delete(credential)
     db.delete(ident)
     db.flush()
     if was_primary:
@@ -1471,6 +1546,315 @@ def merge_confirm(
 @router.post("/merge/cancel")
 def merge_cancel(response: Response):
     response.delete_cookie("cta_merge")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Email and password (Slab 8). What is stored, and why nobody can read a
+# password out of it, is in passwords.py.
+# ---------------------------------------------------------------------------
+
+def _attempt_key(scope: str, value: str) -> str:
+    return hmac.new(SESSION_SECRET.encode(), f"{scope}:{value}".encode(), hashlib.sha256).hexdigest()
+
+
+def _too_many_attempts(db: Session, scope: str, value: str, limit: int) -> bool:
+    since = datetime.utcnow() - PASSWORD_FAIL_WINDOW
+    hits = db.exec(
+        select(LoginAttempt).where(LoginAttempt.key_hash == _attempt_key(scope, value))
+        .where(LoginAttempt.created_at > since)
+    ).all()
+    return len(hits) >= limit
+
+
+def _record_failure(db: Session, email: str, ip: str) -> None:
+    """Remember a wrong password, and prune old rows as we go. Caller commits."""
+    for scope, value in (("email", email), ("ip", ip)):
+        db.add(LoginAttempt(scope=scope, key_hash=_attempt_key(scope, value)))
+    if secrets.randbelow(20) == 0:
+        cutoff = datetime.utcnow() - timedelta(days=1)
+        for old in db.exec(select(LoginAttempt).where(LoginAttempt.created_at < cutoff)).all():
+            db.delete(old)
+
+
+def _clear_failures(db: Session, email: str) -> None:
+    for row in db.exec(select(LoginAttempt).where(LoginAttempt.key_hash == _attempt_key("email", email))).all():
+        db.delete(row)
+
+
+def _password_identity(db: Session, email: str) -> Optional[UserIdentity]:
+    return find_identity(db, PASSWORD, email)
+
+
+def _set_password(db: Session, user: User, password: str) -> None:
+    """Store a new password for `user`, replacing any it had. Caller commits."""
+    row = db.exec(select(PasswordCredential).where(PasswordCredential.user_id == user.id)).first()
+    hashed = passwords.hash_password(password)
+    if row is None:
+        db.add(PasswordCredential(user_id=user.id, hash=hashed))
+    else:
+        row.hash = hashed
+        row.updated_at = datetime.utcnow()
+        db.add(row)
+
+
+class PasswordSignupBody(BaseModel):
+    email: str
+    password: str
+    next: Optional[str] = None
+
+
+_SIGNUP_SENT = {
+    "ok": True,
+    # Same words whether or not the address already has an account: the form
+    # must not answer "does this person play here".
+    "detail": "Check that inbox to confirm your address and finish. The link works for 15 minutes.",
+}
+
+
+@router.post("/password/signup")
+def password_signup(body: PasswordSignupBody, request: Request, db: Session = Depends(get_session)):
+    """Start an account with an email address and a password.
+
+    Nothing is created here. The password is hashed and held against a
+    confirmation link, so the account only exists once someone has read the
+    email at that address.
+    """
+    if PASSWORD not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Signing up with a password isn't available.")
+    email = email_login.normalise_email(body.email)
+    if email is None:
+        raise HTTPException(status_code=422, detail="That doesn't look like an email address.")
+    try:
+        passwords.check_strength(body.password, email)
+    except passwords.PasswordRejected as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    origin = _request_origin(request)
+    ip = email_login.client_ip(request)
+    taken = _password_identity(db, email) is not None or account_with_verified_email(db, email) is not None
+    try:
+        if taken:
+            # Told by email, not here. Someone who already has an account gets a
+            # way back in; someone probing the form learns nothing.
+            token = None
+        else:
+            token = email_login.issue(db, email=email, purpose=email_login.PASSWORD_SIGNUP,
+                                      origin=origin, ip=ip, next_path=_safe_next_path(body.next),
+                                      secret=passwords.hash_password(body.password))
+    except email_login.RateLimited:
+        raise HTTPException(status_code=429, detail="That's a lot of attempts. Please wait a while and try again.")
+    db.commit()
+    if taken:
+        _send_or_explain_notice(email, f"{origin}/signin")
+    else:
+        _send_or_explain(email, email_login.PASSWORD_SIGNUP, email_login.link_url(origin, token))
+    return _SIGNUP_SENT
+
+
+def _send_or_explain_notice(email: str, sign_in_url: str) -> None:
+    try:
+        email_login.send_existing_account_notice(email, sign_in_url)
+    except UndeliverableRecipient:
+        pass
+    except RuntimeError as e:
+        capture(e, where="existing-account notice")
+
+
+class PasswordSignInBody(BaseModel):
+    email: str
+    password: str
+    next: Optional[str] = None
+
+
+_WRONG = "Email or password is incorrect."
+
+
+@router.post("/password/signin")
+def password_signin(
+    body: PasswordSignInBody,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_session),
+):
+    """Sign in with an email address and a password."""
+    if PASSWORD not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Signing in with a password isn't available.")
+    email = email_login.normalise_email(body.email) or ""
+    ip = email_login.client_ip(request)
+    if (_too_many_attempts(db, "email", email, PASSWORD_FAIL_LIMIT_EMAIL)
+            or _too_many_attempts(db, "ip", ip, PASSWORD_FAIL_LIMIT_IP)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Wait a few minutes, or use the forgotten password link.",
+        )
+
+    ident = _password_identity(db, email) if email else None
+    credential = db.exec(
+        select(PasswordCredential).where(PasswordCredential.user_id == ident.user_id)
+    ).first() if ident else None
+    user = db.get(User, ident.user_id) if ident else None
+    ok, fresh = passwords.verify_password(credential.hash, body.password) if credential else (False, None)
+    if not ok or user is None:
+        _record_failure(db, email, ip)
+        db.commit()
+        raise HTTPException(status_code=401, detail=_WRONG)
+
+    if fresh:
+        # Hashed with weaker settings than today's; quietly bring it up to date.
+        credential.hash = fresh
+        credential.updated_at = datetime.utcnow()
+        db.add(credential)
+    _clear_failures(db, email)
+    _touch_identity(db, ident)
+    user.last_login_at = datetime.utcnow()
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    _set_session_cookie(response, user)
+    origin = _request_origin(request)
+    return {"ok": True, "redirect": origin + _safe_next_path(body.next)}
+
+
+def _touch_identity(db: Session, ident: UserIdentity) -> None:
+    ident.last_used_at = datetime.utcnow()
+    db.add(ident)
+
+
+class PasswordForgotBody(BaseModel):
+    email: str
+
+
+@router.post("/password/forgot")
+def password_forgot(body: PasswordForgotBody, request: Request, db: Session = Depends(get_session)):
+    """Email a link to choose a new password. Says the same either way."""
+    if PASSWORD not in sign_in_providers():
+        raise HTTPException(status_code=404, detail="Signing in with a password isn't available.")
+    email = email_login.normalise_email(body.email)
+    if email is None:
+        raise HTTPException(status_code=422, detail="That doesn't look like an email address.")
+    origin = _request_origin(request)
+    ident = _password_identity(db, email)
+    token = None
+    if ident is not None:
+        try:
+            token = email_login.issue(db, email=email, purpose=email_login.PASSWORD_RESET,
+                                      origin=origin, ip=email_login.client_ip(request),
+                                      user_id=ident.user_id)
+        except email_login.RateLimited:
+            raise HTTPException(status_code=429, detail="That's a lot of attempts. Please wait a while and try again.")
+        db.commit()
+    if token:
+        _send_or_explain(email, email_login.PASSWORD_RESET, email_login.reset_url(origin, token))
+    return {
+        "ok": True,
+        "detail": "If that address has an account with a password, a link to choose a new one is on its way.",
+    }
+
+
+class PasswordResetBody(BaseModel):
+    token: str
+    password: str
+
+
+@router.post("/password/reset")
+def password_reset(
+    body: PasswordResetBody,
+    response: Response,
+    db: Session = Depends(get_session),
+):
+    """Choose a new password from an emailed link, and sign in.
+
+    Ends every other session: this is what someone uses when they think
+    somebody else has got into their account.
+    """
+    try:
+        row = email_login.peek(db, body.token)
+    except email_login.InvalidToken:
+        raise HTTPException(status_code=410, detail="That link has expired or been used. Ask for a new one.")
+    if row.purpose != email_login.PASSWORD_RESET or row.user_id is None:
+        raise HTTPException(status_code=410, detail="That link has expired or been used. Ask for a new one.")
+    user = db.get(User, row.user_id)
+    if user is None:
+        raise HTTPException(status_code=410, detail="That link has expired or been used. Ask for a new one.")
+    try:
+        passwords.check_strength(body.password, row.email)
+    except passwords.PasswordRejected as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    email_login.spend(db, row)
+    _set_password(db, user, body.password)
+    # The 429 tells people to use this link, so it has to clear the lockout it
+    # sent them here from. Without this, resetting the password left them
+    # still shut out until the window passed.
+    _clear_failures(db, row.email)
+    ident = _password_identity(db, row.email)
+    if ident is not None and not ident.email_verified:
+        # Reading the email proved the address.
+        ident.email_verified = True
+        db.add(ident)
+    bump_session_version(db, user)
+    log_audit(db, user, "password.reset", "user", user.id, row.email)
+    db.commit()
+    db.refresh(user)
+    _set_session_cookie(response, user)
+    return {"ok": True, "redirect": f"{row.origin}/account"}
+
+
+class PasswordSetBody(BaseModel):
+    password: str
+    current_password: Optional[str] = None
+
+
+@router.post("/password/set")
+def password_set(
+    body: PasswordSetBody,
+    response: Response,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_session),
+):
+    """Set or change this account's password, from /account.
+
+    Changing one asks for the current password and ends other sessions: if
+    somebody else is signed in, a new password should shut them out.
+    """
+    if PASSWORD not in linkable_providers():
+        raise HTTPException(status_code=404, detail="Passwords aren't available.")
+    existing = db.exec(select(PasswordCredential).where(PasswordCredential.user_id == user.id)).first()
+    if existing is not None:
+        ok, _ = passwords.verify_password(existing.hash, body.current_password or "")
+        if not ok:
+            raise HTTPException(status_code=403, detail="That isn't your current password.")
+    ident = db.exec(select(UserIdentity).where(UserIdentity.user_id == user.id)
+                    .where(UserIdentity.provider == PASSWORD)).first()
+    email = ident.provider_user_id if ident else None
+    if ident is None:
+        # A password needs an address to sign in with and to recover through.
+        verified = db.exec(select(UserIdentity).where(UserIdentity.user_id == user.id)
+                           .where(UserIdentity.email_verified == True)  # noqa: E712
+                           .where(UserIdentity.email.is_not(None))).first()
+        if verified is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Add a confirmed email address first, so you can sign in with it and get back in if you forget.",
+            )
+        email = verified.email
+    try:
+        passwords.check_strength(body.password, email)
+    except passwords.PasswordRejected as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    _set_password(db, user, body.password)
+    if ident is None:
+        attach_identity(db, user, ProviderProfile(provider=PASSWORD, subject=email, email=email,
+                                                  email_verified=True))
+        log_audit(db, user, "identity.link", "user", user.id, f"password {email}")
+    if existing is not None:
+        bump_session_version(db, user)
+        log_audit(db, user, "password.change", "user", user.id, email or "")
+    db.commit()
+    db.refresh(user)
+    _set_session_cookie(response, user)
     return {"ok": True}
 
 

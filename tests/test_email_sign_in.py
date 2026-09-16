@@ -19,6 +19,7 @@ import pathlib
 import sys
 import tempfile
 from datetime import datetime, timedelta
+import re
 from urllib.parse import parse_qs, urlparse
 
 _DB = pathlib.Path(tempfile.mkdtemp()) / "email.db"
@@ -129,7 +130,8 @@ joel_link = next(u for e, p, u in reversed(SENT) if e == "joel@example.com" and 
 r = client_for().post("/auth/email/verify", json={"token": token_from(joel_link)})
 cookies = " ".join(r.headers.get_list("set-cookie"))
 check("Joel's link signs him in and returns him to where he was",
-      r.status_code == 200 and r.json()["redirect"] == "https://home.calltoarms.app/signup" and "cta_session=1." in cookies,
+      r.status_code == 200 and r.json()["redirect"] == "https://home.calltoarms.app/signup"
+      and re.search(r"cta_session=1:\d+:\d+\.", cookies) is not None,
       f"{r.text[:120]} {cookies[:80]}")
 
 new_link = next(u for e, p, u in reversed(SENT) if e == "nobody@example.com")

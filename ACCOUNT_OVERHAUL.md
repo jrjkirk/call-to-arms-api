@@ -1,6 +1,6 @@
 # Account overhaul: unpicking Discord from identity
 
-**Status:** Slabs 0-5 LIVE (2026-09-15; Google invisible until its OAuth secrets are set, email off until EMAIL_SIGNIN is set). Slab 6 (link/unlink/merge) BUILT, not deployed; no migration. Audit taken 2026-09-14, re-checked
+**Status:** Slabs 0-6 LIVE (2026-09-15). Slab 8 (our own accounts, with passwords) BUILT 2026-09-16, not deployed; needs migrations/create_password_signin.py first. Google is invisible until GOOGLE_CLIENT_ID/SECRET are set; email and passwords are off until EMAIL_SIGNIN / PASSWORD_SIGNIN are set. Slab 7 (Apple) still deferred. Audit taken 2026-09-14, re-checked
 against code and the prod schema 2026-09-15 (see §2b for what changed and what the
 first pass missed). The four decisions in §8 are **settled**, plus four follow-ups.
 
@@ -362,6 +362,53 @@ Each slab lists what it **needs** from earlier slabs. Nothing ships out of order
    `/account`. Can't unlink your last identity. Linking an identity already on another
    account runs the Slab 1 merge after proving both. Unlinking Discord clears the mirror
    column and bumps `session_version`.
+8. **Our own accounts, with a password.** Needs: 0, 2, 5's email plumbing. BUILT
+   (`passwords.py`, `tests/test_password_sign_in.py`), `PASSWORD_SIGNIN` = off (default) /
+   link / open. Asked for 2026-09-16: "sign-in recommended as Discord, or Google, or an
+   account for the site", with passwords nobody here can read and a way back in when one is
+   forgotten.
+   - **Argon2id** (`argon2-cffi`, the first runtime dependency added for this overhaul), 32 MiB,
+     t=2, p=1, ~80ms. Only the hash is stored, in `password_credentials`, its own table so a
+     hash is never part of a row something serialises by habit. Hashing goes through a
+     semaphore of 4: this machine has 512 MB, has been wedged by memory before, and sync
+     endpoints run in a 40-thread pool. A hash carries its parameters, so raising them later
+     re-hashes on next sign-in.
+   - **Strength:** at least 10 characters, no composition rules, and rejected if Have I Been
+     Pwned's range API knows it (only the first 5 characters of its SHA-1 leave the server;
+     unreachable means allowed).
+   - **Signing up creates nothing** until the address is confirmed: the Argon2 hash waits on
+     `login_tokens.secret` (purpose `password_signup`), and complete-signup claims it. An
+     address that already has an account gets the same answer at the form and an email saying
+     so, so the form never says who plays here.
+   - **Limits:** 10 wrong passwords per address and 30 per IP in 15 minutes, counted in
+     `login_attempts` as keyed hashes, pruned as they accumulate. A successful reset clears the
+     address's lockout, because the 429 sends people to that link.
+   - **Forgotten password:** emailed link → web `/signin/reset` (token stripped from the
+     address bar, no Referer) → new password, signs them in and bumps `session_version`, which
+     is the recovery path Slab 5 deliberately didn't put on ordinary email sign-in.
+   - **Changing one** needs the current password and ends other sessions; removing the password
+     method deletes the credential. Setting one needs a confirmed address to sign in with.
+   - Web: `/signin` (Discord first, then email+password), `/signin/new`, `/signin/forgot`,
+     `/signin/reset`, and set/change on `/account`. Privacy page still accurate: passwords are
+     not listed because none is stored.
+   - **Session sweep, same day** (Joel: "treat this as though you were signing into GitHub").
+     Confirmed: one signed-in session per browser, shared by every tab, surviving reloads, new
+     tabs and a browser restart; signing in elsewhere disturbs nothing; sign-out takes effect on
+     the next load. `cta_session` is HttpOnly, Secure, SameSite=Lax, host-only to the API (so
+     every club subdomain shares it), and nothing about auth is kept in browser storage. CORS
+     allows credentials only from calltoarms.app and its subdomains; the five cached endpoints
+     are all public reads, and no /auth route is cached.
+     Two things the sweep changed:
+       * **The 30 days now roll forward.** The cookie carries `issued_at`, and /auth/me
+         re-issues one older than `SESSION_REFRESH_AFTER` (7 days). Before this the window ran
+         from the last sign-in, so a daily user was signed out a month later for no reason.
+         Both older cookie shapes still verify, so the deploy logs nobody out and a cookie
+         production holds today simply gains a date.
+       * The account page's Remove now says other devices will be signed out, which is what it
+         does.
+     Still true, and deliberate: sessions can only be ended all at once (no per-device list to
+     revoke one phone), because a session is `user_id:version:issued_at` rather than a stored
+     row. A per-device list would be the next step if it is ever wanted.
 7. **Apple — deferred.** £79/yr developer program. Client secret is an ES256 JWT
    from a `.p8` key, max 6-month expiry → needs a rotation job or it dies silently. Name is
    only returned on the very first authorisation, ever. `response_mode=form_post` makes the

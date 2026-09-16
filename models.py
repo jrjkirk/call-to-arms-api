@@ -1266,6 +1266,44 @@ class LoginToken(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     expires_at: datetime
     used_at: Optional[datetime] = None
+    # An Argon2 hash held between "sign me up with this password" and the click
+    # on the confirmation email, so an account is only ever created for an
+    # address its owner has proved they can read (purpose "password_signup").
+    # Cleared once used. Never a password, only its hash.
+    secret: Optional[str] = None
+
+
+class PasswordCredential(SQLModel, table=True):
+    """One account's password, as an Argon2id hash and nothing else.
+
+    Its own table rather than a column on users, so a password hash is never
+    part of a row some endpoint serialises by habit. See passwords.py for what
+    is stored and why nobody can read a password out of it.
+    """
+    __tablename__ = "password_credentials"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", unique=True, index=True)
+    hash: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class LoginAttempt(SQLModel, table=True):
+    """A failed password attempt, so guessing can be slowed down.
+
+    Kept per address and per IP as keyed hashes (never the address itself), in
+    the database rather than in memory so a restart doesn't reset a lockout.
+    Old rows are pruned as new ones arrive.
+    """
+    __tablename__ = "login_attempts"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scope: str  # "email" | "ip"
+    key_hash: str = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class ClubRequest(SQLModel, table=True):

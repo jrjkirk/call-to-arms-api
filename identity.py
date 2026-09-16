@@ -28,6 +28,7 @@ from models import User, UserIdentity
 DISCORD = "discord"
 GOOGLE = "google"
 EMAIL = "email"
+PASSWORD = "password"
 
 
 @dataclass

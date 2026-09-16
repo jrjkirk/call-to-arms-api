@@ -40,6 +40,10 @@ WINDOW = timedelta(hours=1)
 
 SIGN_IN = "sign_in"
 LINK = "link"
+# Signing up with a password: the hash waits on the token row until the address
+# is confirmed, so an account only ever exists for an address its owner can read.
+PASSWORD_SIGNUP = "password_signup"
+PASSWORD_RESET = "password_reset"
 
 # Catches a typo or a pasted sentence. Deliberately loose: the email arriving is
 # what proves an address works.
@@ -80,7 +84,8 @@ def _token_hash(token: str) -> str:
 
 
 def issue(db: Session, *, email: str, purpose: str, origin: str, ip: str,
-          next_path: Optional[str] = None, user_id: Optional[int] = None) -> str:
+          next_path: Optional[str] = None, user_id: Optional[int] = None,
+          secret: Optional[str] = None) -> str:
     """Record a new link and return the raw token for the email. Caller commits.
     Raises RateLimited, having written nothing."""
     now = datetime.utcnow()
@@ -95,12 +100,36 @@ def issue(db: Session, *, email: str, purpose: str, origin: str, ip: str,
     if len(recent_email) >= PER_EMAIL_LIMIT or len(recent_ip) >= PER_IP_LIMIT:
         raise RateLimited()
     token = secrets.token_urlsafe(32)
+    if purpose == PASSWORD_SIGNUP:
+        # Only the newest attempt's password can be the one that lands.
+        for old in db.exec(select(LoginToken).where(LoginToken.email == email)
+                           .where(LoginToken.purpose == PASSWORD_SIGNUP)
+                           .where(LoginToken.secret.is_not(None))).all():
+            old.secret = None
+            db.add(old)
     db.add(LoginToken(
         token_hash=_token_hash(token), email=email, purpose=purpose, user_id=user_id,
         origin=origin, next_path=next_path, ip_hash=ip_h,
-        created_at=now, expires_at=now + TOKEN_LIFETIME,
+        created_at=now, expires_at=now + TOKEN_LIFETIME, secret=secret,
     ))
     return token
+
+
+def claim_signup_secret(db: Session, email: str) -> Optional[str]:
+    """The password hash kept for a confirmed sign-up, taken off the row so it
+    can only be used once. Caller commits."""
+    row = db.exec(
+        select(LoginToken).where(LoginToken.email == email)
+        .where(LoginToken.purpose == PASSWORD_SIGNUP)
+        .where(LoginToken.secret.is_not(None))
+        .order_by(LoginToken.created_at.desc())
+    ).first()
+    if row is None:
+        return None
+    secret = row.secret
+    row.secret = None
+    db.add(row)
+    return secret
 
 
 def peek(db: Session, token: Optional[str]) -> LoginToken:
@@ -123,6 +152,10 @@ def link_url(origin: str, token: str) -> str:
     return f"{origin}/signin/email?token={token}"
 
 
+def reset_url(origin: str, token: str) -> str:
+    return f"{origin}/signin/reset?token={token}"
+
+
 def send_link(email: str, purpose: str, url: str) -> None:
     """Send the email. Raises what emailer.send_email raises."""
     if purpose == LINK:
@@ -130,6 +163,18 @@ def send_link(email: str, purpose: str, url: str) -> None:
         intro = "Confirm this address to add it to your Call to Arms account. You'll be able to sign in with it."
         label = "Confirm email"
         ignore = "If you didn't ask to add this address, ignore this email. Nothing changes without the link."
+    elif purpose == PASSWORD_SIGNUP:
+        subject = "Confirm your email for Call to Arms"
+        intro = "Confirm this address to finish setting up your Call to Arms account."
+        label = "Confirm email"
+        ignore = ("If you didn't sign up, ignore this email. No account is created until this link is used, "
+                  "and whoever tried can't see this message.")
+    elif purpose == PASSWORD_RESET:
+        subject = "Reset your Call to Arms password"
+        intro = "Use this link to choose a new password for your Call to Arms account."
+        label = "Choose a new password"
+        ignore = ("If you didn't ask for this, ignore this email. Your current password still works and "
+                  "nothing changes without the link.")
     else:
         subject = "Your Call to Arms sign-in link"
         intro = "Here's your link to sign in to Call to Arms."
@@ -140,4 +185,22 @@ def send_link(email: str, purpose: str, url: str) -> None:
     html = email_layout.wrap(body, preheader=intro, cta_url=url, cta_label=label)
     text = f"{intro}\n\n{label}: {url}\n\n{lifetime}\n\n{ignore}\n"
     send_email(email, subject, html, text=text, from_addr=sender("onboarding"))
+
+
+def send_existing_account_notice(email: str, sign_in_url: str) -> None:
+    """Someone tried to sign up with an address that already has an account.
+
+    Sent instead of telling the person at the form, which would say whether an
+    address has an account here to anyone who asked.
+    """
+    intro = "Someone tried to create a Call to Arms account with this address, and it already has one."
+    body = email_layout.paragraphs(
+        f"{intro}\n\nIf that was you, sign in instead. If you've forgotten your password, "
+        "you can choose a new one from the sign-in page.\n\n"
+        "If it wasn't you, nothing has happened and you can ignore this email."
+    )
+    html = email_layout.wrap(body, preheader=intro, cta_url=sign_in_url, cta_label="Sign in")
+    text = f"{intro}\n\nSign in: {sign_in_url}\n"
+    send_email(email, "You already have a Call to Arms account", html, text=text,
+               from_addr=sender("onboarding"))
 

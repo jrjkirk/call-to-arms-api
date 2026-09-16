@@ -11,6 +11,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import re
 from urllib.parse import parse_qs, urlparse
 
 _DB = pathlib.Path(tempfile.mkdtemp()) / "google.db"
@@ -152,7 +153,8 @@ r = anon.get("/auth/google/login", params={"next": "/signup"}, headers={"referer
 check("the Google sign-in route is open", urlparse(r.headers.get("location", "")).netloc == "accounts.google.com")
 r = callback(client_for(), "joel")
 check("Joel's linked Google signs him into his existing account",
-      r.headers.get("location") == "https://home.calltoarms.app" and "cta_session=1." in " ".join(r.headers.get_list("set-cookie")),
+      r.headers.get("location") == "https://home.calltoarms.app"
+      and re.search(r"cta_session=1:\d+:\d+\.", " ".join(r.headers.get_list("set-cookie"))) is not None,
       str(r.headers.get_list("set-cookie"))[:200])
 
 GOOGLE["new"] = ProviderProfile(provider="google", subject="g-new", name="Gail Google",

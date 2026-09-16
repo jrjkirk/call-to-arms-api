@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from sqlmodel import SQLModel, Session, select
 
 from models import (
-    AdminRole, AuditLogEntry, ClubRequest, LoginToken, Player, Tournament, TournamentEntry,
+    AdminRole, AuditLogEntry, ClubRequest, LoginToken, PasswordCredential, Player,
+    Tournament, TournamentEntry,
     TournamentGame, User, UserIdentity, VenueBooking, VenueEvent, VenueStaff,
 )
 
@@ -40,6 +41,8 @@ from models import (
 #   entry         move; refused if both are in the tournament (plan_merge)
 #   dedupe:a,b    move, unless the kept account already has a row with the
 #                 same values of a,b, in which case the dropped row is deleted
+#   single        at most one per account: the kept account's own row wins and
+#                 the dropped account's is deleted
 USER_REFERENCES: list[tuple[type[SQLModel], str, str]] = [
     (UserIdentity, "user_id", "identity"),
     (Player, "user_id", "player"),
@@ -58,6 +61,8 @@ USER_REFERENCES: list[tuple[type[SQLModel], str, str]] = [
     (ClubRequest, "reviewed_by_user_id", "move"),
     # A pending "add this email" link follows the account it was asked for.
     (LoginToken, "user_id", "move"),
+    # The kept account's own password stays its password.
+    (PasswordCredential, "user_id", "single"),
 ]
 
 # Columns that look like user references by name but aren't.
@@ -173,6 +178,12 @@ def merge_users(db: Session, keep_id: int, drop_id: int) -> list[str]:
         attr = getattr(model, col)
         for row in db.exec(select(model).where(attr == drop.id)).all():
             label = f"{model.__tablename__} #{row.id}.{col}"
+            if how == "single":
+                mine = db.exec(select(model).where(attr == keep.id)).first()
+                if mine is not None:
+                    db.delete(row)
+                    log.append(f"{label}: kept account has its own, dropped")
+                    continue
             if how.startswith("dedupe:"):
                 keys = how.split(":", 1)[1].split(",")
                 same = [

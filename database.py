@@ -30,6 +30,11 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
+    "password_credentials",  # one Argon2id hash per account (passwords.py);
+                             # written on set/change/reset, deleted with the
+                             # password sign-in method
+    "login_attempts",   # failed password attempts, for the per-address and
+                        # per-IP limits; pruned as new ones arrive
     "login_tokens",     # emailed sign-in / confirm-email links (hashed, single
                         # use, 15 minutes) and the rate-limit log for them
     "user_identities",  # sign-in identities per account (Discord today); the

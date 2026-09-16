@@ -85,6 +85,31 @@ client.cookies.set("cta_session", f"1:0.{auth._sign('2:0')}")
 check("a signature for another body does not", client.get("/auth/me").json().get("authenticated") is False)
 
 
+print("\n1b. The 30 days roll forward while someone keeps using the app")
+import datetime as _dt
+fresh_now = auth._make_session_cookie(2, 0, int(_dt.datetime.utcnow().timestamp()))
+client.cookies.set("cta_session", fresh_now)
+r = client.get("/auth/me")
+check("a stamped, recent cookie signs in", r.json().get("authenticated") is True)
+check("and is left alone", not any(h.startswith("cta_session=") for h in r.headers.get_list("set-cookie")),
+      str(r.headers.get_list("set-cookie")))
+old_stamp = int((_dt.datetime.utcnow() - _dt.timedelta(days=8)).timestamp())
+client.cookies.set("cta_session", auth._make_session_cookie(2, 0, old_stamp))
+r = client.get("/auth/me")
+issued = next((h for h in r.headers.get_list("set-cookie") if h.startswith("cta_session=")), None)
+check("a cookie over a week old is replaced, so the window moves", issued is not None, str(r.headers.get_list("set-cookie")))
+check("with another 30 days on it", issued and "Max-Age=2592000" in issued, issued or "")
+client.cookies.set("cta_session", legacy)
+r = client.get("/auth/me")
+check("a cookie from before stamping existed still signs in and gets a date",
+      r.json().get("authenticated") is True
+      and any(h.startswith("cta_session=") for h in r.headers.get_list("set-cookie")))
+check("a cookie with junk where the date goes is refused",
+      client.get("/auth/me", headers={"cookie": f"cta_session=2:0:x.{auth._sign('2:0:x')}"}).json().get("authenticated") is False)
+check("and so is one with an extra field",
+      client.get("/auth/me", headers={"cookie": f"cta_session=2:0:1:1.{auth._sign('2:0:1:1')}"}).json().get("authenticated") is False)
+
+
 print("\n2. /auth/me says what it means to, and no more")
 client.cookies.set("cta_session", legacy)
 user = client.get("/auth/me").json()["user"]
@@ -130,7 +155,7 @@ resp = auth._finish_sign_in(Session(database.engine),
                             ProviderProfile(provider="discord", subject="d-ian", name="Ian"),
                             None, None)
 fresh = cookie_from(resp, "cta_session")
-check("signing in again issues a versioned cookie", fresh and fresh.startswith("2:1."), fresh)
+check("signing in again issues a cookie at the new version", fresh and fresh.startswith("2:1:"), fresh)
 client.cookies.set("cta_session", fresh)
 check("which works", client.get("/auth/me").json().get("authenticated") is True)
 
