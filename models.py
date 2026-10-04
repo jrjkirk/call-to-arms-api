@@ -278,6 +278,15 @@ class LeagueConfig(SQLModel, table=True):
     starting_rating: float = 1000.0
     k_casual: int = 10
     k_competitive: int = 40
+    # One K for every game instead of the casual/competitive pair. When set,
+    # result forms stop asking for a game type and k_single is used for all of
+    # them. Off by default, so a league that never touches this is unchanged.
+    single_k: bool = False
+    k_single: int = 32
+    # Whether painting bonuses count at all, under either scoring method. Off
+    # hides the painting fields on the result forms; a result's stored painting
+    # value is kept, so switching it back on restores the bonuses.
+    painting_enabled: bool = True
     painting_fully_bonus: float = 3.0
     painting_partial_bonus: float = 1.0
 
@@ -285,7 +294,8 @@ class LeagueConfig(SQLModel, table=True):
     points_win: float = 3.0
     points_draw: float = 1.0
     points_loss: float = 0.0
-    # Whether the win/loss method also adds the painting bonuses above.
+    # RETIRED, no longer read: painting_enabled above covers both methods.
+    # Backfilled into it by migrations/add_league_config_options.py.
     winloss_use_painting: bool = False
 
 class PairingConfig(SQLModel, table=True):

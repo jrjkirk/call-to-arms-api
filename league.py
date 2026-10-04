@@ -5,7 +5,7 @@ LeagueResult row and then runs a full recalculation that replays all
 results from scratch, ordered by id ascending.
 """
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -26,6 +26,12 @@ VALID_GAME_TYPES = {"Casual", "Competitive"}
 VALID_PAINTING = {None, "Partially Painted", "Fully Painted"}
 _NONE_SENTINELS = {"— None —", ""}
 
+# How long after a game is logged a second result between the same two players
+# is treated as the same game logged twice. Long enough to catch the opponent
+# logging it the next day or two, short enough that next week's rematch is
+# never questioned.
+DUPLICATE_WINDOW = timedelta(days=3)
+
 
 def _normalise_optional(value: Optional[str]) -> Optional[str]:
     if not value or value in _NONE_SENTINELS:
@@ -45,7 +51,7 @@ def _get_league_config(db: Session, club_id: int, system_id: int) -> LeagueConfi
 
 
 def _painting_bonus(cfg: LeagueConfig, value: Optional[str]) -> float:
-    if not value:
+    if not value or not cfg.painting_enabled:
         return 0.0
     v = value.strip().lower()
     if v == "fully painted":
@@ -130,8 +136,11 @@ def _season_champion(db: Session, club_id: int, system_id: int, season_id: int) 
 
 
 def _apply_elo(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tuple[float, float, Optional[int]]:
-    gt = (row.game_type or "Competitive").lower()
-    k = cfg.k_casual if gt == "casual" else cfg.k_competitive
+    if cfg.single_k:
+        k = cfg.k_single
+    else:
+        gt = (row.game_type or "Competitive").lower()
+        k = cfg.k_casual if gt == "casual" else cfg.k_competitive
 
     e1 = 1.0 / (1.0 + 10.0 ** ((r2 - r1) / 400.0))
     e2 = 1.0 / (1.0 + 10.0 ** ((r1 - r2) / 400.0))
@@ -150,7 +159,7 @@ def _apply_elo(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tu
 
 def _apply_winloss(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -> tuple[float, float, Optional[int]]:
     """Flat points: win/draw/loss points per LeagueConfig, cumulative from the
-    starting rating. Painting bonuses only apply if winloss_use_painting."""
+    starting rating, plus the painting bonuses when the league uses them."""
     if row.result == "Player 1 Victory":
         d1, d2 = cfg.points_win, cfg.points_loss
     elif row.result == "Player 2 Victory":
@@ -158,9 +167,8 @@ def _apply_winloss(cfg: LeagueConfig, r1: float, r2: float, row: LeagueResult) -
     else:
         d1 = d2 = cfg.points_draw
 
-    if cfg.winloss_use_painting:
-        d1 += _painting_bonus(cfg, row.player_1_painting_bonus)
-        d2 += _painting_bonus(cfg, row.player_2_painting_bonus)
+    d1 += _painting_bonus(cfg, row.player_1_painting_bonus)
+    d2 += _painting_bonus(cfg, row.player_2_painting_bonus)
 
     return r1 + d1, r2 + d2, None
 
@@ -244,6 +252,40 @@ def _recalculate_ratings(db: Session, club_id: int, system_id: int, season_id: i
             system_id=system_id,
             season_id=season_id,
         ))
+
+
+def find_recent_result(
+    db: Session, club_id: int, system_id: int, season_id: int, player_a_id: int, player_b_id: int,
+) -> Optional[LeagueResult]:
+    """The latest result between these two players, in EITHER order, logged
+    within DUPLICATE_WINDOW. None if there isn't one.
+
+    Either order is the point. Each player's form puts themselves down as
+    Player 1, so when both players log the same game the second arrives with
+    the players swapped and the result worded from the other side. A guard that
+    compared the fields one for one never saw those as the same game."""
+    return db.exec(
+        scoped(LeagueResult, club_id)
+        .where(LeagueResult.system_id == system_id)
+        .where(LeagueResult.season_id == season_id)
+        .where(LeagueResult.created_at >= datetime.utcnow() - DUPLICATE_WINDOW)
+        .where(or_(
+            (LeagueResult.player_1_id == player_a_id) & (LeagueResult.player_2_id == player_b_id),
+            (LeagueResult.player_1_id == player_b_id) & (LeagueResult.player_2_id == player_a_id),
+        ))
+        .order_by(LeagueResult.id.desc())
+    ).first()
+
+
+def _existing_result_summary(row: LeagueResult) -> dict:
+    """What the result form shows a player whose game is already logged."""
+    if row.result == "Player 1 Victory":
+        outcome = f"{row.player_1_name} beat {row.player_2_name}"
+    elif row.result == "Player 2 Victory":
+        outcome = f"{row.player_2_name} beat {row.player_1_name}"
+    else:
+        outcome = f"{row.player_1_name} and {row.player_2_name} drew"
+    return {"id": row.id, "outcome": outcome, "result_date": row.result_date}
 
 
 def _post_league_webhook(db: Session, row: LeagueResult) -> None:
@@ -333,6 +375,35 @@ def list_seasons(
         }
         for s in seasons
     ]
+
+
+@router.get("/config")
+def league_form_config(
+    club: str | None = None,
+    system: str | None = None,
+    origin: str | None = Header(default=None),
+    user: Optional[User] = Depends(current_user),
+    db: Session = Depends(get_session),
+):
+    """What the result form needs to know about one system's league: whether
+    to ask for a game type and for painting. Public, with the same club
+    resolution as list_seasons. The K values themselves stay admin-only."""
+    try:
+        club_id = resolve_request_club_id(db, user, club, origin)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    system_id = _resolve_system_id(db, club_id, system)
+    cfg = _get_league_config(db, club_id, system_id) if system_id is not None else LeagueConfig()
+    return {
+        "scoring_method": cfg.scoring_method,
+        "uses_game_type": cfg.scoring_method == "elo" and not cfg.single_k,
+        "painting_enabled": cfg.painting_enabled,
+        "painting_fully_bonus": cfg.painting_fully_bonus,
+        "painting_partial_bonus": cfg.painting_partial_bonus,
+    }
 
 
 @router.get("/factions")
@@ -449,11 +520,15 @@ class SubmitResultIn(BaseModel):
     player_2_faction: Optional[str] = None
     player_1_painting_bonus: Optional[str] = None
     player_2_painting_bonus: Optional[str] = None
-    game_type: str
+    # Ignored by a league that uses a single K value, whose form doesn't ask.
+    game_type: str = "Competitive"
     result: str
     # Which system's league this result is for. Omit for the club's one
     # league-enabled system (today's single-league behaviour).
     system: Optional[str] = None
+    # Set by the form's "we played again" button, after the player has been
+    # shown the result already logged between these two. See find_recent_result.
+    confirm_second_game: bool = False
 
 
 @router.post("/results")
@@ -543,37 +618,19 @@ def submit_result(
 
     result_date = datetime.utcnow().strftime("%d/%m/%Y")
 
-    # Duplicate guard: match on every field. NULL == NULL must be handled explicitly
-    # because SQL NULL comparisons use IS NULL, not =.
-    dup_query = (
-        scoped(LeagueResult, club_id)
-        .where(LeagueResult.system_id == system_id)
-        .where(LeagueResult.season_id == season_id)
-        .where(LeagueResult.player_1_id == body.player_1_id)
-        .where(LeagueResult.player_2_id == body.player_2_id)
-        .where(LeagueResult.result == body.result)
-        .where(LeagueResult.result_date == result_date)
-        .where(LeagueResult.game_type == body.game_type)
-    )
-    if p1_faction is None:
-        dup_query = dup_query.where(LeagueResult.player_1_faction.is_(None))
-    else:
-        dup_query = dup_query.where(LeagueResult.player_1_faction == p1_faction)
-    if p2_faction is None:
-        dup_query = dup_query.where(LeagueResult.player_2_faction.is_(None))
-    else:
-        dup_query = dup_query.where(LeagueResult.player_2_faction == p2_faction)
-    if p1_painting is None:
-        dup_query = dup_query.where(LeagueResult.player_1_painting_bonus.is_(None))
-    else:
-        dup_query = dup_query.where(LeagueResult.player_1_painting_bonus == p1_painting)
-    if p2_painting is None:
-        dup_query = dup_query.where(LeagueResult.player_2_painting_bonus.is_(None))
-    else:
-        dup_query = dup_query.where(LeagueResult.player_2_painting_bonus == p2_painting)
+    # A league that has switched painting off doesn't ask for it, so nothing a
+    # stale form sends should be stored against the result.
+    if not _get_league_config(db, club_id, system_id).painting_enabled:
+        p1_painting = p2_painting = None
 
-    if db.exec(dup_query).first() is not None:
-        return {"ok": True, "duplicate": True}
+    # Duplicate guard: one game, logged once. The usual way it goes wrong is
+    # both players logging it, so this matches the pair in either order and
+    # ignores every other field. A genuine second game goes through once the
+    # player has seen the first and confirmed.
+    if not body.confirm_second_game:
+        existing = find_recent_result(db, club_id, system_id, season_id, body.player_1_id, body.player_2_id)
+        if existing is not None:
+            return {"ok": True, "duplicate": True, "existing": _existing_result_summary(existing)}
 
     row = LeagueResult(
         player_1_id=body.player_1_id,

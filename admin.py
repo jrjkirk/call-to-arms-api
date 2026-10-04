@@ -39,6 +39,7 @@ from league import (
     VALID_RESULTS,
     _current_season_id,
     _get_league_config,
+    find_recent_result,
     _normalise_optional,
     _recalculate_ratings,
     _resolve_system_id,
@@ -2649,16 +2650,9 @@ def admin_league_results_from_pairings(
             skipped.append({"pairing_id": item.pairing_id, "reason": "same player"})
             continue
 
-        # Idempotency: skip if this exact pairing's players already have a result
-        # logged for this week/season (guards against a double-submit).
-        already = db.exec(
-            scoped(LeagueResult, user.club_id)
-            .where(LeagueResult.system_id == system_id)
-            .where(LeagueResult.season_id == season_id)
-            .where(LeagueResult.result_date == result_date)
-            .where(LeagueResult.player_1_id == a_su.player_id)
-            .where(LeagueResult.player_2_id == b_su.player_id)
-        ).first()
+        # Idempotency: skip a game that is already logged, whether by an earlier
+        # run of this or by one of the two players, in either order.
+        already = find_recent_result(db, user.club_id, system_id, season_id, a_su.player_id, b_su.player_id)
         if already is not None:
             skipped.append({"pairing_id": item.pairing_id, "reason": "already logged"})
             continue
@@ -2700,12 +2694,14 @@ def _league_config_row(cfg: LeagueConfig) -> dict:
         "starting_rating": cfg.starting_rating,
         "k_casual": cfg.k_casual,
         "k_competitive": cfg.k_competitive,
+        "single_k": cfg.single_k,
+        "k_single": cfg.k_single,
+        "painting_enabled": cfg.painting_enabled,
         "painting_fully_bonus": cfg.painting_fully_bonus,
         "painting_partial_bonus": cfg.painting_partial_bonus,
         "points_win": cfg.points_win,
         "points_draw": cfg.points_draw,
         "points_loss": cfg.points_loss,
-        "winloss_use_painting": cfg.winloss_use_painting,
     }
 
 
@@ -2768,12 +2764,14 @@ class LeagueConfigBody(BaseModel):
     starting_rating: float = 1000.0
     k_casual: int = 10
     k_competitive: int = 40
+    single_k: bool = False
+    k_single: int = 32
+    painting_enabled: bool = True
     painting_fully_bonus: float = 3.0
     painting_partial_bonus: float = 1.0
     points_win: float = 3.0
     points_draw: float = 1.0
     points_loss: float = 0.0
-    winloss_use_painting: bool = False
 
 
 @router.post("/league-config")
