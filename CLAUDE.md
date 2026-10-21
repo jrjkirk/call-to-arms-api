@@ -33,6 +33,7 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `identity.py` | Accounts vs sign-in identities (`user_identities`). The only place to ask "which account is this sign-in" or "which Discord ID does this user have" |
 | `user_merge.py` | Merge two accounts. `USER_REFERENCES` must list every column holding a users.id, or merges refuse |
 | `signups.py` | Signup CRUD endpoints |
+| `notices.py` | In-app banners for one account: pairings published, opponent dropped, late signup found them a game. Written from the same places that post to Discord, read by `GET /notices` |
 | `players.py` | Player read endpoints |
 | `league.py` | Rankings, results endpoints |
 | `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |

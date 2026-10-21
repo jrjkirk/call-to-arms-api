@@ -993,6 +993,15 @@ def submit_signup(
     if seated_late:
         if week_pairings.is_published(db, club_id, body.system, week):
             _post_late_signup_seated(db, club_id, body.system, su, late_partner)
+            if late_partner is not None:
+                try:
+                    from notices import notify_game_found
+
+                    notify_game_found(db, club_id, body.system, week, late_partner, player.name)
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    capture(e, kind="notices_on_late_signup", system=body.system)
         _resync_venue_floor(db, club_id, body.system, week)
         # The floor plan may have committed, which expires `su`; load it again
         # while the session is certainly open.
@@ -1084,6 +1093,17 @@ def drop_signup(
             app_url=APP_PUBLIC_URL,
         )
         _post_webhook(db, club_id, system, content)
+        # Anyone whose game just changed gets a banner too, not only a ping in
+        # a channel they may not read. Swallowed: the drop itself is done and
+        # committed, and a missing banner must not turn that into an error.
+        try:
+            from notices import notify_opponent_dropped
+
+            notify_opponent_dropped(db, club_id, system, week, moved, player.name)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            capture(e, kind="notices_on_drop", system=system)
     else:
         _post_discord_drop(db, player.name, ref_faction, ref_vibe, system, week, club_id, player_id=player.id)
 

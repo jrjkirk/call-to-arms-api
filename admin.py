@@ -1821,6 +1821,17 @@ def pairings_publish(
             announce_level_ups(db, user.club_id, body.system)
         except Exception as e:
             capture(e, kind="level_up_announce", system=body.system)
+        # The channel has just been told; the players who don't read the
+        # channel get the same news as a banner on their next page load.
+        # Swallowed for the same reason as the two above: never fail a publish.
+        try:
+            from notices import notify_pairings_published
+
+            notify_pairings_published(db, user.club_id, body.system, body.week)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            capture(e, kind="notices_on_publish", system=body.system)
     return {"ok": True, "published": body.published}
 
 
@@ -2360,6 +2371,14 @@ def admin_signup_create(
                     app_url=APP_PUBLIC_URL,
                 ),
             )
+            try:
+                from notices import notify_game_found
+
+                notify_game_found(db, user.club_id, body.system, week, partner, su.player_name)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                capture(e, kind="notices_on_admin_signup", system=body.system)
         _resync_venue_floor(db, user.club_id, body.system, week)
         db.refresh(su)
     return _signup_row(su)
@@ -2412,6 +2431,14 @@ def admin_signup_delete(
                 app_url=APP_PUBLIC_URL,
             ),
         )
+        try:
+            from notices import notify_opponent_dropped
+
+            notify_opponent_dropped(db, user.club_id, system, week, moved, name)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            capture(e, kind="notices_on_admin_drop", system=system)
     if paired:
         _resync_venue_floor(db, user.club_id, system, week)
     return {"ok": True}

@@ -53,6 +53,7 @@ from call_outs import router as call_outs_router
 from venue_api import router as venue_router
 from tournaments import router as tournaments_router
 from stripe_api import router as stripe_router
+from notices import router as notices_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -123,6 +124,7 @@ app.include_router(call_outs_router)
 app.include_router(venue_router)
 app.include_router(tournaments_router)
 app.include_router(stripe_router)
+app.include_router(notices_router)
 
 
 @app.get("/health")

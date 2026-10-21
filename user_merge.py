@@ -29,7 +29,7 @@ from sqlmodel import SQLModel, Session, select
 
 from models import (
     AdminRole, AuditLogEntry, ClubRequest, LoginToken, PasswordCredential, Player,
-    Tournament, TournamentEntry,
+    PlayerNotice, Tournament, TournamentEntry,
     TournamentGame, User, UserIdentity, VenueBooking, VenueEvent, VenueStaff,
 )
 
@@ -63,6 +63,8 @@ USER_REFERENCES: list[tuple[type[SQLModel], str, str]] = [
     (LoginToken, "user_id", "move"),
     # The kept account's own password stays its password.
     (PasswordCredential, "user_id", "single"),
+    # An unread banner is news for the person, and they are one person now.
+    (PlayerNotice, "user_id", "move"),
 ]
 
 # Columns that look like user references by name but aren't.

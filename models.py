@@ -2016,3 +2016,39 @@ class VenueSeat(SQLModel, table=True):
     pairing_id: int = Field(index=True)
     table_id: int = Field(foreign_key="venue_tables.id", index=True)
     locked: bool = False
+
+
+class PlayerNotice(SQLModel, table=True):
+    """One thing that happened to one account, waiting to be shown once.
+
+    The club hears about a publish or a drop-out on Discord. This table is for
+    the player who is not looking at Discord: the same news, held until their
+    next page load, shown as a dismissible banner, then marked seen.
+
+    Keyed on the ACCOUNT (user_id), not the player row, so it follows someone
+    across devices: read it on your phone and it is gone on the laptop. That is
+    also why this is a table rather than a flag in the browser — a per-browser
+    "last week I saw" can tell you pairings are up, but it cannot tell you that
+    your opponent dropped out, because nothing in a published week changes
+    shape when that happens.
+
+    `body` is the rendered sentence, stored as written. A notice is a record of
+    a moment, so it should keep saying what it said even after a rename or a
+    later reshuffle.
+
+    kind "pairings_published": this week's pairings went up and you are in them.
+    kind "opponent_dropped": your opponent left a published week and you have
+    been seated again (against someone else, or on a BYE).
+    """
+    __tablename__ = "player_notices"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system: str
+    week: str
+    kind: str
+    body: str
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    seen_at: Optional[datetime] = None
