@@ -59,8 +59,6 @@ from system_overrides import effective_system
 import week_pairings
 from experience import summary as experience_summary
 from systems import (
-    factions_for,
-    icon_folder_for,
     resolved_faction_groups,
     resolved_factions,
     resolved_icon_folder,
@@ -3859,10 +3857,8 @@ class SystemConfigCreateBody(BaseModel):
     has_league: bool = False
     recent_weeks: int = 3
     extended_weeks: int = 6
-    # A system's ruleset is authored here now. It used to live only in
-    # systems/<name>.py and need a deploy; the module is still the fallback for
-    # any system whose faction_list is left empty, which is all six that
-    # predate this. See systems/__init__.py.
+    # A system's ruleset is authored here. It used to live in systems/<name>.py
+    # and need a deploy; see systems/__init__.py.
     faction_list: Optional[list[str]] = None
     faction_groups: Optional[list[dict]] = None
     icon_folder: Optional[str] = None
@@ -3899,12 +3895,11 @@ def _clean_ruleset(
     faction_groups: Optional[list[dict]],
     icon_folder: Optional[str],
 ) -> tuple[Optional[list[str]], Optional[list[dict]], Optional[str]]:
-    """Normalise an authored ruleset, or return NULLs meaning "use the module".
+    """Normalise an authored ruleset, or return NULLs meaning "no factions yet".
 
-    Empty is not the same as absent anywhere here. An empty faction list stores
-    NULL rather than [], because NULL is what makes a system fall back to its
-    code module, and a system with a genuinely empty list would otherwise show
-    players an empty faction dropdown with no way to tell the two states apart.
+    An empty faction list stores NULL rather than [], so there is one way to
+    say "none", not two. (NULL used to mean "fall back to the code module";
+    those were deleted 2026-10-21.)
 
     Groups are the authored grouping and are rebuilt from the flat list rather
     than trusted: a faction named in a group but missing from the list would
@@ -3978,16 +3973,14 @@ def list_platform_systems(
 
 Each row carries BOTH its authored ruleset (the raw columns, which the edit
     form binds to) and the resolved one actually in force, plus `ruleset_source`
-    so the panel can say whether a system is reading its own data or still
-    falling back to a code module in systems/."""
+    so the panel can say whether a system has a faction list yet. ("code" is
+    gone: it meant a fallback to a module in systems/, deleted 2026-10-21.)"""
     rows = db.exec(select(SystemConfig).order_by(SystemConfig.name)).all()
     result = []
     for r in rows:
         row = r.model_dump()
         authored = bool(r.faction_list)
-        row["ruleset_source"] = "authored" if authored else (
-            "code" if factions_for(r.legacy_system_name) else "none"
-        )
+        row["ruleset_source"] = "authored" if authored else "none"
         # What is actually served to players right now, whichever source won.
         row["resolved_faction_list"] = resolved_factions(r)
         row["resolved_faction_groups"] = resolved_faction_groups(r)

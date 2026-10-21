@@ -1,4 +1,8 @@
-"""Move one system's ruleset from its code module into the database.
+"""ALREADY RUN, NO LONGER RUNNABLE: all six systems were migrated on 2026-10-21
+and the systems/<name>.py modules this reads were then deleted. Kept as the
+record of how it was done; recover the modules from git history to rerun.
+
+Move one system's ruleset from its code module into the database.
 
 Phase 4 of the system-authoring work, and deliberately NOT run as part of it.
 Six systems are still served by `systems/<name>.py`, and the plan is to migrate

@@ -4,10 +4,9 @@ Adding a system used to mean writing `systems/<name>.py`, committing icons to
 two repos and deploying both. The catalogue row was already editable; the
 ruleset — factions, categories, icon folder — was not.
 
-The block that matters most is the first one. Six systems are still served by
-their code modules and are staying that way until each has been migrated and
-watched, so an authored system must not disturb them and a module-backed
-system must behave exactly as it did before.
+The six original systems were served by code modules until 2026-10-21, when
+their lists were copied into the database and the modules deleted. The first
+block pins what they are now: an ordinary authored row, and the only source.
 
 Run: PYTHONPATH=. python tests/test_system_authoring.py
 """
@@ -35,6 +34,8 @@ from systems import (  # noqa: E402
 
 FAILURES = []
 
+TOW_FACTIONS = ["Empire of Man", "Dwarfen Mountain Holds", "Kingdom of Bretonnia"]
+
 
 def check(label, cond, detail=""):
     print(("  PASS  " if cond else "  FAIL  ") + label + ("" if cond else f"  {detail}"))
@@ -47,59 +48,56 @@ with Session(database.engine) as db:
     db.add(Club(id=1, name="EG NWGC", slug="egnwgc", active=True))
     db.add(User(id=1, discord_id="a", discord_name="Joel", club_id=1,
                 home_club_id=1, is_platform_admin=True))
-    # A system exactly as the six real ones are: catalogue row, no authored
-    # ruleset, a matching module in systems/.
+    # A system exactly as the six original ones are since their migration: the
+    # ruleset lives on the row, and there is no module behind it.
     db.add(SystemConfig(id=1, name="The Old World", slug="tow",
                         legacy_system_name="The Old World", active=True,
-                        vibe_options=["Casual"], default_vibe="Casual"))
+                        vibe_options=["Casual"], default_vibe="Casual",
+                        faction_list=TOW_FACTIONS, icon_folder="TOW"))
     db.commit()
 
 client = TestClient(app)
 client.cookies.set("cta_session", auth._make_session_cookie(1))
 
 
-print("\n1. A code-backed system is untouched by any of this")
+print("\n1. A migrated system is served from its own row")
 with Session(database.engine) as db:
     tow = db.get(SystemConfig, 1)
-    check("its faction_list column is still empty", tow.faction_list is None)
-    factions = resolved_factions(tow)
-    check("but it still resolves factions, from its module",
-          factions and "Empire of Man" in factions, str(factions and factions[:2]))
+    check("it resolves its factions", resolved_factions(tow) == TOW_FACTIONS,
+          str(resolved_factions(tow)))
     check("and its icon folder", resolved_icon_folder(tow) == "TOW",
           str(resolved_icon_folder(tow)))
     check("groups are None for a flat system", resolved_faction_groups(tow) is None)
 
 r = client.get("/systems")
 tow_out = next(s for s in r.json() if s["slug"] == "tow")
-check("the public catalogue serves the module's list",
-      "Empire of Man" in (tow_out["faction_list"] or []), str(tow_out["faction_list"])[:60])
+check("the public catalogue serves that list",
+      tow_out["faction_list"] == TOW_FACTIONS, str(tow_out["faction_list"])[:60])
 check("and reports no uploaded logo", tow_out["logo_url"] is None)
 
 
-print("\n1b. An EMPTY faction_list is not an authored one")
-# The highest-consequence line in this feature. Every one of the six systems on
-# prod has faction_list = [] — not NULL — because the original
-# seed_systems_config.py wrote an empty array into a column nothing then read.
-# `if authored:` treats that as absent and falls through to the module.
-# `if authored is not None:` would have switched all six to an empty faction
-# list the moment this deployed, and every signup form would have offered no
-# factions at all.
+print("\n1b. With no list, a system has no factions, and nothing else steps in")
+# Before the modules were deleted, an empty list fell through to them. Now
+# there is nothing behind the column, and an empty one must read as "none"
+# rather than crash or resurrect something.
 with Session(database.engine) as db:
     tow = db.get(SystemConfig, 1)
     tow.faction_list = []
     tow.faction_groups = []
+    tow.icon_folder = None
     db.add(tow)
     db.commit()
-    check("an empty list still resolves to the module's factions",
-          len(resolved_factions(db.get(SystemConfig, 1)) or []) == 18,
-          str(len(resolved_factions(db.get(SystemConfig, 1)) or [])))
+    tow = db.get(SystemConfig, 1)
+    check("an empty list resolves to None", resolved_factions(tow) is None)
+    check("and so do its groups and icons",
+          resolved_faction_groups(tow) is None and resolved_icon_folder(tow) is None)
 tow_out = next(s for s in client.get("/systems").json() if s["slug"] == "tow")
-check("and the public catalogue serves them, not an empty dropdown",
-      "Empire of Man" in (tow_out["faction_list"] or []), str(tow_out["faction_list"])[:60])
+check("the public catalogue serves no list", not tow_out["faction_list"],
+      str(tow_out["faction_list"]))
 with Session(database.engine) as db:
     tow = db.get(SystemConfig, 1)
-    tow.faction_list = None
-    tow.faction_groups = None
+    tow.faction_list = TOW_FACTIONS
+    tow.icon_folder = "TOW"
     db.add(tow)
     db.commit()
 
@@ -122,7 +120,7 @@ check("it appears in the public catalogue immediately", ba is not None)
 check("with its authored factions",
       ba and ba["faction_list"] == NEW["faction_list"], str(ba and ba["faction_list"]))
 check("and its icon folder", ba and ba["icon_folder"] == "BA")
-check("no module exists for it, and nothing breaks",
+check("with no groups",
       ba is not None and ba["faction_groups"] is None)
 
 
@@ -173,9 +171,7 @@ ba = next(s for s in client.get("/systems").json() if s["slug"] == "ba")
 check("blanks dropped and duplicates collapsed",
       ba["faction_list"] == ["Germany", "United States"], str(ba["faction_list"]))
 
-# Emptying the list is how a system is handed back to a code module. For a
-# system with no module that means "no factions yet", not "[]" — the two must
-# be distinguishable or the fallback can never fire.
+# An emptied list is stored as NULL, "no factions yet", rather than [].
 r = client.post(f"/admin/platform/systems/{new_id}", json={
     "name": "Bolt Action", "legacy_system_name": "Bolt Action",
     "vibe_options": ["Casual"], "default_vibe": "Casual",
@@ -186,26 +182,22 @@ with Session(database.engine) as db:
           db.get(SystemConfig, new_id).faction_list is None)
 
 
-print("\n5. Authoring a system that HAS a module overrides it, reversibly")
-# This is the staged migration in miniature: populate the column, the authored
-# value wins; null it, and the module takes over again with nothing lost.
-with Session(database.engine) as db:
-    tow = db.get(SystemConfig, 1)
-    tow.faction_list = ["Empire of Man", "Skaven"]
-    db.add(tow)
-    db.commit()
+print("\n5. Adding a faction to a migrated system takes effect at once")
+# The request that finished the migration: Kill Team wanted new teams without
+# a code deploy. Editing an original system is now just an authored edit.
+r = client.post("/admin/platform/systems/1", json={
+    "name": "The Old World", "legacy_system_name": "The Old World",
+    "vibe_options": ["Casual"], "default_vibe": "Casual",
+    "faction_list": TOW_FACTIONS + ["Tomb Kings of Khemri"], "icon_folder": "TOW",
+})
+check("edit accepted", r.status_code == 200, r.text[:160])
 tow_out = next(s for s in client.get("/systems").json() if s["slug"] == "tow")
-check("the authored list wins over the module",
-      tow_out["faction_list"] == ["Empire of Man", "Skaven"], str(tow_out["faction_list"]))
-
-with Session(database.engine) as db:
-    tow = db.get(SystemConfig, 1)
-    tow.faction_list = None
-    db.add(tow)
-    db.commit()
-tow_out = next(s for s in client.get("/systems").json() if s["slug"] == "tow")
-check("nulling it falls straight back to the module",
-      len(tow_out["faction_list"]) == 18, str(len(tow_out["faction_list"] or [])))
+check("the new faction is served, the rest untouched and in order",
+      tow_out["faction_list"] == TOW_FACTIONS + ["Tomb Kings of Khemri"],
+      str(tow_out["faction_list"]))
+rows = {r["id"]: r for r in client.get("/admin/platform/systems").json()}
+check("and the platform panel reports it as authored",
+      rows[1]["ruleset_source"] == "authored", rows[1]["ruleset_source"])
 
 
 print("\n6. The icon checklist tells you exactly what to add and where")

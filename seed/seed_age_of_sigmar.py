@@ -1,4 +1,8 @@
-"""Add Age of Sigmar to the SystemConfig catalogue.
+"""HISTORICAL, NO LONGER RUNNABLE (2026-10-21): this imports systems/age_of_sigmar.py,
+which was deleted once its factions moved into the database. Kept as a record
+of how the system was seeded; recover the module from git history to rerun.
+
+Add Age of Sigmar to the SystemConfig catalogue.
 
 One-off script (this repo doesn't manage migrations — see CLAUDE.md /
 models.py docstring). Run manually:

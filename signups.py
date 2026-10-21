@@ -30,7 +30,6 @@ from experience import summary as experience_summary
 from levels import progress as level_progress
 from auth import active_club_id, admin_scopes, require_user
 from system_overrides import effective_system
-from systems import SYSTEM_RULES
 from observability import capture
 import week_pairings
 
@@ -48,7 +47,8 @@ EXPERIENCE_OPTIONS = {"New", "Some", "Experienced", "Veteran"}
 # source of truth (see submit_signup / pairings_engine). They remain only so
 # seed/seed_systems_config.py can cross-check that the original seed matched
 # these values; safe to delete once that historical script is retired.
-SYSTEMS = set(SYSTEM_RULES)
+SYSTEMS = {"The Old World", "The Horus Heresy", "Kill Team", "Age of Sigmar",
+           "Warhammer 40,000", "Middle Earth"}
 TOW_VIBES = {"Casual", "Competitive", "Intro", "Open"}
 HH_VIBES = {"Standard", "Intro"}
 SCENARIO_OPTIONS = {"Open Battle", "Weekly Scenario"}

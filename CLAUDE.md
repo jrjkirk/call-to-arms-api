@@ -47,7 +47,9 @@ The live app's own code (everything FastAPI imports at runtime) stays flat
 at repo root: `main.py`, `admin.py`, `auth.py`, `league.py`, `signups.py`,
 `services.py`, `database.py`, `models.py`, `week_logic.py`,
 `call_to_arms_content.py`, `pairings_engine.py`, `scheduler.py`, plus the
-`systems/`, `icons/`, `missions/` asset/rule directories.
+`systems/` package (ruleset accessors; the factions themselves are
+`systems` rows in the DB since 2026-10-21) and the `icons/`, `missions/`
+asset directories.
 
 **`scripts/` is no longer inert.** It used to be true that the live app
 imported nothing from the subdirectories below; since the scheduler moved

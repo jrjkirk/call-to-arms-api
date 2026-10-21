@@ -341,9 +341,7 @@ def _faction_group_index(config: SystemConfig) -> dict:
     walks the whole faction list, and Middle Earth has ninety-five of them
     against a candidate loop that is quadratic in signups.
 
-    Reads through resolved_faction_groups so an authored system (categories set
-    in the platform admin UI) and a code-backed one (systems/middle_earth.py)
-    behave identically. A system with no categories yields {}, which makes
+    Reads through resolved_faction_groups, the system's authored categories. A system with no categories yields {}, which makes
     _same_group_flag return 0 for every pair and leaves the weight inert.
     """
     groups = resolved_faction_groups(config) or []
@@ -354,9 +352,9 @@ def _faction_group_index(config: SystemConfig) -> dict:
             key = str(f).lower().strip()
             if key and label:
                 # First category wins if a faction is listed twice. Authoring
-                # validates against that, but the code modules were never
-                # checked, and a duplicate must not have its answer decided by
-                # dictionary ordering.
+                # validates against that, but Middle Earth's groups were copied
+                # unchecked from its old code module, and a duplicate must not
+                # have its answer decided by dictionary ordering.
                 index.setdefault(key, label)
     return index
 

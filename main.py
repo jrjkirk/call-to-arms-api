@@ -21,9 +21,6 @@ from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
 from system_overrides import EffectiveSystem, effective_system
 from systems import (
-    faction_groups_for,
-    factions_for,
-    icon_folder_for,
     resolved_faction_groups,
     resolved_factions,
     resolved_icon_folder,
@@ -239,9 +236,7 @@ def _system_dict(r: SystemConfig, club_system=None, club_scoped: bool = False) -
         "session_start_time": (
             club_system.session_start_time if club_system is not None else None
         ),
-        # System *rules*. Authored on the catalogue row when set, otherwise
-        # the hardcoded module in systems/ — see systems/__init__.py. The six
-        # systems predating the authoring UI have NULL and still read code.
+        # System *rules*, authored on the catalogue row — see systems/__init__.py.
         "faction_list": resolved_factions(r),
         # Grouped factions ([{label, factions}]) for systems that define them
         # (Middle Earth's Good/Evil), else null → frontend renders the flat list.

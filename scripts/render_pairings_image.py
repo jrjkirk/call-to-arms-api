@@ -53,11 +53,10 @@ def _icon_png_path(faction_name: str | None) -> str | None:
     # a repo-root asset, not a sibling of this file, so go up one level.
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     icons_root = os.path.join(repo_root, "icons")
-    # Search the root plus every registered system's icon folder, sourced from
-    # the systems/ registry rather than a hardcoded TOW/HH/KT list — adding a
-    # system module makes its folder searchable automatically. All folders are
-    # searched regardless of which system a faction belongs to (unchanged
-    # behaviour; icon filenames are unique across systems in practice).
+    # Search the root plus every folder under icons/, so a system's icons are
+    # found as soon as they are committed. All folders are searched regardless
+    # of which system a faction belongs to (icon filenames are unique across
+    # systems in practice).
     from systems import all_icon_folders
 
     search_dirs = [icons_root] + [
