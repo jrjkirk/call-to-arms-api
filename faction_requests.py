@@ -340,8 +340,10 @@ def review_faction_requests(
         if added.get(system_name):
             # The same validation as the system editor, so an approval can
             # never leave the list in a shape that editor would refuse.
+            # Also puts the new names in the system's order: alphabetical
+            # slots them in, custom leaves them at the end.
             system.faction_list, system.faction_groups, system.icon_folder = _clean_ruleset(
-                factions, groups or None, system.icon_folder
+                factions, groups or None, system.icon_folder, system.faction_order or "custom"
             )
             db.add(system)
             log_audit(db, user, "faction_request.approve", "system", system.id,

@@ -59,6 +59,8 @@ from system_overrides import effective_system
 import week_pairings
 from experience import summary as experience_summary
 from systems import (
+    FACTION_ORDERS,
+    ordered_factions,
     resolved_faction_groups,
     resolved_factions,
     resolved_icon_folder,
@@ -3862,6 +3864,9 @@ class SystemConfigCreateBody(BaseModel):
     faction_list: Optional[list[str]] = None
     faction_groups: Optional[list[dict]] = None
     icon_folder: Optional[str] = None
+    # A new system sorts alphabetically unless told otherwise: most lists are
+    # armies with no order of their own.
+    faction_order: str = "alphabetical"
     active: bool = True
 
 
@@ -3887,6 +3892,9 @@ class SystemConfigEditBody(BaseModel):
     faction_list: Optional[list[str]] = None
     faction_groups: Optional[list[dict]] = None
     icon_folder: Optional[str] = None
+    # None keeps the system's current order, so a client that predates the
+    # setting can't reset it by saving.
+    faction_order: Optional[str] = None
     active: bool = True
 
 
@@ -3894,6 +3902,7 @@ def _clean_ruleset(
     faction_list: Optional[list[str]],
     faction_groups: Optional[list[dict]],
     icon_folder: Optional[str],
+    order: str = "custom",
 ) -> tuple[Optional[list[str]], Optional[list[dict]], Optional[str]]:
     """Normalise an authored ruleset, or return NULLs meaning "no factions yet".
 
@@ -3942,7 +3951,16 @@ def _clean_ruleset(
             ),
         )
 
-    return factions, (groups_out or None), (icon_folder or "").strip() or None
+    factions, groups_out = ordered_factions(factions, groups_out or None, order)
+    return factions, groups_out, (icon_folder or "").strip() or None
+
+
+def _faction_order(value: Optional[str], current: str = "custom") -> str:
+    if value is None:
+        return current
+    if value not in FACTION_ORDERS:
+        raise HTTPException(status_code=422, detail="faction_order must be alphabetical or custom.")
+    return value
 
 
 def _validate_system_config_fields(
@@ -4012,8 +4030,9 @@ def create_platform_system(
     )
 
     data = body.model_dump()
+    data["faction_order"] = _faction_order(body.faction_order)
     data["faction_list"], data["faction_groups"], data["icon_folder"] = _clean_ruleset(
-        body.faction_list, body.faction_groups, body.icon_folder
+        body.faction_list, body.faction_groups, body.icon_folder, data["faction_order"]
     )
     system = SystemConfig(**data)
     db.add(system)
@@ -4053,8 +4072,9 @@ def edit_platform_system(
     )
 
     data = body.model_dump()
+    data["faction_order"] = _faction_order(body.faction_order, system.faction_order or "custom")
     data["faction_list"], data["faction_groups"], data["icon_folder"] = _clean_ruleset(
-        body.faction_list, body.faction_groups, body.icon_folder
+        body.faction_list, body.faction_groups, body.icon_folder, data["faction_order"]
     )
     # logo_path / logo_url are not in the body and must not be touched here:
     # the logo is owned by its own upload endpoint, and a full-replace edit

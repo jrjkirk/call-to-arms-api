@@ -247,6 +247,26 @@ with Session(database.engine) as db:
           db.get(FactionRequest, rid).approved_name == "Hand Of The Archon")
 
 
+
+print("\n7. An alphabetical system slots approvals into place")
+with Session(database.engine) as db:
+    kt = db.get(SystemConfig, 1)
+    kt.faction_order = "alphabetical"
+    kt.faction_list = sorted(kt.faction_list) + ["Unlisted Kill Team"]
+    db.add(kt)
+    db.add(FactionRequest(batch_id="y", club_id=1, system=KT, name="Blooded",
+                          requested_by_user_id=2, requested_by_name="Oliver"))
+    db.commit()
+    rid = db.exec(select(FactionRequest).where(FactionRequest.batch_id == "y")).first().id
+r = joel.post("/admin/platform/faction-requests/review",
+              json={"decisions": [{"id": rid, "action": "approve"}]})
+check("approved", r.status_code == 200, r.text[:160])
+with Session(database.engine) as db:
+    fl = db.get(SystemConfig, 1).faction_list
+    check("it lands in alphabetical order, not at the end",
+          fl[:-1] == sorted(fl[:-1], key=str.casefold) and "Blooded" in fl
+          and fl[-1] == "Unlisted Kill Team", str(fl))
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED")

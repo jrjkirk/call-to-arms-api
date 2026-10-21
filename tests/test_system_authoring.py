@@ -109,6 +109,9 @@ NEW = {
     "vibe_options": ["Casual", "Competitive"], "default_vibe": "Casual",
     "faction_list": ["Germany", "United States", "Soviet Union", "Great Britain"],
     "icon_folder": "BA",
+    # Custom, so the checks below can compare against the order as written.
+    # Section 7 covers the alphabetical default.
+    "faction_order": "custom",
 }
 r = client.post("/admin/platform/systems", json=NEW)
 check("created", r.status_code == 200, r.text[:160])
@@ -247,6 +250,39 @@ check("duplicate slug refused",
 check("duplicate legacy name refused",
       client.post("/admin/platform/systems", json={
           **NEW, "slug": "different"}).status_code == 409)
+
+
+print("\n7. Faction order")
+r = client.post("/admin/platform/systems", json={
+    **NEW, "name": "Infinity", "slug": "inf", "legacy_system_name": "Infinity",
+    "faction_list": ["Yu Jing", "Unlisted Army", "Ariadna", "PanOceania"],
+    "icon_folder": "INF", "faction_order": "alphabetical",
+})
+check("created alphabetical", r.status_code == 200, r.text[:160])
+inf_id = r.json()["id"]
+check("sorted, catch-all last",
+      r.json()["faction_list"] == ["Ariadna", "PanOceania", "Yu Jing", "Unlisted Army"],
+      str(r.json()["faction_list"]))
+r = client.post("/admin/platform/systems", json={
+    k: v for k, v in {**NEW, "name": "Saga X", "slug": "sagax", "legacy_system_name": "Saga X",
+                      "faction_list": ["b", "a"]}.items() if k != "faction_order"})
+check("a new system with no order given defaults to alphabetical",
+      r.status_code == 200 and r.json()["faction_order"] == "alphabetical"
+      and r.json()["faction_list"] == ["a", "b"], r.text[:160])
+EDIT = {"name": "Infinity", "legacy_system_name": "Infinity",
+        "vibe_options": ["Casual"], "default_vibe": "Casual", "icon_folder": "INF"}
+r = client.post(f"/admin/platform/systems/{inf_id}", json={**EDIT,
+      "faction_list": ["Yu Jing", "Ariadna", "Nomads"]})
+check("an edit that doesn't mention the order keeps it",
+      r.json()["faction_order"] == "alphabetical"
+      and r.json()["faction_list"] == ["Ariadna", "Nomads", "Yu Jing"], str(r.json()["faction_list"]))
+r = client.post(f"/admin/platform/systems/{inf_id}", json={**EDIT,
+      "faction_list": ["Yu Jing", "Ariadna", "Nomads"], "faction_order": "custom"})
+check("custom keeps the order as written",
+      r.json()["faction_list"] == ["Yu Jing", "Ariadna", "Nomads"], str(r.json()["faction_list"]))
+r = client.post(f"/admin/platform/systems/{inf_id}", json={**EDIT,
+      "faction_list": ["Yu Jing"], "faction_order": "random"})
+check("an unknown order is refused", r.status_code == 422, r.text[:120])
 
 print(f"\n{'ALL PASS' if not FAILURES else str(len(FAILURES)) + ' FAILURE(S): ' + ', '.join(FAILURES)}")
 sys.exit(1 if FAILURES else 0)

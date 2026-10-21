@@ -15,6 +15,7 @@ The package itself stays because every caller imports from `systems`.
 """
 
 import os
+import re
 
 
 def resolved_factions(row) -> list | None:
@@ -64,3 +65,46 @@ def all_icon_folders() -> list[str]:
     except FileNotFoundError:
         return []
     return sorted(e for e in entries if os.path.isdir(os.path.join(icons_root, e)))
+
+
+# ---------------------------------------------------------------------------
+# Faction order
+# ---------------------------------------------------------------------------
+# Per system (SystemConfig.faction_order), because no one rule fits all:
+# Kill Team's list is alphabetical, but Horus Heresy's runs in Legion number
+# order, which an alphabetical sort would scramble (IX before V), and The Old
+# World's follows the game's own order.
+#
+# Applied when the list is WRITTEN (the platform editor and approved faction
+# requests), not when it is displayed, so the stored list is the order players
+# see and every reader gets it for free.
+FACTION_ORDERS = ("alphabetical", "custom")
+
+# A catch-all ("Unlisted Kill Team", "Other") is the last resort, so it stays
+# at the bottom of an alphabetical list rather than landing among the U's.
+# Whole words only, so a real faction that merely starts "Other…" sorts normally.
+_CATCH_ALL = re.compile(r"(unlisted|other)\b")
+
+
+def _alpha_key(name: str) -> tuple[bool, str]:
+    folded = name.casefold()
+    return (bool(_CATCH_ALL.match(folded)), folded)
+
+
+def ordered_factions(
+    factions: list[str], groups: list[dict] | None, order: str
+) -> tuple[list[str], list[dict] | None]:
+    """The list and its categories in this system's order.
+
+    "custom" returns them untouched: the admin's arrangement IS the order, and
+    anything added goes on the end. "alphabetical" sorts the flat list and the
+    factions within each category; the categories themselves keep their order
+    (Good before Evil is a choice, not an accident).
+    """
+    if order != "alphabetical":
+        return factions, groups
+    sorted_groups = (
+        [dict(g, factions=sorted(g.get("factions") or [], key=_alpha_key)) for g in groups]
+        if groups else groups
+    )
+    return sorted(factions, key=_alpha_key), sorted_groups

@@ -477,6 +477,10 @@ class SystemConfig(SQLModel, table=True):
     faction_groups: Optional[list] = Field(default=None, sa_column=Column(JSON))
     # Directory name under icons/ holding this system's faction artwork.
     icon_folder: Optional[str] = None
+    # "alphabetical" keeps faction_list sorted on every write (catch-alls such
+    # as "Unlisted Kill Team" last); "custom" keeps it as arranged, with new
+    # factions added at the end. See systems.ordered_factions.
+    faction_order: str = "custom"
 
     # System artwork. Uploaded to Supabase Storage rather than committed, so a
     # new system gets a logo without a deploy; logo_path is kept so the old
