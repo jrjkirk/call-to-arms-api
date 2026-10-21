@@ -31,6 +31,9 @@ router = APIRouter(prefix="/notices", tags=["notices"])
 PAIRINGS_PUBLISHED = "pairings_published"
 OPPONENT_DROPPED = "opponent_dropped"
 GAME_FOUND = "game_found"
+# Not a week's news: the outcome of a faction request (faction_requests.py).
+# Stored with week "".
+FACTION_REQUEST = "faction_request"
 
 # How long a notice is worth showing. A week's news is stale once the night has
 # been and gone, and nobody wants a banner about a game they already played.

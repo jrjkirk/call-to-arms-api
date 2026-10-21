@@ -85,6 +85,9 @@ WRITE_ALLOWED_TABLES: set[str] = {
     "player_experience_adjustments",  # per-(player, system) "games I played
                        # elsewhere", set by the player on the signup form and
                        # added to the count derived from pairings
+    "faction_requests",  # a system admin asking for a faction to be added to
+                       # a shared system list; approved by a platform admin
+                       # (admin_faction_requests.py)
     "player_notices",  # one-shot in-app banners for a signed-in player:
                        # pairings published, opponent dropped (notices.py)
     "player_discord_verifications",  # per-(player, guild) Discord membership

@@ -2052,3 +2052,46 @@ class PlayerNotice(SQLModel, table=True):
     body: str
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     seen_at: Optional[datetime] = None
+
+
+class FactionRequest(SQLModel, table=True):
+    """A system admin asking for one faction to be added to a system's list.
+
+    A system's faction list is shared by every club, so a club admin cannot
+    edit it directly: one club's typo would land in every club's dropdown.
+    Instead they ask, the platform admin approves or declines each name, and
+    approval appends it to SystemConfig.faction_list (faction_requests.py).
+
+    Additions only. A rename or removal orphans every signup holding the old
+    name (Signup.faction is free text), so those stay a platform-admin edit.
+
+    One row per faction, not per submission: a new Kill Team season brings six
+    teams at once, and each is approved or declined on its own. `batch_id` ties
+    a submission's rows together so the review can post them as one message.
+
+    `system` is the legacy_system_name, like every other system column here.
+    `approved_name` is what was actually added, which differs from `name` when
+    the reviewer fixed the spelling. requested_by_name / reviewed_by_name are
+    denormalized, as on ClubRequest, so the record stays readable.
+    """
+    __tablename__ = "faction_requests"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    batch_id: str = Field(index=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system: str = Field(index=True)
+    name: str
+    # For a system with categories (Middle Earth's Good/Evil): where the
+    # requester thinks it goes. The reviewer has the final say.
+    suggested_group: Optional[str] = None
+    note: Optional[str] = None
+    status: str = Field(default="pending", index=True)  # pending | approved | declined
+    requested_by_user_id: int = Field(foreign_key="users.id", index=True)
+    requested_by_name: str
+    approved_name: Optional[str] = None
+    decline_reason: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    reviewed_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    reviewed_by_name: Optional[str] = None
