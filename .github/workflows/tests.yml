@@ -1,0 +1,27 @@
+name: Tests
+
+# Every push to main and every pull request runs the whole suite, so a broken
+# change shows up here before anyone runs `fly deploy`.
+#
+# Python 3.11 to match the Dockerfile, not the 3.14 local venv: what matters is
+# the version production runs. Each test makes its own SQLite database, so no
+# secrets and no database are needed here, and tests/run_all.py strips any
+# webhook or scheduler settings before a test starts.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python tests/run_all.py
