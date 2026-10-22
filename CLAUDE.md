@@ -200,14 +200,23 @@ repo's `check.yml` runs svelte-check (errors only) and a build.
 
 ## Deploy
 
+**A push to main deploys.** `.github/workflows/deploy.yml` runs `flyctl deploy`
+once the Tests workflow passes on that commit (a few minutes after the push);
+failing tests never deploy. It needs the `FLY_API_TOKEN` repo secret.
+
+- **Migrations go first, before the push.** Apply and verify the migration, then
+  push. Pushing a change that needs a column the database lacks is the same
+  mistake as running `fly deploy` before the migration used to be.
+- **A change that spans both repos:** push the API, wait for its Deploy run to
+  finish, then push the frontend (Vercel deploys that one immediately).
+- `fly deploy` by hand still works, and so does "Run workflow" on the Deploy
+  workflow in the Actions tab.
+
 ```bash
-git push                    # push to GitHub
-fly deploy                  # deploy to Fly.io (takes ~1 min)
 fly logs                    # stream live logs / tracebacks
 fly status                  # machine health
+fly releases                # what is deployed, and when
 ```
-
-**When a change spans both repos, deploy backend first, then frontend.**
 
 ## Conventions
 

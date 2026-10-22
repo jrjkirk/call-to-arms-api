@@ -1,0 +1,38 @@
+name: Deploy
+
+# Deploys to Fly after the Tests workflow passes on main, and only then: a push
+# whose tests fail never reaches production.
+#
+# This makes `git push` the deploy. A change that needs a migration must have
+# its migration applied BEFORE the push, the same order as before (migration,
+# then deploy), now with the push standing in for `fly deploy`.
+#
+# Needs the FLY_API_TOKEN repository secret: a deploy token for this one app,
+# made with `fly tokens create deploy -a call-to-arms-api`.
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, in order. A second push queues behind the first rather
+# than cancelling it halfway through a machine update.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The commit the tests passed on, not whatever main has moved to since.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - run: flyctl deploy --remote-only -a call-to-arms-api
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
