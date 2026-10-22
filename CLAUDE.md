@@ -11,7 +11,8 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
   - Interactive docs: https://call-to-arms-api.fly.dev/docs
   - GitHub: github.com/jrjkirk/call-to-arms-api
 - **Database:** Supabase Postgres, connected via transaction pooler (`DATABASE_URL`)
-  - We don't manage migrations here — schema source of truth is the Streamlit app (for now)
+  - Schema changes are numbered migrations (`migrations/NNNN_*.py`), applied by `migrate.py`
+    on every deploy — see "Migrations" below
   - SQLModel models in `models.py` mirror the Supabase schema exactly
 - **Auth:** Discord OAuth2, stateless HMAC session cookie (`cta_session`)
   - `SameSite=Lax; Secure` — the API is served from api.calltoarms.app, same-site with every
@@ -27,6 +28,7 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | File | Purpose |
 |---|---|
 | `main.py` | App entrypoint, mounts routers, CORS |
+| `migrate.py` | Applies pending numbered migrations (`migrations/NNNN_*.py`); Fly runs it before every deploy. See "Migrations" |
 | `database.py` | Engine, `get_session` dependency, `WRITE_ALLOWED_TABLES` guard |
 | `models.py` | SQLModel table definitions |
 | `auth.py` | Discord OAuth, session cookie helpers, `require_user` / `current_user` deps, auth endpoints |
@@ -72,10 +74,10 @@ entry points. Two consequences worth knowing:
 
 Standalone scripts, grouped by purpose (`migrations/` and `seed/` are never
 imported by the live app; `scripts/` now is — see above):
-- `migrations/` — one-off, already-run schema migration scripts
-  (`add_club_id_to_*.py`, `create_club_settings_table.py`,
-  `add_is_platform_admin_to_users.py`). Kept as historical record, not a
-  live migration tool — see `models.py`'s docstring.
+- `migrations/` — numbered migrations (`NNNN_*.py`) that `migrate.py` applies
+  on deploy, plus the older unnumbered scripts that were run by hand
+  (`add_club_id_to_*.py`, `create_player_notices.py`, …), kept as a record and
+  ignored by the runner.
 - `seed/` — one-off/idempotent data-seeding scripts (`seed_clubs.py`,
   `seed_club_webhooks.py`, `seed_systems_config.py`).
 - `scripts/` — the six periodic job entry points and the render helpers
@@ -209,9 +211,8 @@ repo's `check.yml` runs svelte-check (errors only) and a build.
 once the Tests workflow passes on that commit (a few minutes after the push);
 failing tests never deploy. It needs the `FLY_API_TOKEN` repo secret.
 
-- **Migrations go first, before the push.** Apply and verify the migration, then
-  push. Pushing a change that needs a column the database lacks is the same
-  mistake as running `fly deploy` before the migration used to be.
+- **Migrations ship with the code.** Fly runs `python migrate.py --apply` before
+  each deploy (`release_command` in fly.toml); see "Migrations" below.
 - **A change that spans both repos:** push the API, wait for its Deploy run to
   finish, then push the frontend (Vercel deploys that one immediately).
 - `fly deploy` by hand still works, and so does "Run workflow" on the Deploy
@@ -222,6 +223,36 @@ fly logs                    # stream live logs / tracebacks
 fly status                  # machine health
 fly releases                # what is deployed, and when
 ```
+
+## Migrations
+
+A schema change is one file, `migrations/NNNN_short_name.py` (the next free
+four-digit number), defining `up(conn)` and optionally `verify(conn) -> list[str]`:
+
+```python
+from sqlalchemy import text
+
+def up(conn):
+    conn.execute(text("ALTER TABLE clubs ADD COLUMN IF NOT EXISTS tagline VARCHAR"))
+
+def verify(conn):
+    cols = {r[0] for r in conn.execute(text(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'clubs'"))}
+    return [] if "tagline" in cols else ["clubs.tagline missing"]
+```
+
+Push it with the code that uses it. On deploy, Fly runs `migrate.py --apply` in a
+one-off machine with the new image: pending migrations apply in number order,
+each in one transaction with its row in `schema_migrations`. If one fails, the
+deploy stops and the old version keeps serving.
+
+- The OLD code is still serving while the migration runs, so add things; don't
+  drop or rename what the old code reads in the same deploy (do that in a later
+  one, once nothing reads it).
+- Make `up` safe to run twice (`IF NOT EXISTS`).
+- `python migrate.py` lists applied and pending without changing anything.
+- Add the model field in `models.py` in the same change; a new table also goes in
+  `WRITE_ALLOWED_TABLES`.
 
 ## Conventions
 

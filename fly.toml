@@ -6,6 +6,12 @@ primary_region = "lhr"
 [env]
   PORT = "8080"
 
+# Pending numbered migrations (migrations/NNNN_*.py) apply in a one-off machine
+# with the new image before any traffic moves to it. If one fails, the deploy
+# stops and the old version keeps serving. See migrate.py.
+[deploy]
+  release_command = "python migrate.py --apply"
+
 [http_service]
   internal_port = 8080
   force_https = true
