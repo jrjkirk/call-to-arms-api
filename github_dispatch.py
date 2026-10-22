@@ -14,7 +14,7 @@ a day at unpredictable times — that is what cost The Old World at EGNWGC its
 anything triggered this way happens in about a minute rather than "sometime".
 
 Callers:
-- `admin.pairings_post_discord` — the manual "Post to Discord" button.
+- `admin_pairings.pairings_post_discord` — the manual "Post to Discord" button.
 - `scripts/run_auto_pairings_check` — when it has published pairings but is
   running somewhere it cannot render the image itself.
 """

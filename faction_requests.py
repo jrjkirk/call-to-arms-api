@@ -27,7 +27,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from admin import _clean_ruleset, _faction_icon_slug, _require_system_scope
+from admin import _require_system_scope
+from admin_platform import _clean_ruleset, _faction_icon_slug
 from auth import require_admin, require_platform_admin
 from database import get_session, log_audit
 from identity import discord_ids_for_users, display_name_for

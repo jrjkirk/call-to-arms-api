@@ -37,7 +37,12 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `faction_requests.py` | System admins ask for factions to be added to a shared system list; the platform admin approves or declines from a queue. Posts to the alerts channel on a request, the updates channel (`DISCORD_UPDATES_WEBHOOK_URL`) on approval |
 | `players.py` | Player read endpoints |
 | `league.py` | Rankings, results endpoints |
-| `admin.py` | Admin role management, blocks, history, and pairings generation endpoints |
+| `admin.py` | Admin roles, players, onboarding, and the helpers every admin module shares. The rest of `/admin` is split by topic below; each imports shared helpers from `admin.py` and never from the others |
+| `admin_pairings.py` | Pairings: preview, generate, save, publish, post; blocks; history; pairing weights |
+| `admin_signups.py` | A week's signups: list, add, edit, remove |
+| `admin_league.py` | League results (with the ratings replay), results from pairings, league config and seasons |
+| `admin_club.py` | What a club runs itself: table-booking emails, webhooks, schedules, missions, landing page, carousel, events, Discord gate |
+| `admin_platform.py` | Platform admin: system catalogue, clubs and club requests, onboarding emails, banner, job health, audit log, user lookup |
 | `pairings_engine.py` | Pairing generation engine — faithful port of the original Streamlit matcher |
 | `week_pairings.py` | Keeps a paired week whole: every signup in exactly one pairing row. Every path that adds/removes a signup or moves a player between rows goes through it |
 | `scheduler.py` | In-process tick loop for the six periodic jobs. **Off unless `SCHEDULER_ENABLED` is set** — local `.env` points at a real DB with real webhooks |
@@ -276,7 +281,7 @@ Key invariants:
 - **Experience and levels count a game once it is official**: its week is published, or its session date has passed. Not published alone: 44 older games were played in weeks that were never published.
 - Cron/scheduling is out of scope; the engine is invoked only by admin HTTP endpoints
 
-Admin pairings endpoints (all in `admin.py`, all require caller to hold the system scope):
+Admin pairings endpoints (all in `admin_pairings.py`, all require caller to hold the system scope):
 - `POST /admin/pairings/preview` — dry run, no DB writes
 - `POST /admin/pairings/generate` — delete pending non-prearranged, generate + persist
 - `GET /admin/pairings?system=&week=` — fetch saved rows + publish state

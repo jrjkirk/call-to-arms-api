@@ -26,7 +26,7 @@ os.environ["SESSION_SECRET"] = "localtestsecret"
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
 
-import admin  # noqa: E402
+import admin_signups  # noqa: E402
 import auth  # noqa: E402
 import database  # noqa: E402
 import signups  # noqa: E402
@@ -59,7 +59,7 @@ def fake_post(db, club_id, system, content, *args, **kwargs):
 
 
 signups._post_webhook = fake_post
-admin._post_webhook = fake_post
+admin_signups._post_webhook = fake_post
 
 SQLModel.metadata.create_all(database.engine)
 NAMES = ["Ann", "Bob", "Cat", "Dan", "Eve", "Fay", "Gus", "Hal"]

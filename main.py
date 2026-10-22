@@ -45,6 +45,11 @@ from signups import (router as signups_router, CANONICAL_VIBES, _get_system_conf
                      signup_cap, normalise_vibe, normalise_vibes)
 from league import router as league_router, _resolve_system_id, _current_season_id
 from admin import router as admin_router
+from admin_pairings import router as admin_pairings_router
+from admin_signups import router as admin_signups_router
+from admin_league import router as admin_league_router
+from admin_club import router as admin_club_router
+from admin_platform import router as admin_platform_router
 from analytics import router as analytics_router
 from call_outs import router as call_outs_router
 from venue_api import router as venue_router
@@ -117,6 +122,13 @@ app.include_router(auth_router)
 app.include_router(signups_router)
 app.include_router(league_router)
 app.include_router(admin_router)
+# admin.py's endpoints, split by topic; each module imports its shared helpers
+# from admin.py and nothing from the others.
+app.include_router(admin_pairings_router)
+app.include_router(admin_signups_router)
+app.include_router(admin_league_router)
+app.include_router(admin_club_router)
+app.include_router(admin_platform_router)
 app.include_router(analytics_router)
 app.include_router(call_outs_router)
 app.include_router(venue_router)

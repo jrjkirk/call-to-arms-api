@@ -28,7 +28,7 @@ os.environ["SESSION_SECRET"] = "localtestsecret"
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, SQLModel, select  # noqa: E402
 
-import admin  # noqa: E402
+import admin_signups  # noqa: E402
 import auth  # noqa: E402
 import database  # noqa: E402
 import notices as notices_mod  # noqa: E402
@@ -53,7 +53,7 @@ WEEK = "23/09/2026"
 H = {"origin": "https://egnwgc.calltoarms.app"}
 
 signups_mod._post_webhook = lambda *a, **k: None
-admin._post_webhook = lambda *a, **k: None
+admin_signups._post_webhook = lambda *a, **k: None
 
 SQLModel.metadata.create_all(database.engine)
 

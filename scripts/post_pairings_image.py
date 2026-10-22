@@ -19,7 +19,7 @@ from sqlmodel import Session, select
 from database import posting_enabled, discord_mentions_for_player_ids, engine, resolve_webhook_url, scoped
 from system_overrides import effective_system
 from models import Club, ClubSystem, Pairing, SystemConfig
-from admin import _collect_signups_for_rows, _pairing_rows_to_display
+from admin_pairings import _collect_signups_for_rows, _pairing_rows_to_display
 # Qualified with the package name, not a bare sibling import: these modules
 # are imported BOTH as scripts (python scripts/x.py, where scripts/ lands on
 # sys.path) and as a package (scheduler.py, where it does not). Only the
