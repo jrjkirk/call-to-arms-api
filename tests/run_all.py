@@ -55,6 +55,12 @@ def main() -> int:
     failed = [r for r in results if r[1] != 0]
     for path, _code, output, _secs in failed:
         print(f"\n===== FAILED: {path.name} =====\n{output.rstrip()}\n")
+        if os.environ.get("GITHUB_ACTIONS"):
+            # An annotation shows on the run's summary page, which anyone can
+            # read without opening (or being allowed to open) the full log.
+            tail = "\n".join(output.rstrip().splitlines()[-40:])
+            body = tail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+            print(f"::error title={path.name} failed::{body}")
     for path, code, _output, secs in results:
         print(f"{'PASS' if code == 0 else 'FAIL'}  {path.name}  ({secs:.1f}s)")
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed")
