@@ -202,10 +202,16 @@ def grantable_users(
     users = db.exec(
         scoped(User, user.club_id).where(User.player_id.isnot(None))
     ).all()
+    # One query for every user's player, not one each: at ~130 users the
+    # per-user lookup took seconds, and the Admins tab now waits on this.
+    players = {
+        p.id: p
+        for p in db.exec(select(Player).where(Player.id.in_([u.player_id for u in users]))).all()
+    } if users else {}
 
     result = []
     for u in users:
-        p = db.get(Player, u.player_id)
+        p = players.get(u.player_id)
         if p and p.active:
             result.append({
                 "id": u.id,
