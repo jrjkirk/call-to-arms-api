@@ -13,11 +13,21 @@ came out inert.
 
 Run: PYTHONPATH=. python tests/test_email_escaping.py
 """
+import os
+import pathlib
 import sys
+import tempfile
 from html.parser import HTMLParser
 from types import SimpleNamespace
 
-from emailer import esc
+# Its own throwaway database, like every other test. The renderers below never
+# query one, but importing them imports database.py, which otherwise reads
+# DATABASE_URL from .env: that is the live database on a developer's laptop,
+# and missing entirely in CI.
+_DB = pathlib.Path(tempfile.mkdtemp()) / "escaping.db"
+os.environ["DATABASE_URL"] = f"sqlite:///{_DB}"
+
+from emailer import esc  # noqa: E402
 from table_booking import render_table_booking_email
 from venue import _booker_email_html, _staff_email_html
 

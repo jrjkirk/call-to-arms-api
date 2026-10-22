@@ -28,6 +28,11 @@ def run(path: pathlib.Path) -> tuple[pathlib.Path, int, str, float]:
     # caller's environment holds. Each test sets its own DATABASE_URL first.
     for key in ("ALERTS_WEBHOOK_URL", "DISCORD_UPDATES_WEBHOOK_URL", "SCHEDULER_ENABLED"):
         env.pop(key, None)
+    # And a test that forgets to set one gets an empty in-memory database, not
+    # the live one: database.py's load_dotenv never overrides a value already
+    # in the environment, so this beats whatever .env says.
+    env["DATABASE_URL"] = "sqlite://"
+    env.setdefault("SESSION_SECRET", "localtestsecret")
     started = time.monotonic()
     try:
         done = subprocess.run(
