@@ -178,6 +178,26 @@ Frontend `.env` must point at local API:
 PUBLIC_API_URL=http://localhost:8000
 ```
 
+**Local `.env` points at the LIVE database** (Joel's choice, 2026-10-22, over a
+local or staging one). Anything run locally against it, including migrations,
+acts on real club data.
+
+## Tests
+
+```bash
+python tests/run_all.py            # every tests/test_*.py, in parallel, ~30s
+python tests/run_all.py notices    # only files whose name contains "notices"
+```
+
+Each test is a standalone script with its own throwaway SQLite database (no
+pytest). A new test must set `DATABASE_URL` itself before importing anything
+from the app; `run_all.py` also forces an in-memory one, so a test that forgets
+can't reach the live database through `.env`.
+
+GitHub runs the same command on every push (`.github/workflows/tests.yml`, on
+Python 3.11 like the image, with matplotlib for the renderer's tests). The web
+repo's `check.yml` runs svelte-check (errors only) and a build.
+
 ## Deploy
 
 ```bash
