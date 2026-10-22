@@ -23,5 +23,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: pip install -r requirements.txt
+      # matplotlib as the image workflows install it: the renderer's tests
+      # need it, and it is deliberately not in the API image.
+      - run: pip install -r requirements.txt matplotlib
       - run: python tests/run_all.py
