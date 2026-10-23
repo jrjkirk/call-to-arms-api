@@ -2099,3 +2099,31 @@ class FactionRequest(SQLModel, table=True):
     reviewed_at: Optional[datetime] = None
     reviewed_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
     reviewed_by_name: Optional[str] = None
+
+
+class PushSubscription(SQLModel, table=True):
+    """One device that has said yes to push notifications.
+
+    A device, not an account: each phone or browser the person allows gets its
+    own row, because the push address belongs to that browser and dies with it.
+    One account can have several (phone, laptop). `endpoint` is unique: if a
+    device is signed into a different account, its row moves to that account.
+
+    `muted` lists the notice kinds (notices.py) this device has switched off,
+    so a player can keep "pairings are up" on the phone and off on the laptop.
+    Empty means everything. Rows are deleted when the push service says the
+    address is gone (404/410), which is how an uninstalled app tidies itself up.
+    """
+    __tablename__ = "push_subscriptions"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    endpoint: str = Field(unique=True)
+    p256dh: str
+    auth: str
+    muted: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False, default=list))
+    user_agent: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_sent_at: Optional[datetime] = None
+

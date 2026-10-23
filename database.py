@@ -30,6 +30,9 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
+    "push_subscriptions",  # devices that allowed push notifications (push.py):
+                           # added/removed from the Account page, deleted when
+                           # the push service says the address is gone
     "password_credentials",  # one Argon2id hash per account (passwords.py);
                              # written on set/change/reset, deleted with the
                              # password sign-in method

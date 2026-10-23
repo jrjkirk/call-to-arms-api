@@ -29,3 +29,6 @@ python-multipart==0.0.32
 # top-level packages is enough to keep hashing behaviour fixed.
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
+# Web Push for notices (push.py). Brings cryptography, py-vapid, http-ece,
+# requests and aiohttp with it, all with wheels for 3.11 and 3.14.
+pywebpush==2.5.0

@@ -29,7 +29,7 @@ from sqlmodel import SQLModel, Session, select
 
 from models import (
     AdminRole, AuditLogEntry, ClubRequest, LoginToken, PasswordCredential, Player,
-    FactionRequest, PlayerNotice, Tournament, TournamentEntry,
+    FactionRequest, PlayerNotice, PushSubscription, Tournament, TournamentEntry,
     TournamentGame, User, UserIdentity, VenueBooking, VenueEvent, VenueStaff,
 )
 
@@ -68,6 +68,9 @@ USER_REFERENCES: list[tuple[type[SQLModel], str, str]] = [
     # Who asked for a faction, and who approved it, are records of a person.
     (FactionRequest, "requested_by_user_id", "move"),
     (FactionRequest, "reviewed_by_user_id", "move"),
+    # A device that allowed notifications keeps getting them, for the one
+    # person both accounts were.
+    (PushSubscription, "user_id", "move"),
 ]
 
 # Columns that look like user references by name but aren't.

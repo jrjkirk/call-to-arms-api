@@ -17,11 +17,13 @@ publish or strand a drop-out half done.
 """
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+import push
 from auth import active_club_id, require_user
 from database import get_session, scoped
 from models import PlayerNotice, Player, Signup, User
@@ -104,6 +106,10 @@ def record(
     )
     db.add(row)
     db.flush()
+    # The same news to the account's phone, sent once this transaction commits
+    # (push.py). Week news opens that night's pairings when tapped.
+    url = f"/pairings?{urlencode({'system': system, 'week': week})}" if week else "/"
+    push.queue(db, user_id=user_id, kind=kind, body=body, url=url, tag=f"{kind}:{system}:{week}")
     return row
 
 
