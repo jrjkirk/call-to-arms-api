@@ -16,7 +16,7 @@ from sqlmodel import Session, select, or_
 from database import active_player_id_for, get_session, in_league_filter, resolve_request_club_id, scoped
 from models import Club, ClubEvent, ClubRequest, ClubSystem, PlatformBanner, Player, LeagueResult, LeagueRating, Signup, Pairing, PublishState, UK_REGIONS, User, SystemConfig
 import club_emails
-from levels import levels_for_players
+from levels import levels_for_players, progress as level_progress
 from week_logic import next_session_date, sessions_in_range
 from observability import report_exception
 from system_overrides import EffectiveSystem, effective_system
@@ -1133,6 +1133,102 @@ def league_rankings(
     return _compute_league_rankings(session, club_id, system_id, resolved_season_id)
 
 
+@app.get("/home")
+def home(
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    session: Session = Depends(get_session),
+):
+    """Everything the "Your week" home tab shows, in one call: each system's
+    next session at this club (how many are signed up, whether the caller is
+    one of them, whether pairings are out), and the caller's standing in each
+    league the club runs.
+
+    One request rather than the week-id + stats + mine + pairings round trip
+    per system that the signup page makes, because the home tab shows every
+    system at once. The game itself (opponent, factions) is read from
+    GET /pairings for the night that has one, same as the pairings page."""
+    my_pid = active_player_id_for(session, user, club_id)
+    club_systems = session.exec(
+        select(ClubSystem, SystemConfig)
+        .join(SystemConfig, SystemConfig.id == ClubSystem.system_id)
+        .where(ClubSystem.club_id == club_id)
+        .where(ClubSystem.enabled == True)
+        .where(SystemConfig.active == True)
+        .order_by(SystemConfig.name)
+    ).all()
+
+    today = date.today()
+    nights = []
+    for cs, sc in club_systems:
+        try:
+            target = next_session_date(cs.session_day, cs.session_cadence, cs.cadence_anchor, today)
+        except (AssertionError, KeyError, ValueError):
+            # A schedule with no anchor, or a day name the week logic doesn't
+            # know: no next session to show, rather than no home page at all.
+            continue
+        week = target.strftime("%d/%m/%Y")
+        system = sc.legacy_system_name
+        rows = session.exec(
+            scoped(Signup, club_id).where(Signup.system == system).where(Signup.week == week)
+        ).all()
+        # Counted the way /signups/stats counts: one per player, every guest.
+        players = {s.player_id if s.player_id is not None else f"row{s.id}" for s in rows}
+        mine = my_pid is not None and any(s.player_id == my_pid for s in rows)
+        cap = signup_cap(session, club_id, system)
+        gate = session.exec(
+            scoped(PublishState, club_id)
+            .where(PublishState.week == week)
+            .where(PublishState.system == system)
+        ).first()
+        nights.append({
+            "system": system,
+            "name": sc.name,
+            "slug": sc.slug,
+            "logo_url": sc.logo_url,
+            "accent_color": cs.accent_color or DEFAULT_ACCENT_COLOR,
+            "week": week,
+            "date": target.isoformat(),
+            "signed_up": len(players),
+            "mine": mine,
+            "is_full": cap["max_players"] is not None and len(players) >= cap["max_players"] and not mine,
+            "published": bool(gate and gate.published),
+        })
+    nights.sort(key=lambda n: (n["date"], n["name"]))
+
+    leagues = []
+    if my_pid is not None:
+        for cs, sc in club_systems:
+            if not cs.league_enabled:
+                continue
+            season_id = _current_season_id(session, club_id, sc.id)
+            if season_id is None:
+                continue
+            rankings = _compute_league_rankings(session, club_id, sc.id, season_id)
+            me = next((r for r in rankings if r["player_id"] == my_pid), None)
+            if me is None:
+                continue
+            lv = level_progress(session, club_id, my_pid, sc.legacy_system_name)
+            leagues.append({
+                "system": sc.legacy_system_name,
+                "name": sc.name,
+                "slug": sc.slug,
+                "logo_url": sc.logo_url,
+                "rank": me["rank"],
+                "of": len(rankings),
+                "rating": me["rating"],
+                "wins": me["wins"],
+                "draws": me["draws"],
+                "losses": me["losses"],
+                "level": lv["level"],
+                "level_percent": lv["percent"],
+                "games_to_next": lv["games_to_next"],
+                "at_cap": lv["at_cap"],
+            })
+
+    return {"player_id": my_pid, "nights": nights, "leagues": leagues}
+
+
 @app.get("/signups/stats")
 def signups_stats(system: str, week: str, user: User = Depends(require_user), club_id: int = Depends(active_club_id), session: Session = Depends(get_session)):
     rows = session.exec(
@@ -1351,6 +1447,9 @@ def get_pairings(
             "eta": eta,
             "points": points,
             "prearranged": p.prearranged,
+            # Set only where a club has numbered its tables; the app shows
+            # "Game N" otherwise rather than inventing a table.
+            "table": p.table,
         })
 
     return {
