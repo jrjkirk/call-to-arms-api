@@ -765,20 +765,37 @@ def list_players(user: User = Depends(require_user), club_id: int = Depends(acti
     ).all()
 
     signup_rows = session.exec(
-        select(Signup.player_id, Signup.system)
+        select(Signup.player_id, Signup.system, Signup.faction, Signup.week)
         .where(Signup.player_id.isnot(None))
         .where(Signup.club_id == club_id)
-        .distinct()
     ).all()
 
+    # Per player: which systems, when they last came (a session on or before
+    # today, so a signup for next week doesn't count as "played"), and their
+    # usual (system, faction), which is what the list shows an icon for.
+    today = date.today()
     systems_by_player: dict[int, set] = {}
-    for player_id, system in signup_rows:
+    last_by_player: dict[int, date] = {}
+    usual_counts: dict[int, dict[tuple, int]] = {}
+    for player_id, system, faction, week in signup_rows:
         systems_by_player.setdefault(player_id, set()).add(system)
+        played = _parse_week(week).date() if week else None
+        if played and played != datetime.min.date() and played <= today:
+            if played > last_by_player.get(player_id, date.min):
+                last_by_player[player_id] = played
+        if faction:
+            counts = usual_counts.setdefault(player_id, {})
+            counts[(system, faction)] = counts.get((system, faction), 0) + 1
 
     result = []
     for player in players:
         player_dict = player.model_dump()
         player_dict["systems_played"] = sorted(systems_by_player.get(player.id, set()))
+        last = last_by_player.get(player.id)
+        player_dict["last_played"] = last.isoformat() if last else None
+        counts = usual_counts.get(player.id)
+        usual = max(counts, key=counts.get) if counts else (None, None)
+        player_dict["usual_system"], player_dict["usual_faction"] = usual
         result.append(player_dict)
     return result
 

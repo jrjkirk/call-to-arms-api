@@ -115,6 +115,23 @@ check("Gail sees Kill Team as theirs", {n["system"]: n["mine"] for n in r2.json(
 
 check("signed out is 401", TestClient(app).get("/home").status_code == 401)
 
+# GET /players: the list page sorts by last_played and shows usual_faction.
+with Session(database.engine) as db:
+    db.add(Signup(id=20, week="02/09/2026", system=TOW, player_id=2, player_name="Gail",
+                  faction="Skaven", club_id=1, created_at=datetime(2026, 9, 1, 12, 0)))
+    db.add(Signup(id=21, week="09/09/2026", system=TOW, player_id=2, player_name="Gail",
+                  faction="Skaven", club_id=1, created_at=datetime(2026, 9, 8, 12, 0)))
+    db.add(Signup(id=22, week="31/12/2099", system=KT, player_id=2, player_name="Gail",
+                  faction="Kommandos", club_id=1, created_at=datetime(2026, 9, 8, 12, 0)))
+    db.commit()
+rows = {p["name"]: p for p in client_for(1).get("/players", headers={"origin": "https://egnwgc.calltoarms.app"}).json()}
+gail = rows["Gail"]
+check("last_played is the latest session already held, not a future signup",
+      gail["last_played"] is not None and gail["last_played"] < "2099-01-01", gail["last_played"])
+check("usual faction is the most-played (system, faction)",
+      (gail["usual_system"], gail["usual_faction"]) == (TOW, "Skaven"), gail)
+check("no faction signed up: no usual faction", rows["Dee"]["usual_faction"] is None, rows["Dee"])
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED")
