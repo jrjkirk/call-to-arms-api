@@ -2127,3 +2127,79 @@ class PushSubscription(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_sent_at: Optional[datetime] = None
 
+
+
+class PickupRequest(SQLModel, table=True):
+    """A player saying "find me a game" outside club night (pickups.py).
+
+    The successor to call outs: instead of one exact time that someone else has
+    to spot and take, a player gives a window they're free in and where they'd
+    play, and joins a pool. pickups.match() pairs compatible requests and asks
+    both players to accept.
+
+    Times are UK-local naive datetimes, like CallOut.game_at.
+
+    status:
+      "open"       in the pool, waiting for a match
+      "proposed"   offered to someone in a PickupMatch, waiting on answers
+      "matched"    both accepted: a game is on
+      "declined"   this player turned a proposal down (or never answered it):
+                   out of the pool, and must ask again to come back
+      "cancelled"  withdrawn by the player
+      "expired"    the window passed with no game
+    """
+    __tablename__ = "pickup_requests"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system: str = Field(index=True)
+    player_id: int = Field(foreign_key="players.id", index=True)
+    player_name: str
+
+    window_start: datetime
+    window_end: datetime
+    # "club" (the club's venue), "tbc" (we'll sort it), or "other" with
+    # venue_text saying where.
+    venue: str = "club"
+    venue_text: Optional[str] = None
+
+    faction: Optional[str] = None
+    points: Optional[int] = None
+    vibe: Optional[str] = None
+    notes: Optional[str] = None
+
+    status: str = Field(default="open", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PickupMatch(SQLModel, table=True):
+    """Two pick-up requests the app has paired, and each player's answer.
+
+    status: "proposed" until both answer; "confirmed" when both accept;
+    "declined" when either declines or doesn't answer by expires_at;
+    "cancelled" when a confirmed game is called off.
+
+    decline_reason is PRIVATE: shown to the system's admins only, never to the
+    other player or in Discord (Joel's call, 2026-10-25: making declines public
+    would shame people out of using the feature).
+    """
+    __tablename__ = "pickup_matches"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    club_id: int = Field(foreign_key="clubs.id", index=True)
+    system: str = Field(index=True)
+    a_request_id: int = Field(foreign_key="pickup_requests.id", index=True)
+    b_request_id: int = Field(foreign_key="pickup_requests.id", index=True)
+    # "pending" | "accepted" | "declined"
+    a_answer: str = "pending"
+    b_answer: str = "pending"
+    # When the game would start: the start of the two windows' overlap.
+    starts_at: datetime
+    status: str = Field(default="proposed", index=True)
+    decline_reason: Optional[str] = None
+    declined_by_player_id: Optional[int] = None
+    proposed_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    decided_at: Optional[datetime] = None

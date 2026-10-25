@@ -37,6 +37,7 @@ Browser → Vercel (SvelteKit, ~/projects/call-to-arms-web) → Fly.io (FastAPI,
 | `signups.py` | Signup CRUD endpoints |
 | `notices.py` | In-app banners for one account: pairings published, opponent dropped, late signup found them a game. Written from the same places that post to Discord, read by `GET /notices` |
 | `push.py` | Web Push: every notice `notices.record()` writes also goes to the account's devices, sent after the transaction commits. Off until the `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` Fly secrets are set (`scripts/generate_vapid_keys.py`). The web app's `static/sw.js` is push-only and must never cache |
+| `pickups.py` | Pick-up games (replaced call outs in the app, 2026-10-25): a player gives a window they're free and where; `match()` pairs compatible requests by the club night rules that apply (exclusive kinds, blocks, points), both accept or decline, and decline reasons are admin-only (`GET /admin/pickups`). `sweep()` closes unanswered proposals, run before reads and by the `pickups_check` scheduler job |
 | `faction_requests.py` | System admins ask for factions to be added to a shared system list; the platform admin approves or declines from a queue. Posts to the alerts channel on a request, the updates channel (`DISCORD_UPDATES_WEBHOOK_URL`) on approval |
 | `players.py` | Player read endpoints |
 | `league.py` | Rankings, results endpoints |

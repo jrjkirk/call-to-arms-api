@@ -92,7 +92,7 @@ check("subscribe refused while off", dee.post("/push/subscribe", json=sub_body("
 os.environ["VAPID_PUBLIC_KEY"] = "BPublicKeyForTests"
 os.environ["VAPID_PRIVATE_KEY"] = "privatekeyfortests"
 r = TestClient(app).get("/push/key").json()
-check("on with keys, and lists the kinds", r["enabled"] and r["public_key"] == "BPublicKeyForTests" and len(r["kinds"]) == 4, r)
+check("on with keys, and lists the kinds", r["enabled"] and r["public_key"] == "BPublicKeyForTests" and len(r["kinds"]) == 5, r)
 
 # ── subscribe / status / mute / unsubscribe ──
 check("subscribe", dee.post("/push/subscribe", json=sub_body("https://push.example/dee-phone"), headers=H).json()["subscribed"])

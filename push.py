@@ -48,6 +48,7 @@ KINDS = [
     ("opponent_dropped", "Your opponent drops out"),
     ("game_found", "A late signup gives you a game"),
     ("faction_request", "Your faction request is decided"),
+    ("pickup", "Pick-up games: a match, or a change to one"),
 ]
 
 TITLES = {
@@ -55,6 +56,7 @@ TITLES = {
     "opponent_dropped": "Your game has changed",
     "game_found": "You've got a game",
     "faction_request": "Faction request",
+    "pickup": "Pick-up game",
     "test": "Call to Arms",
 }
 

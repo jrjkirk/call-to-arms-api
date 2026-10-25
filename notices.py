@@ -36,6 +36,9 @@ GAME_FOUND = "game_found"
 # Not a week's news: the outcome of a faction request (faction_requests.py).
 # Stored with week "".
 FACTION_REQUEST = "faction_request"
+# Pick-up games (pickups.py): a match proposed, confirmed, or fallen through.
+# Stored with week "".
+PICKUP = "pickup"
 
 # How long a notice is worth showing. A week's news is stale once the night has
 # been and gone, and nobody wants a banner about a game they already played.
@@ -87,6 +90,7 @@ def record(
     kind: str,
     body: str,
     once: bool = False,
+    url: Optional[str] = None,
 ) -> Optional[PlayerNotice]:
     """Add one notice. `once` skips it if this account already has that kind of
     notice for that week and system (unpublish-then-republish must not notify
@@ -108,7 +112,8 @@ def record(
     db.flush()
     # The same news to the account's phone, sent once this transaction commits
     # (push.py). Week news opens that night's pairings when tapped.
-    url = f"/pairings?{urlencode({'system': system, 'week': week})}" if week else "/"
+    if url is None:
+        url = f"/pairings?{urlencode({'system': system, 'week': week})}" if week else "/"
     push.queue(db, user_id=user_id, kind=kind, body=body, url=url, tag=f"{kind}:{system}:{week}")
     return row
 

@@ -68,6 +68,9 @@ def enabled() -> bool:
 OWNED_JOBS: tuple[tuple[str, str], ...] = (
     ("call_to_arms_check", "scripts.run_call_to_arms_check"),
     ("call_outs_check", "scripts.run_call_outs_check"),
+    # Pick-up games: unanswered proposals close and their other player goes
+    # back in the pool, even at a club nobody has opened the app at today.
+    ("pickups_check", "scripts.run_pickups_check"),
     ("table_booking_cutoff_check", "scripts.run_table_booking_cutoff_check"),
     ("ticket_holds_check", "scripts.run_ticket_holds_check"),
     ("auto_pairings_check", "scripts.run_auto_pairings_check"),

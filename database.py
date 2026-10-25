@@ -30,6 +30,10 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # Tables the app is allowed to write to. Anything not in this set raises on flush.
 WRITE_ALLOWED_TABLES: set[str] = {
     "users",          # auth: created on login, updated on claim-profile
+    "pickup_requests",  # "find me a game" outside club night (pickups.py):
+                        # created/cancelled by players, status moved by the matcher
+    "pickup_matches",   # pairs the pick-up matcher proposes, and each player's
+                        # accept/decline (the decline reason is admin-only)
     "push_subscriptions",  # devices that allowed push notifications (push.py):
                            # added/removed from the Account page, deleted when
                            # the push service says the address is gone
