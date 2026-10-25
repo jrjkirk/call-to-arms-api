@@ -134,6 +134,8 @@ def analytics_overview(
             "cap_max_players": cap["max_players"],  # None when no cap
             "pairing_count": pairing_count,
             "status": status,
+            # The system's own colour, for the bar beside its row.
+            "accent_color": cs.accent_color or "#c9a14a",
         })
 
     out.sort(key=lambda r: r["name"])
