@@ -1287,6 +1287,21 @@ def signups_stats(system: str, week: str, user: User = Depends(require_user), cl
         "cap_max_players": cap["max_players"],
         "cap_tables": cap["tables"] if cap["max_players"] is not None else None,
         "is_full": cap["max_players"] is not None and total >= cap["max_players"] and not already_signed_up,
+        # When pairings go up, if the system's admin has auto-pairings on:
+        # {"day": "Tuesday", "time": "20:00"}. None otherwise, and the form
+        # says nothing rather than guessing.
+        "pairings_post": _auto_pairings_schedule(session, club_id, system),
+    }
+
+
+def _auto_pairings_schedule(session: Session, club_id: int, system: str):
+    from database import get_setting, system_setting_slug
+    slug = system_setting_slug(system)
+    if (get_setting(session, club_id, f"auto_pairings_{slug}_enabled", "false") or "false").lower() != "true":
+        return None
+    return {
+        "day": get_setting(session, club_id, f"auto_pairings_{slug}_day", "Tuesday") or "Tuesday",
+        "time": get_setting(session, club_id, f"auto_pairings_{slug}_time", "20:00") or "20:00",
     }
 
 
