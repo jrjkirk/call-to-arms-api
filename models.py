@@ -1408,6 +1408,10 @@ class ClubRequest(SQLModel, table=True):
     club_night_day: Optional[str] = None
     club_night_time: Optional[str] = None
     player_count: Optional[int] = None
+    # Games the club plays that aren't in the catalogue, as typed on the form's
+    # "Other" choice (migration 0003). Read by the platform admin; approval
+    # sets up only catalogue systems, so these are added to the catalogue by hand.
+    other_systems: Optional[str] = None
     requester_role: Optional[str] = None
     # Somewhere the club is publicly visible and the requester can be seen to
     # run it. Discord login proves a person, not that they run this club, so

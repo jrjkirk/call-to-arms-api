@@ -1446,6 +1446,9 @@ def _club_request_dict(r: ClubRequest, db: Optional[Session] = None) -> dict:
         "region": r.region,
         "preferred_slug": r.preferred_slug,
         "systems": r.systems or [],
+        # Games not in the catalogue yet (the form's "Other"): nothing is set
+        # up for these on approval; add them to the catalogue first.
+        "other_systems": r.other_systems,
         # Per-system nights. Empty on requests predating 2026-09-09, which is
         # why the flat club-wide fields below are still sent: the reviewer
         # needs to see whichever one this request actually carries.

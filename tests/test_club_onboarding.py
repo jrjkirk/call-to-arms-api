@@ -81,6 +81,8 @@ REQUEST = {
     "region": "Yorkshire & the Humber",
     "preferred_slug": "badmoon",
     "systems": ["The Old World", "Kill Team"],
+    # A game that isn't in the catalogue, typed under the form's "Other".
+    "other_systems": "Bolt Action",
     "club_night_day": "Thursday",
     "club_night_time": "18:00",
     "player_count": 24,
@@ -113,6 +115,7 @@ with Session(database.engine) as db:
     check("the systems came through", req.systems == ["The Old World", "Kill Team"])
     check("so did the club night", (req.club_night_day, req.club_night_time) == ("Thursday", "18:00"))
     check("and the evidence link", req.evidence_url == "https://discord.gg/badmoon")
+    check("and the game that isn't in the catalogue", req.other_systems == "Bolt Action", req.other_systems)
     request_id = req.id
 
 
@@ -131,6 +134,10 @@ client.cookies.delete("cta_pending_signup")
 
 print("\n5. One click provisions the club, the admin and the systems")
 client.cookies.set("cta_session", _make_session_cookie(1))
+queue = client.get("/admin/platform/club-requests").json()
+queued = next((q for q in (queue.get("requests", queue) if isinstance(queue, dict) else queue) if q["id"] == request_id), {})
+check("the review queue shows the game that isn't in the catalogue",
+      queued.get("other_systems") == "Bolt Action", str(queued.get("other_systems")))
 r = client.post(f"/admin/platform/club-requests/{request_id}/provision",
                 json={"slug": "badmoon", "region": "Yorkshire & the Humber"})
 check("provision succeeded", r.status_code == 200, r.text[:200])
@@ -149,7 +156,7 @@ with Session(database.engine) as db:
           body.get("appointed_super_admin", {}).get("discord_name") == "Nick#1234", str(body.get("appointed_super_admin")))
 
     cs = db.exec(select(ClubSystem).where(ClubSystem.club_id == club.id)).all()
-    check("both requested systems are switched on", len(cs) == 2, str(len(cs)))
+    check("both requested systems are switched on, and nothing for 'Bolt Action'", len(cs) == 2, str(len(cs)))
     check("on the club night they gave us",
           all(c.session_day == "Thursday" for c in cs))
     check("the response lists them", sorted(body.get("enabled_systems", [])) ==

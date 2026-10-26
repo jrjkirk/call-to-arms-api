@@ -561,6 +561,7 @@ def _post_club_request_webhook(req: ClubRequest) -> None:
         + (f"\n🎮 Discord: {req.discord_name}" if req.discord_name else "")
         + (f"\n🧑‍⚖️ Role: {req.requester_role}" if req.requester_role else "")
         + (f"\n⚔️ {', '.join(req.systems)}" if req.systems else "")
+        + (f"\n🆕 Not in the catalogue: {req.other_systems}" if req.other_systems else "")
         + (f"\n🗓️ {req.club_night_day}" + (f" {req.club_night_time}" if req.club_night_time else "")
            if req.club_night_day else "")
         + (f"\n👥 ~{req.player_count} players" if req.player_count else "")
@@ -595,6 +596,8 @@ class ClubRequestBody(BaseModel):
     player_count: Optional[int] = None
     requester_role: Optional[str] = None
     evidence_url: Optional[str] = None
+    # Games not in the catalogue, typed under the form's "Other" choice.
+    other_systems: Optional[str] = None
 
 
 _REQUEST_DAYS = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
@@ -750,6 +753,8 @@ def create_club_request(
         player_count=body.player_count,
         requester_role=(body.requester_role or "").strip() or None,
         evidence_url=(body.evidence_url or "").strip() or None,
+        # Capped: it is free text off a public form, read by a person.
+        other_systems=(body.other_systems or "").strip()[:200] or None,
     )
     session.add(req)
     session.commit()
