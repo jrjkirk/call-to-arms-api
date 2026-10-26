@@ -17,6 +17,9 @@ match() pairs compatible requests, by the club night rules wherever they apply:
   - among what's left: same kind of game first, then closest points, then
     first come, first served.
 
+A player can also take up someone's open request directly (claim()), which
+proposes the game straight away with their side already accepted.
+
 Both players are asked to accept within ANSWER_WITHIN (sooner if the game
 starts sooner). Both accept: the game is on, posted to Discord, and each is
 told who the other is and how to reach them. Anyone who declines, or doesn't
@@ -423,6 +426,85 @@ def create_pickup(
     out = _request_out(db, r)
     m = _match_for(db, r)
     out["match"] = _match_out(db, m, r) if m else None
+    return out
+
+
+class ClaimIn(BaseModel):
+    faction: Optional[str] = None
+    points: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@router.post("/{request_id}/claim")
+def claim(
+    request_id: int,
+    body: ClaimIn,
+    user: User = Depends(require_user),
+    club_id: int = Depends(active_club_id),
+    db: Session = Depends(get_session),
+):
+    """Take up someone's open request: "I'll play you."
+
+    Matching alone left a player who saw a game they wanted with no way to say
+    so; they had to ask for one of their own and hope the matcher picked them.
+    This makes the game directly. The claimer gets a request copied from the
+    one they're answering (its time, place and kind of game, their own faction
+    and points), already accepted on their side; the other player is asked to
+    accept or decline as with any proposed game. The same rules hold as for
+    matching: not your own request, not someone you're blocked with, and one
+    live request per player per system."""
+    sweep(db, club_id)
+    player = _require_linked_player(user, db, club_id)
+    theirs = db.get(PickupRequest, request_id)
+    now = now_uk_naive()
+    if theirs is None or theirs.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Pick-up request not found.")
+    if theirs.player_id == player.id:
+        raise HTTPException(status_code=422, detail="That's your own request.")
+    if theirs.status != OPEN or theirs.window_end <= now:
+        raise HTTPException(status_code=409, detail="Someone else has already got that game.")
+    config = _get_system_config(db, theirs.system)
+    if config is None:
+        raise HTTPException(status_code=422, detail="Unknown system.")
+    config = effective_system(db, club_id, config)
+    _require_system_enabled(db, club_id, theirs.system)
+    require_discord_member(db, player, club_id, theirs.system)
+    _, system_id = _vibe_specs(db, club_id, theirs.system)
+    if frozenset((player.id, theirs.player_id)) in _blocked_pairs(db, club_id, system_id):
+        raise HTTPException(status_code=409, detail="You can't be matched with this player.")
+    live = db.exec(
+        scoped(PickupRequest, club_id).where(PickupRequest.system == theirs.system)
+        .where(PickupRequest.player_id == player.id).where(PickupRequest.status.in_(LIVE))
+    ).first()
+    if live is not None:
+        raise HTTPException(status_code=409, detail="You already have a pick-up request for this system. Cancel it to take this one.")
+
+    points = (max(0, min(int(body.points if body.points is not None else (theirs.points or config.default_points)), config.max_points))
+              if config.uses_points else None)
+    mine = PickupRequest(
+        club_id=club_id, system=theirs.system, player_id=player.id, player_name=player.name,
+        window_start=theirs.window_start, window_end=theirs.window_end,
+        venue=theirs.venue, venue_text=theirs.venue_text, vibe=theirs.vibe,
+        faction=(body.faction or "").strip() or None, points=points,
+        notes=((body.notes or "").strip() or None) and body.notes.strip()[:_MAX_TEXT],
+        status=PROPOSED,
+    )
+    db.add(mine)
+    db.flush()
+    starts_at = max(theirs.window_start, now)
+    expires_at = max(now + timedelta(hours=1), min(now + ANSWER_WITHIN, starts_at - timedelta(minutes=30)))
+    m = PickupMatch(club_id=club_id, system=theirs.system, a_request_id=theirs.id, b_request_id=mine.id,
+                    b_answer="accepted", starts_at=starts_at, expires_at=expires_at)
+    theirs.status = PROPOSED
+    db.add(theirs)
+    db.add(m)
+    db.flush()
+    _tell(db, theirs, f"{player.name} wants to play your pick-up game: {theirs.system}, {_when(starts_at)}, "
+                      f"{_where(db, theirs)}. Accept or decline in the app by {expires_at:%a %H:%M}.")
+    db.commit()
+    db.refresh(mine)
+    out = _request_out(db, mine)
+    out["match"] = _match_out(db, m, mine)
     return out
 
 
