@@ -92,7 +92,17 @@ check("subscribe refused while off", dee.post("/push/subscribe", json=sub_body("
 os.environ["VAPID_PUBLIC_KEY"] = "BPublicKeyForTests"
 os.environ["VAPID_PRIVATE_KEY"] = "privatekeyfortests"
 r = TestClient(app).get("/push/key").json()
-check("on with keys, and lists the kinds", r["enabled"] and r["public_key"] == "BPublicKeyForTests" and len(r["kinds"]) == 5, r)
+check("on with keys, and lists the kinds", r["enabled"] and r["public_key"] == "BPublicKeyForTests" and len(r["kinds"]) == 4, r)
+check("faction requests aren't a switch", "faction_request" not in {k["kind"] for k in r["kinds"]}, r["kinds"])
+
+# A kind with no switch stays an in-app notice: nothing is queued to push.
+import push as _push  # noqa: E402
+with Session(database.engine) as _db:
+    _push.queue(_db, user_id=1, kind="faction_request", body="Added.")
+    _push.queue(_db, user_id=1, kind="pairings_published", body="Up.")
+    queued = [i["kind"] for i in _db.info.get("pending_push", [])]
+    _db.info.pop("pending_push", None)
+check("only switchable kinds are pushed", queued == ["pairings_published"], queued)
 
 # ── subscribe / status / mute / unsubscribe ──
 check("subscribe", dee.post("/push/subscribe", json=sub_body("https://push.example/dee-phone"), headers=H).json()["subscribed"])

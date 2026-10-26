@@ -131,6 +131,9 @@ check("last_played is the latest session already held, not a future signup",
 check("usual faction is the most-played (system, faction)",
       (gail["usual_system"], gail["usual_faction"]) == (TOW, "Skaven"), gail)
 check("no faction signed up: no usual faction", rows["Dee"]["usual_faction"] is None, rows["Dee"])
+check("faction_by_system: the most-played faction in each system",
+      gail["faction_by_system"] == {TOW: "Skaven", KT: "Kommandos"}, gail["faction_by_system"])
+check("faction_by_system: empty when no faction signed up", rows["Dee"]["faction_by_system"] == {}, rows["Dee"])
 
 print()
 if FAILURES:

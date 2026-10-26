@@ -39,7 +39,7 @@ import storage
 from observability import capture
 from experience import counts_for_players, games_played, tier_for
 from levels import level_for
-from services import player_titles, set_player_titles
+from services import player_title_colors, player_titles, set_player_titles
 from week_logic import _DAY_NAME_TO_INT
 
 # Workflow dispatch lives in github_dispatch.py — shared with the auto-pairings
@@ -328,6 +328,7 @@ def admin_players(
             "id": p.id,
             "name": p.name,
             "titles": player_titles(p),
+            "title_colors": player_title_colors(p),
             "active": p.active,
             "league_visible": p.league_visible,
             # Whether a Discord account owns this row. The admin needs to see
@@ -489,6 +490,7 @@ def patch_player(
         "id": player.id,
         "name": player.name,
         "titles": player_titles(player),
+        "title_colors": player_title_colors(player),
         "active": player.active,
         "league_visible": player.league_visible,
         "claimed": player.user_id is not None,
@@ -614,6 +616,7 @@ def system_players(
             "linked": pid in account_by_player,
             "account_name": account_by_player.get(pid),
             "titles": player_titles(p),
+            "title_colors": player_title_colors(p),
             "active": p.active,
             "league_visible": p.league_visible,
             "weeks_signed_up": weeks_by_id.get(pid, 0),
@@ -633,6 +636,8 @@ class SystemTitlesBody(BaseModel):
     system: str
     player_id: int
     titles: list[str]
+    # Title -> #rrggbb, for titles given a colour. Omitted: colours kept.
+    colors: Optional[dict[str, str]] = None
 
 
 @router.post("/system-players/titles")
@@ -668,13 +673,14 @@ def set_system_player_titles(
     if any(len(t) > 80 for t in cleaned):
         raise HTTPException(status_code=422, detail="A title can be at most 80 characters.")
 
-    set_player_titles(player, cleaned)
+    set_player_titles(player, cleaned, body.colors)
     db.add(player)
     log_audit(db, user, "player.titles", "player", player.id,
               f"{player.name!r} in {body.system!r}: {cleaned}")
     db.commit()
     db.refresh(player)
-    return {"ok": True, "player_id": player.id, "titles": player_titles(player)}
+    return {"ok": True, "player_id": player.id, "titles": player_titles(player),
+            "title_colors": player_title_colors(player)}
 
 
 class SystemExperienceBody(BaseModel):

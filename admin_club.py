@@ -1212,6 +1212,10 @@ class ClubSystemCarouselBody(BaseModel):
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# A club night's blurb sits on its card on the Club page, which is only so
+# big. 250 fits the longest one in use (The Old World's, 211) with room.
+CAROUSEL_BLURB_MAX = 250
+
 
 @router.post("/club-systems/carousel")
 def update_carousel_card(
@@ -1236,6 +1240,9 @@ def update_carousel_card(
 
     if body.accent_color is not None and body.accent_color != "" and not _HEX_COLOR_RE.match(body.accent_color):
         raise HTTPException(status_code=422, detail="accent_color must be a hex colour like #c9a14a.")
+
+    if body.blurb and len(body.blurb.strip()) > CAROUSEL_BLURB_MAX:
+        raise HTTPException(status_code=422, detail=f"Keep the blurb to {CAROUSEL_BLURB_MAX} characters.")
 
     provided = body.model_fields_set
     if "blurb" in provided:

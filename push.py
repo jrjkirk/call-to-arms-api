@@ -43,12 +43,15 @@ VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:hello@calltoarms.app")
 
 # What a device can switch off, in the order the Account page lists them. The
 # kinds are notices.py's; the labels are what a player is choosing between.
+#
+# Only these are pushed: a kind with no switch here (a faction request's
+# outcome, which goes to an admin) stays an in-app notice, since a device
+# couldn't turn it off.
 KINDS = [
     ("pairings_published", "Pairings are up"),
-    ("opponent_dropped", "Your opponent drops out"),
-    ("game_found", "A late signup gives you a game"),
-    ("faction_request", "Your faction request is decided"),
-    ("pickup", "Pick-up games: a match, or a change to one"),
+    ("opponent_dropped", "Opponent dropped"),
+    ("game_found", "Change to pairings"),
+    ("pickup", "Pick-up games"),
 ]
 
 TITLES = {
@@ -81,7 +84,7 @@ def enabled() -> bool:
 
 def queue(db: Session, *, user_id: int, kind: str, body: str, url: str = "/", tag: Optional[str] = None) -> None:
     """Send this to the account's devices once `db`'s transaction commits."""
-    if not enabled():
+    if not enabled() or (kind != "test" and kind not in {k for k, _ in KINDS}):
         return
     db.info.setdefault("pending_push", []).append({
         "user_id": user_id,

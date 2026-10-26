@@ -4,6 +4,7 @@ Functions here compute things from data. They don't know about FastAPI,
 requests, or responses — just take a session and inputs, return outputs.
 """
 import json
+import re
 from typing import Iterable, Optional
 
 import httpx
@@ -217,23 +218,56 @@ def compute_achievements(
     return achievements
 
 
-def player_titles(player: Player) -> list[str]:
-    """Decode the JSON titles list, returning [] if not set or invalid."""
+_TITLE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _title_entries(player: Player) -> list[dict]:
+    """The stored titles as [{"name", "color"?}].
+
+    Stored as a JSON list whose items are either a plain name (every title
+    saved before titles had colours) or {"name", "color"}, so old rows read
+    unchanged and nothing needed migrating."""
     raw = getattr(player, "titles", None)
     if not raw:
         return []
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return [str(t) for t in parsed if str(t).strip()]
     except Exception:
-        pass
-    return []
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out = []
+    for item in parsed:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            color = item.get("color")
+            if name:
+                out.append({"name": name, **({"color": color} if isinstance(color, str) and _TITLE_COLOR_RE.match(color) else {})})
+        elif str(item).strip():
+            out.append({"name": str(item).strip()})
+    return out
 
 
-def set_player_titles(player: Player, titles: list[str]) -> None:
+def player_titles(player: Player) -> list[str]:
+    """The player's titles, by name, in order. [] if none or unreadable."""
+    return [e["name"] for e in _title_entries(player)]
+
+
+def player_title_colors(player: Player) -> dict[str, str]:
+    """The colour an admin gave each title, by name; uncoloured titles are absent."""
+    return {e["name"]: e["color"] for e in _title_entries(player) if "color" in e}
+
+
+def set_player_titles(player: Player, titles: list[str], colors: Optional[dict[str, str]] = None) -> None:
+    """Save titles in order. `colors` maps a title to a #rrggbb colour; when
+    it's None (a caller that only knows names, such as PATCH /players) each
+    surviving title keeps the colour it had."""
     cleaned = [t.strip() for t in titles if t and t.strip()]
-    player.titles = json.dumps(cleaned) if cleaned else None
+    keep = player_title_colors(player) if colors is None else {
+        k.strip(): v for k, v in colors.items() if isinstance(v, str) and _TITLE_COLOR_RE.match(v)
+    }
+    entries = [{"name": n, "color": keep[n]} if n in keep else n for n in cleaned]
+    player.titles = json.dumps(entries) if entries else None
 
 
 # Tooltip text for each achievement, shown in the UI. Deliberately system-

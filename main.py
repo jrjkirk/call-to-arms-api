@@ -34,6 +34,7 @@ from services import (
     build_elo_history,
     first_league_winner_id,
     compute_achievements,
+    player_title_colors,
     player_titles,
     ACHIEVEMENT_DESCRIPTIONS,
 )
@@ -530,6 +531,9 @@ def get_club(
             "address": club.address,
             "latitude": club.latitude,
             "longitude": club.longitude,
+            # The admin Club page loads its form from here and saves the region
+            # back with the rest; without it, every save cleared the region.
+            "region": club.region,
         },
         "systems": systems_out,
         "calendar": {
@@ -801,6 +805,13 @@ def list_players(user: User = Depends(require_user), club_id: int = Depends(acti
         counts = usual_counts.get(player.id)
         usual = max(counts, key=counts.get) if counts else (None, None)
         player_dict["usual_system"], player_dict["usual_faction"] = usual
+        # Their most-played faction in each system, for the list when it is
+        # filtered to one system (a faction only means something within one).
+        by_system: dict[str, tuple[str, int]] = {}
+        for (system, faction), n in (counts or {}).items():
+            if n > by_system.get(system, ("", 0))[1]:
+                by_system[system] = (faction, n)
+        player_dict["faction_by_system"] = {system: f for system, (f, _) in by_system.items()}
         result.append(player_dict)
     return result
 
@@ -1031,6 +1042,7 @@ def get_player(player_id: int, user: User = Depends(require_user), club_id: int 
         "club": {"name": club.name, "slug": club.slug} if club else None,
         "discord": discord_info,
         "titles": player_titles(player),
+        "title_colors": player_title_colors(player),
         "achievements": achievements_detailed,
         "signup_counts": sign_counts,
         "faction_usage": fac_usage,
