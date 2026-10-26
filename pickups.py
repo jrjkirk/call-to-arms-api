@@ -77,9 +77,10 @@ def _when(start: datetime, end: Optional[datetime] = None) -> str:
 
 
 def _where(db: Session, r: PickupRequest) -> str:
+    # "at the club", not the club's name: a club's full name ran long enough
+    # to squeeze the day and time on Home, and every reader is at that club.
     if r.venue == "club":
-        club = db.get(Club, r.club_id)
-        return f"at {club.name}" if club else "at the club"
+        return "at the club"
     if r.venue == "other" and r.venue_text:
         return f"at {r.venue_text}"
     return "place to be agreed"

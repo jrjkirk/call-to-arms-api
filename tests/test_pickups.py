@@ -173,6 +173,17 @@ back = mine(partner_id)[0]
 check("calling off a confirmed game puts the other back in the pool", back["status"] in ("open", "proposed"), back)
 check("and it's posted as off", any("Pick-up game off" in p for p in POSTS))
 
+# Where a game is, as players read it: "at the club" rather than the club's
+# full name (which squeezed the day and time on Home); "place to be agreed"
+# when nobody named a place.
+with Session(database.engine) as db:
+    def req(venue, text=None):
+        return PickupRequest(club_id=1, system="x", player_id=1, player_name="x", window_start=datetime(2026, 1, 1),
+                             window_end=datetime(2026, 1, 1), venue=venue, venue_text=text)
+    check("club venue reads 'at the club'", pickups._where(db, req("club")) == "at the club", pickups._where(db, req("club")))
+    check("named place reads 'at <place>'", pickups._where(db, req("other", "Waylands")) == "at Waylands")
+    check("no place reads 'place to be agreed'", pickups._where(db, req("tbc")) == "place to be agreed")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILED")
